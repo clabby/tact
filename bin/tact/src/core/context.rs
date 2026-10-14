@@ -1,7 +1,7 @@
 //! Content-free context diagnostics projected from transcript telemetry.
 
 use crate::core::transcript::{CompactionFinished, ContextObserved, LocalKind, TranscriptRecord};
-use nanocodex::{
+use nanocode::{
     agent::events::AgentEventKind,
     oai::{
         self,
@@ -970,7 +970,7 @@ mod tests {
     use crate::core::transcript::{
         CompactionFinished, LocalEvent, TranscriptRecord, TurnId, UserSteered, UserSubmitted,
     };
-    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use nanocode::agent::events::{AgentEvent, AgentEventKind};
     use serde_json::{
         Value, json,
         value::{RawValue, to_raw_value},
@@ -1085,7 +1085,7 @@ mod tests {
         assert_eq!(
             diagnostics,
             ContextDiagnostics {
-                model_window_tokens: nanocodex::oai::CONTEXT_WINDOW_TOKENS,
+                model_window_tokens: nanocode::oai::CONTEXT_WINDOW_TOKENS,
                 auto_compact_token_limit: Some(200_000),
                 active_tokens: Some(420),
                 usage: Some(TokenUsage {

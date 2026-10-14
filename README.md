@@ -5,7 +5,7 @@
 [![Crates.io MSRV](https://img.shields.io/crates/msrv/tact?style=for-the-badge)](https://crates.io/crates/tact)
 [![Crates.io Version](https://img.shields.io/crates/v/tact?style=for-the-badge)](https://crates.io/crates/tact)
 
-Tact is a coding agent for your terminal, built on [Nanocodex](https://github.com/gakonst/nanocodex).
+Tact is a coding agent for your terminal, built on [Nanocodex](https://github.com/gakonst/nanocode).
 It runs OpenAI's GPT-6 models out of the box and can also drive Anthropic's Claude models. Alongside
 the terminal UI, every Tact process serves a web interface you can open from a browser or your phone,
 with a built-in code review panel. Agents can delegate work to subagents, keep a small long-term
@@ -349,7 +349,7 @@ Esc to cancel.
 | Model | ID | Default effort |
 | --- | --- | --- |
 | `luna` | `gpt-6-luna` | medium |
-| `sol` | `gpt-6.1-sol` | low |
+| `sol` | `gpt-6.1-sol` | medium |
 | `astra` | `gpt-6-astra` | low |
 | `haiku-5.5` | `claude-haiku-5-5` | medium |
 | `sonnet-5.5` | `claude-sonnet-5-5` | high |
@@ -360,8 +360,10 @@ Claude models need Claude enabled (see below). Every model supports effort from 
 and a configured `agent.thinking` overrides the defaults. Resumed sessions keep the model they started
 with. Sessions on retired model IDs can't be resumed.
 
-Astra, Sol, and Luna also support **Pro** mode, independent of effort. Open `/effort`, press `p` to toggle
-Pro, and press Enter to save. Pro applies to new sessions.
+Tact supports a **Pro** mode, independent of effort, on models whose Nanocodex catalog offers it.
+Open `/effort`, press `p` to toggle Pro, and press Enter to save. Pro applies to new sessions. The
+pinned Nanocodex release offers Pro on no model, so a configured Pro preference runs in standard
+mode.
 
 ### Speed
 

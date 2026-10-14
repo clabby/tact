@@ -17,9 +17,9 @@ use crate::{
     },
     tui::event_loop::worker_events::WorkerLink,
 };
-use nanocodex::{HarnessModel as Model, Model as CodexModel};
+use nanocode::Model as CodexModel;
 use std::{fs, sync::Arc};
-use tact_subagents::{AgentId, AgentStatus, AgentUpdate, Subagents};
+use tact_subagents::{AgentId, AgentStatus, AgentUpdate, HarnessModel as Model, Subagents};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 

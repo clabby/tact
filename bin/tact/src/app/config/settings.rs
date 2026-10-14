@@ -1,8 +1,9 @@
 //! Model preferences that front-ends can change at runtime and persist to the configuration file.
 
 use clap::ValueEnum;
-use nanocodex::{HarnessModel as Model, Thinking, oai::transport::ResponsesTransport};
+use nanocode::{Thinking, oai::transport::ResponsesTransport};
 use serde::{Deserialize, Serialize};
+use tact_subagents::HarnessModel as Model;
 pub(crate) use tact_subagents::Speed;
 
 /// The number of concurrently live subagents allowed when neither the CLI nor the file sets one.
@@ -83,7 +84,7 @@ impl ReasoningMode {
     }
 }
 
-impl From<ReasoningMode> for nanocodex::ReasoningMode {
+impl From<ReasoningMode> for nanocode::ReasoningMode {
     fn from(mode: ReasoningMode) -> Self {
         match mode {
             ReasoningMode::Standard => Self::Standard,

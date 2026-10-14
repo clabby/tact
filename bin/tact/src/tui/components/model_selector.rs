@@ -18,7 +18,6 @@ use crate::app::{
     theme::Theme,
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use nanocodex::HarnessModel as Model;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -26,6 +25,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{List, ListItem, ListState, Paragraph},
 };
+use tact_subagents::HarnessModel as Model;
 use unicode_segmentation::UnicodeSegmentation;
 
 const KEY_BINDINGS: [(&str, &str); 3] = [("↑↓", "move"), ("enter", "apply"), ("esc", "cancel")];
@@ -243,7 +243,7 @@ impl Component for ModelSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nanocodex::{ClaudeModel, Model as CodexModel};
+    use nanocode::{ClaudeModel, Model as CodexModel};
     use ratatui::{Terminal, backend::TestBackend, style::Color};
 
     const SOL: Model = Model::Codex(CodexModel::Sol);

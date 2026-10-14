@@ -9,7 +9,7 @@ use crate::{
         transcript::TranscriptRecord,
     },
 };
-use nanocodex::{
+use nanocode::{
     Tool,
     tools::contract::{
         ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, async_trait,
@@ -786,7 +786,7 @@ mod tests {
             transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId, UserSubmitted},
         },
     };
-    use nanocodex::{
+    use nanocode::{
         Tool,
         agent::events::{AgentEvent, AgentEventKind},
         tools::contract::{ToolContext, ToolInput, ToolOutputBody},

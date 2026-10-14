@@ -5,7 +5,7 @@ use crate::app::{
     error::{AuthError, AuthResult, SecretError},
     secret::SecretString,
 };
-use nanocodex::oai::auth::{
+use nanocode::oai::auth::{
     ChatGptAuthStatus, ChatGptLogin, OpenAiAuth, load_chatgpt_auth, logout_chatgpt,
     resolve_chatgpt_auth_status,
 };
@@ -296,7 +296,7 @@ mod tests {
         error::{AuthError, SecretError},
         secret::SecretString,
     };
-    use nanocodex::oai::auth::OpenAiAuthMode;
+    use nanocode::oai::auth::OpenAiAuthMode;
     use std::{cell::Cell, fs, sync::Arc};
     use tempfile::tempdir;
 

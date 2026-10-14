@@ -22,7 +22,7 @@ use crate::{
     tui::components::AppEvent,
 };
 use crossterm::event::EventStream;
-use nanocodex::NanocodexError;
+use nanocode::NanocodexError;
 use std::time::Instant;
 use tact_subagents::Subagents;
 
@@ -250,8 +250,8 @@ fn apply_subagent_config(subagents: &Subagents, config: &Config) {
 mod tests {
     use super::apply_subagent_config;
     use crate::app::config::{Config, ConfigOverrides, Speed};
-    use nanocodex::{
-        HarnessModel as Model, Model as CodexModel, NanocodexError, ReasoningMode, Thinking, Tools,
+    use nanocode::{
+        Model as CodexModel, NanocodexError, ReasoningMode, Thinking, Tools,
         tools::{
             contract::{ToolContext, ToolInput},
             runtime::ToolRuntime,
@@ -264,6 +264,7 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         },
     };
+    use tact_subagents::HarnessModel as Model;
 
     #[tokio::test]
     async fn config_reload_updates_claude_admission_in_existing_registry() {
@@ -298,7 +299,7 @@ mod tests {
             .install_tools(Tools::builder())
             .build()
             .unwrap();
-        let runtime = ToolRuntime::new_with_tools(directory.path(), None, None, &tools);
+        let runtime = ToolRuntime::new_with_tools(directory.path(), Vec::new(), &tools);
         for (enabled, expected_calls) in [(false, 0), (true, 1), (false, 1)] {
             fs::write(&path, format!("[claude]\nenabled = {enabled}\n")).unwrap();
             config = config.reload().unwrap().into_parts().0;

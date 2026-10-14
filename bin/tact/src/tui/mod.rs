@@ -45,8 +45,8 @@ use crate::app::{
     config::Config,
     error::{Result, RuntimeError},
 };
-use nanocodex::HarnessModel as Model;
 use std::io::{self, IsTerminal};
+use tact_subagents::HarnessModel as Model;
 use tokio_util::sync::CancellationToken;
 
 /// The session the terminal opens with.

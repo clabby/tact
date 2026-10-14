@@ -22,18 +22,21 @@ use crate::app::{
     error::{AuthError, ConfigError, SecretError},
     secret::SecretString,
 };
-use nanocodex::{
-    AgentEvents, HarnessModel as Model, Model as CodexModel, Nanocodex, NanocodexError, OpenAi,
-    Tools,
-    agent::session::SessionId,
+use nanocode::{
+    Agent, AgentEvents, Model as CodexModel, NanocodexError, OpenAi, Tools,
     claude::ClaudeClient,
-    oai::{OpenAiError, session::SessionIdError},
+    oai::{
+        OpenAiError,
+        session::{SessionId, SessionIdError},
+    },
     tools::ToolsBuildError,
 };
 use reqwest::header::{HeaderMap, HeaderValue, InvalidHeaderValue};
 use std::{num::NonZeroU32, path::PathBuf, sync::Arc};
 use tact_memory::{MemoryTool, MutationAuthorizer, SelectedMemoryStore};
-use tact_subagents::{AgentContext, AuthorityError, RootAgentAuthority, WeakSubagents};
+use tact_subagents::{
+    AgentContext, AuthorityError, HarnessModel as Model, RootAgentAuthority, WeakSubagents,
+};
 use thiserror::Error;
 
 const RESPONSE_MAX_ATTEMPTS: NonZeroU32 = NonZeroU32::new(2_000).unwrap();
@@ -95,7 +98,7 @@ impl AgentRecipe {
     pub(super) fn build(
         self: &Arc<Self>,
         spec: AgentSpec<'_>,
-    ) -> nanocodex::agent::Result<(Nanocodex, AgentEvents)> {
+    ) -> nanocode::agent::Result<(Agent, AgentEvents)> {
         if let Some(snapshot) = &spec.snapshot {
             snapshot.validate_identity(spec.context.model, spec.session_id)?;
         }
@@ -109,7 +112,7 @@ impl AgentRecipe {
         &self,
         model: CodexModel,
         spec: AgentSpec<'_>,
-    ) -> nanocodex::agent::Result<(Nanocodex, AgentEvents)> {
+    ) -> nanocode::agent::Result<(Agent, AgentEvents)> {
         let agent = self.config.agent();
         let auth = self.config.auth().load().map_err(AgentBuildError::from)?;
         let mut openai = OpenAi::builder(auth)
@@ -123,7 +126,12 @@ impl AgentRecipe {
         }
         let openai = openai.build().map_err(AgentBuildError::from)?;
         let tools = self.tools_factory();
-        let mut builder = Nanocodex::builder(openai)
+        let mut builder = Agent::builder(openai);
+        // A checkpoint restores its recorded settings, so Tact's selection is applied after it.
+        if let Some(snapshot) = spec.snapshot {
+            builder = builder.resume(snapshot.into_checkpoint())?;
+        }
+        builder = builder
             .model(model)
             .workspace(&self.workspace)
             .thinking(spec.context.thinking)
@@ -136,9 +144,6 @@ impl AgentRecipe {
         if let Some(id) = spec.session_id {
             builder = builder.session_id(id.parse::<SessionId>().map_err(AgentBuildError::from)?);
         }
-        if let Some(snapshot) = spec.snapshot {
-            builder = builder.resume(snapshot.into_codex()?);
-        }
         builder
             .service_tier(spec.speed.for_model(spec.context.model).into())
             .build()
@@ -147,7 +152,7 @@ impl AgentRecipe {
     fn build_claude(
         self: &Arc<Self>,
         spec: AgentSpec<'_>,
-    ) -> nanocodex::agent::Result<(Nanocodex, AgentEvents)> {
+    ) -> nanocode::agent::Result<(Agent, AgentEvents)> {
         let client = self.claude_client(|| SecretString::from_environment("ANTHROPIC_API_KEY"))?;
         let runtime =
             claude::tool_runtime(&self.config, &self.workspace, &self.tools_factory()()?)?;
@@ -248,7 +253,7 @@ impl AgentRecipe {
 #[derive(Clone)]
 struct RootMemoryAuthorizer(RootAgentAuthority);
 
-#[nanocodex::tools::contract::async_trait]
+#[nanocode::tools::contract::async_trait]
 impl MutationAuthorizer for RootMemoryAuthorizer {
     type Error = AuthorityError;
 
@@ -265,9 +270,9 @@ mod tests {
         error::{AuthError, ConfigError},
         secret::SecretString,
     };
-    use nanocodex::{HarnessModel as Model, Model as CodexModel, Tools};
+    use nanocode::{Model as CodexModel, Tools};
     use std::{cell::Cell, fs, path::Path};
-    use tact_subagents::Subagents;
+    use tact_subagents::{HarnessModel as Model, Subagents};
     use tempfile::tempdir;
 
     fn recipe(config_path: &Path, contents: &str) -> AgentRecipe {

@@ -1,6 +1,6 @@
 //! Errors from selecting and using provider credentials.
 
-use nanocodex::oai::auth::ChatGptAuthError;
+use nanocode::oai::auth::ChatGptAuthError;
 use std::{io, path::PathBuf};
 use thiserror::Error;
 

@@ -10,13 +10,13 @@ use super::ConfiguredAgent;
 #[cfg(feature = "harbor-evals")]
 use super::orchestration::OrchestrationRecorder;
 use crate::app::{config::Config, error::Result, hook};
-use nanocodex::{HarnessModel as Model, NanocodexError, TurnControl};
+use nanocode::{NanocodexError, TurnControl};
 #[cfg(feature = "harbor-evals")]
 use serde::Serialize;
 #[cfg(feature = "harbor-evals")]
 use std::path::PathBuf;
 use std::{io, io::Write, mem};
-use tact_subagents::ScopedAgentUpdate;
+use tact_subagents::{HarnessModel as Model, ScopedAgentUpdate};
 use tokio::sync::mpsc;
 #[cfg(not(feature = "harbor-evals"))]
 use tokio::task::JoinHandle;
@@ -95,8 +95,8 @@ impl SubagentUpdateSink {
 struct SettledTurn {
     events: Result<()>,
     cancellation: Cancellation,
-    turn: nanocodex::agent::Result<()>,
-    shutdown: nanocodex::agent::Result<()>,
+    turn: nanocode::agent::Result<()>,
+    shutdown: nanocode::agent::Result<()>,
 }
 
 impl SettledTurn {
@@ -225,7 +225,7 @@ impl ConfiguredAgent {
     }
 
     /// Stops the agent and drains its remaining events.
-    pub(super) async fn shutdown(mut self) -> nanocodex::agent::Result<()> {
+    pub(super) async fn shutdown(mut self) -> nanocode::agent::Result<()> {
         let result = self.agent.shutdown().await;
         drop(self.agent);
         while self.events.recv().await.is_some() {}

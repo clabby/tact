@@ -4,6 +4,7 @@
 //! with respect to concurrent tool calls.
 
 use crate::{
+    HarnessModel as Model,
     error::{RegistryEntry, SubagentError},
     harness::HarnessHandle,
     message::MessageThreads,
@@ -12,7 +13,7 @@ use crate::{
     turn::TurnSlot,
 };
 use jsonschema::Validator;
-use nanocodex::{HarnessModel as Model, ReasoningMode};
+use nanocode::ReasoningMode;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
