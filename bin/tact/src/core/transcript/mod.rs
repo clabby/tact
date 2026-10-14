@@ -40,4 +40,8 @@ pub(crate) enum TranscriptError {
     WriterFailed { path: PathBuf, reason: String },
     #[error("the transcript writer task stopped unexpectedly: {0}")]
     WriterTask(#[source] tokio::task::JoinError),
+    #[error(transparent)]
+    Session(#[from] Box<crate::core::session::SessionError>),
+    #[error(transparent)]
+    Catalog(#[from] crate::core::catalog::CatalogError),
 }

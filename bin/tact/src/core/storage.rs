@@ -469,6 +469,43 @@ impl SessionStorage {
             .transpose()
     }
 
+    /// Every session that still holds a database resume state, from before the session catalog.
+    pub(crate) fn sessions_with_resume_state(&self) -> Result<Vec<StoredSession>, StorageError> {
+        self.query_sessions(
+            "SELECT s.session_id, s.started_at_ms, s.model, s.effort, s.reasoning_mode,\n\
+                    s.workspace, s.preview, s.updated_at_ms, s.parent_session_id\n\
+             FROM sessions s INNER JOIN resume_states r ON r.session_id = s.session_id",
+            [],
+        )
+    }
+
+    pub(crate) fn session(&self, session_id: &str) -> Result<Option<StoredSession>, StorageError> {
+        Ok(self
+            .query_sessions(
+                "SELECT s.session_id, s.started_at_ms, s.model, s.effort, s.reasoning_mode,\n\
+                        s.workspace, s.preview, s.updated_at_ms, s.parent_session_id\n\
+                 FROM sessions s WHERE s.session_id = ?1",
+                [session_id],
+            )?
+            .pop())
+    }
+
+    fn query_sessions(
+        &self,
+        sql: &str,
+        parameters: impl rusqlite::Params,
+    ) -> Result<Vec<StoredSession>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare(sql)
+            .map_err(|source| query(&self.path, source))?;
+        let rows = statement
+            .query_map(parameters, decode_session)
+            .map_err(|source| query(&self.path, source))?;
+        rows.map(|row| row.map_err(|source| query(&self.path, source)))
+            .collect()
+    }
+
     pub(crate) fn list_sessions(
         &self,
         workspace: &Path,

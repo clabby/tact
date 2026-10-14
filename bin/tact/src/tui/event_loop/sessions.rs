@@ -369,7 +369,7 @@ mod tests {
     use tact_subagents::HarnessModel as Model;
 
     #[test]
-    #[ignore = "Nanocodex 56d35fb offers no model with Pro reasoning"]
+    #[ignore = "the pinned Nanocodex offers no model with Pro reasoning"]
     fn fresh_openai_sessions_keep_the_pro_reasoning_preference() {
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("config.toml");

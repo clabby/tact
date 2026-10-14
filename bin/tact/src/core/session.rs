@@ -7,6 +7,7 @@ use crate::{
         model,
     },
     core::{
+        catalog::{self, CatalogError},
         storage::{SessionStorage, StorageError, StoredSession, database_path},
         transcript::{LocalKind, SessionStarted, TerminalStopReason, TranscriptRecord},
     },
@@ -367,12 +368,28 @@ pub(crate) struct ResumeState {
 }
 
 impl ResumeState {
-    fn new(snapshot: AgentSnapshot, instructions: String, skills_catalog_present: bool) -> Self {
+    pub(crate) fn new(
+        snapshot: AgentSnapshot,
+        instructions: String,
+        skills_catalog_present: bool,
+    ) -> Self {
         Self {
             snapshot,
             instructions,
             skills_catalog_present,
         }
+    }
+
+    pub(crate) const fn snapshot(&self) -> &AgentSnapshot {
+        &self.snapshot
+    }
+
+    pub(crate) fn instructions(&self) -> &str {
+        &self.instructions
+    }
+
+    pub(crate) const fn skills_catalog_present(&self) -> bool {
+        self.skills_catalog_present
     }
 
     pub(crate) fn into_parts(self) -> (AgentSnapshot, String, Option<bool>) {
@@ -388,6 +405,8 @@ impl ResumeState {
 pub(crate) enum SessionError {
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error(transparent)]
+    Catalog(#[from] CatalogError),
     #[error("no resumable state exists for session {session_id}")]
     MissingCheckpoint { session_id: String },
     #[error("session {session_id} cannot be resumed: {reason}")]
@@ -496,6 +515,48 @@ impl SessionLock {
     }
 }
 
+/// Decodes a transcript-database resume state, upgrading version 2 checkpoints.
+pub(crate) fn decode_resume_state(
+    session_id: &str,
+    encoded: &[u8],
+) -> Result<ResumeState, SessionError> {
+    #[derive(Deserialize)]
+    struct StoredFormat {
+        format_version: u32,
+    }
+    let format = serde_json::from_slice::<StoredFormat>(encoded).map_err(StorageError::from)?;
+    match format.format_version {
+            RESUME_STATE_FORMAT_VERSION => {
+                let stored = serde_json::from_slice::<StoredResumeState>(encoded)
+                    .map_err(StorageError::from)?;
+                Ok(ResumeState::new(
+                    stored.snapshot,
+                    stored.instructions,
+                    stored.skills_catalog_present,
+                ))
+            }
+            LEGACY_RESUME_STATE_FORMAT_VERSION => {
+                let stored = serde_json::from_slice::<LegacyResumeState>(encoded)
+                    .map_err(StorageError::from)?;
+                let snapshot = stored.snapshot.upgrade(session_id).map_err(|source| {
+                    SessionError::LegacyCheckpoint {
+                        session_id: session_id.to_owned(),
+                        source,
+                    }
+                })?;
+                Ok(ResumeState::new(
+                    snapshot,
+                    stored.instructions,
+                    stored.skills_catalog_present,
+                ))
+            }
+            found => Err(SessionError::IncompatibleCheckpoint {
+                session_id: session_id.to_owned(),
+                found,
+            }),
+        }
+}
+
 pub(crate) fn encode_checkpoint(
     snapshot: &AgentSnapshot,
     instructions: &str,
@@ -557,43 +618,15 @@ impl SessionStore {
                 reason,
             });
         }
+        if let Some(state) = catalog::load(&self.config_path, session_id)? {
+            return Ok(state);
+        }
         let encoded = storage.load_resume_state(session_id)?.ok_or_else(missing)?;
-        #[derive(Deserialize)]
-        struct StoredFormat {
-            format_version: u32,
-        }
-        let format =
-            serde_json::from_slice::<StoredFormat>(&encoded).map_err(StorageError::from)?;
-        match format.format_version {
-            RESUME_STATE_FORMAT_VERSION => {
-                let stored = serde_json::from_slice::<StoredResumeState>(&encoded)
-                    .map_err(StorageError::from)?;
-                Ok(ResumeState::new(
-                    stored.snapshot,
-                    stored.instructions,
-                    stored.skills_catalog_present,
-                ))
-            }
-            LEGACY_RESUME_STATE_FORMAT_VERSION => {
-                let stored = serde_json::from_slice::<LegacyResumeState>(&encoded)
-                    .map_err(StorageError::from)?;
-                let snapshot = stored.snapshot.upgrade(session_id).map_err(|source| {
-                    SessionError::LegacyCheckpoint {
-                        session_id: session_id.to_owned(),
-                        source,
-                    }
-                })?;
-                Ok(ResumeState::new(
-                    snapshot,
-                    stored.instructions,
-                    stored.skills_catalog_present,
-                ))
-            }
-            found => Err(SessionError::IncompatibleCheckpoint {
-                session_id: session_id.to_owned(),
-                found,
-            }),
-        }
+        let state = decode_resume_state(session_id, &encoded)?;
+        let session = storage.session(session_id)?.ok_or_else(missing)?;
+        // A session resumed before the bulk import moves into the catalog now.
+        catalog::import_legacy_session(&self.config_path, &session, &state)?;
+        Ok(state)
     }
 
     #[cfg(test)]
@@ -619,9 +652,34 @@ impl SessionStore {
         let Some(storage) = self.open()? else {
             return Ok(Vec::new());
         };
+        let resumable = if resumable_only {
+            catalog::import_legacy(&self.config_path, |session_id, encoded| {
+                decode_resume_state(session_id, encoded).ok()
+            })?;
+            let mut ids = catalog::session_ids(&self.config_path)?;
+            // Database states the import could not upgrade stay listed so opening one reports why.
+            ids.extend(
+                storage
+                    .sessions_with_resume_state()?
+                    .into_iter()
+                    .map(|session| session.session_id),
+            );
+            Some(ids)
+        } else {
+            None
+        };
         let mut sessions = Vec::new();
         for workspace in workspaces {
-            sessions.extend(storage.list_sessions(workspace, resumable_only)?);
+            sessions.extend(
+                storage
+                    .list_sessions(workspace, false)?
+                    .into_iter()
+                    .filter(|session| {
+                        resumable
+                            .as_ref()
+                            .is_none_or(|ids| ids.contains(&session.session_id))
+                    }),
+            );
         }
         sessions.sort_by(|left, right| {
             right
