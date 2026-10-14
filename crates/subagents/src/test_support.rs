@@ -1,8 +1,8 @@
 //! Fake model transport for tests that need real child harnesses.
 
 use futures_util::future::Either;
-use nanocodex::{
-    Nanocodex, OpenAi, Thinking,
+use nanocode::{
+    Agent, OpenAi, Thinking,
     oai::{
         ResponseError,
         tower::{
@@ -24,7 +24,7 @@ use tower::Service;
 #[derive(Clone)]
 pub(crate) struct PendingService {
     pub(crate) called: Arc<Notify>,
-    pub(crate) prompts: Option<mpsc::UnboundedSender<(nanocodex::Model, Thinking, String)>>,
+    pub(crate) prompts: Option<mpsc::UnboundedSender<(nanocode::Model, Thinking, String)>>,
 }
 
 impl Service<ResponsesAttempt> for PendingService {
@@ -61,7 +61,7 @@ impl Service<ResponsesAttempt> for PendingService {
     }
 }
 
-pub(crate) fn pending_agent(called: Arc<Notify>) -> (Nanocodex, nanocodex::AgentEvents) {
+pub(crate) fn pending_agent(called: Arc<Notify>) -> (Agent, nanocode::AgentEvents) {
     let openai = OpenAi::builder("test-key")
         .service(move || PendingService {
             called: Arc::clone(&called),
@@ -69,13 +69,13 @@ pub(crate) fn pending_agent(called: Arc<Notify>) -> (Nanocodex, nanocodex::Agent
         })
         .build()
         .unwrap();
-    Nanocodex::builder(openai).build().unwrap()
+    Agent::builder(openai).build().unwrap()
 }
 
 /// Builds a session whose turns never finish and whose latest user prompt is sent to `prompts`.
 pub(crate) fn recording_agent(
-    prompts: mpsc::UnboundedSender<(nanocodex::Model, Thinking, String)>,
-) -> (Nanocodex, nanocodex::AgentEvents) {
+    prompts: mpsc::UnboundedSender<(nanocode::Model, Thinking, String)>,
+) -> (Agent, nanocode::AgentEvents) {
     let openai = OpenAi::builder("test-key")
         .service(move || PendingService {
             called: Arc::new(Notify::new()),
@@ -83,5 +83,5 @@ pub(crate) fn recording_agent(
         })
         .build()
         .unwrap();
-    Nanocodex::builder(openai).build().unwrap()
+    Agent::builder(openai).build().unwrap()
 }

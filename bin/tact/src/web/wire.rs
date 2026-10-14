@@ -757,7 +757,7 @@ mod tests {
         },
         web::hub::now_unix_ms,
     };
-    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use nanocode::agent::events::{AgentEvent, AgentEventKind};
     use serde_json::{Value, json, value::to_raw_value};
     use std::sync::Arc;
 

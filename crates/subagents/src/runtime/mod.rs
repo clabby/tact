@@ -14,7 +14,7 @@ mod policy;
 mod state;
 
 use crate::{
-    Speed,
+    HarnessModel as Model, Speed,
     capacity::{Capacity, TurnCapacity},
     error::{SpawnError, SubagentError},
     harness::{self},
@@ -26,9 +26,7 @@ use crate::{
     turn::TurnSlot,
 };
 pub(crate) use messaging::DelegationChange;
-use nanocodex::{
-    AgentEvents, HarnessModel as Model, Nanocodex, NanocodexError, ReasoningMode, Thinking,
-};
+use nanocode::{Agent, AgentEvents, NanocodexError, ReasoningMode, Thinking};
 use policy::{reasoning_mode_exceeds, thinking_rank};
 use serde_json::Value;
 pub(crate) use state::{AgentDirectoryEntry, AgentSummary};
@@ -61,7 +59,7 @@ struct AgentFactory {
 }
 
 type AgentBuilder =
-    dyn Fn(AgentContext, Speed) -> Result<(Nanocodex, AgentEvents), NanocodexError> + Send + Sync;
+    dyn Fn(AgentContext, Speed) -> Result<(Agent, AgentEvents), NanocodexError> + Send + Sync;
 
 #[derive(Clone, Copy)]
 struct AgentSettings {
@@ -120,7 +118,7 @@ impl Registry {
         factory: F,
     ) -> Result<(), NanocodexError>
     where
-        F: Fn(AgentContext, Speed) -> Result<(Nanocodex, AgentEvents), NanocodexError>
+        F: Fn(AgentContext, Speed) -> Result<(Agent, AgentEvents), NanocodexError>
             + Send
             + Sync
             + 'static,
@@ -147,7 +145,7 @@ impl Registry {
         model: Model,
         thinking: Thinking,
         reasoning_mode: ReasoningMode,
-    ) -> Result<(Nanocodex, AgentEvents, AgentContext), SubagentError> {
+    ) -> Result<(Agent, AgentEvents, AgentContext), SubagentError> {
         if !self.models().contains(&model) {
             return Err(SpawnError::ModelNotOffered(model).into());
         }
@@ -270,7 +268,7 @@ impl Registry {
         self: &Arc<Self>,
         root_session_id: String,
         descriptor: AgentDescriptor,
-        agent: Nanocodex,
+        agent: Agent,
         event_task: JoinHandle<()>,
         contract: OutputContract,
     ) -> Result<(), SubagentError> {
@@ -379,7 +377,7 @@ impl Registry {
         &self,
         root_session_id: &str,
         id: AgentId,
-        result: nanocodex::agent::Result<nanocodex::TurnResult>,
+        result: nanocode::agent::Result<nanocode::TurnResult>,
     ) {
         let status = {
             let mut state = self.state.lock().await;
@@ -569,7 +567,7 @@ impl Subagents {
         factory: F,
     ) -> Result<(), NanocodexError>
     where
-        F: Fn(AgentContext, Speed) -> Result<(Nanocodex, AgentEvents), NanocodexError>
+        F: Fn(AgentContext, Speed) -> Result<(Agent, AgentEvents), NanocodexError>
             + Send
             + Sync
             + 'static,

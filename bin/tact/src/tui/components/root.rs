@@ -64,7 +64,7 @@ use input::{
     is_queue_shortcut, is_skill_picker_trigger, is_skill_query_character,
     mention_edit_continues_query,
 };
-use nanocodex::{HarnessModel as Model, agent::events::AgentEventKind};
+use nanocode::agent::events::AgentEventKind;
 use ratatui::{
     Frame,
     layout::{Position, Rect},
@@ -79,7 +79,9 @@ use std::{
     time::{Duration, Instant},
 };
 use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
-use tact_subagents::{AgentId, AgentStatus, AgentUpdate, MessageSender, SubagentRoster};
+use tact_subagents::{
+    AgentId, AgentStatus, AgentUpdate, HarnessModel as Model, MessageSender, SubagentRoster,
+};
 use turns::{TurnEnd, TurnLedger};
 
 const KEY_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);

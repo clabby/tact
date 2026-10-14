@@ -11,10 +11,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{any, post},
 };
-use nanocodex::{
-    AgentEvents, ClaudeModel, HarnessModel, Model as CodexModel, Nanocodex, NanocodexError, OpenAi,
-    ReasoningMode, Thinking, Tools,
-    agent::{ChildSnapshot, SpawnOptions},
+use nanocode::{
+    Agent, AgentEvents, ClaudeModel, Model as CodexModel, NanocodexError, OpenAi, ReasoningMode,
+    Thinking, Tools,
+    agent::SpawnOptions,
     oai::{
         ResponseError,
         events::AgentEventKind,
@@ -36,7 +36,7 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use tact_subagents::{AgentContext, AgentStatus, AgentUpdate, Subagents};
+use tact_subagents::{AgentContext, AgentStatus, AgentUpdate, HarnessModel, Subagents};
 use tempfile::tempdir;
 use tokio::{net::TcpListener, sync::Notify, time::timeout};
 use tower::Service;
@@ -242,7 +242,7 @@ fn build_agent(
     recipe: &Arc<AgentRecipe>,
     codex: Script,
     speed: Speed,
-) -> Result<(Nanocodex, AgentEvents), NanocodexError> {
+) -> Result<(Agent, AgentEvents), NanocodexError> {
     let AgentContext {
         model,
         thinking,
@@ -256,7 +256,7 @@ fn build_agent(
             .service(move || service.clone())
             .build()
             .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
-        Nanocodex::builder(openai)
+        Agent::builder(openai)
             .model(model)
             .thinking(thinking)
             .reasoning_mode(reasoning_mode)
@@ -591,7 +591,7 @@ for (let attempt = 0; attempt < 3; attempt++) {{
             HarnessModel::Codex(CodexModel::Luna),
         ] {
             assert!(
-                root.spawn_with(SpawnOptions::new().harness_model(model))
+                root.spawn_with(SpawnOptions::new().harness_model(model.selection()))
                     .await
                     .is_err()
             );
@@ -699,13 +699,7 @@ for (let attempt = 0; attempt < 3; attempt++) {{
             .unwrap();
         let (clean, mut clean_events) = root.spawn().await.unwrap();
         assert_ne!(root.session_id(), clean.session_id());
-        assert!(matches!(
-            clean.runtime_snapshot().await.unwrap(),
-            ChildSnapshot::Native {
-                thinking: Thinking::High,
-                ..
-            }
-        ));
+        assert_eq!(clean.checkpoint().await.unwrap().thinking(), Thinking::High);
         assert_ne!(events.request_id(), clean_events.request_id());
         let result = timeout(Duration::from_secs(10), async {
             clean
@@ -780,10 +774,7 @@ for (let attempt = 0; attempt < 3; attempt++) {{
         snapshots.push(clean.clone());
     }
     for agent in snapshots {
-        let serialized = match agent.runtime_snapshot().await.unwrap() {
-            ChildSnapshot::Codex(snapshot) => serde_json::to_string(&snapshot).unwrap(),
-            ChildSnapshot::Native { payload, .. } => payload,
-        };
+        let serialized = agent.checkpoint().await.unwrap().to_json().unwrap();
         assert_no_credentials(&serialized);
     }
     if let Some(clean) = clean {

@@ -2,11 +2,9 @@
 
 use crate::app::config::{ClaudeConfig, ReasoningEffort, ReasoningMode, Speed};
 use clap::ValueEnum;
-use nanocodex::{
-    ClaudeModel, HarnessModel as Model, Model as CodexModel, ReasoningMode as NativeReasoningMode,
-};
+use nanocode::{ClaudeModel, Model as CodexModel, ReasoningMode as NativeReasoningMode};
 use serde::{Deserialize, Deserializer, Serialize, de};
-use tact_subagents::{AgentContext, SUPPORTED_MODELS};
+use tact_subagents::{AgentContext, HarnessModel as Model, SUPPORTED_MODELS};
 
 /// The models `claude` enables, in picker order: every OpenAI model, each Claude model when
 /// Claude is enabled, and access-gated Claude models only with a Glasswing key.
@@ -117,8 +115,8 @@ pub(crate) const fn name(model: Model) -> &'static str {
 mod tests {
     use super::{ModelCatalog, Provider, available, parse};
     use crate::app::config::{ClaudeConfig, ReasoningMode, Speed};
-    use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
-    use tact_subagents::SUPPORTED_MODELS;
+    use nanocode::{ClaudeModel, Model as CodexModel};
+    use tact_subagents::{HarnessModel as Model, SUPPORTED_MODELS};
 
     #[test]
     fn catalog_lists_the_enabled_roster_with_its_setting_couplings() {
@@ -145,10 +143,7 @@ mod tests {
             .iter()
             .find(|model| model.id == Model::Codex(CodexModel::Astra).as_str())
             .unwrap();
-        assert_eq!(
-            astra.reasoning_modes,
-            [ReasoningMode::Standard, ReasoningMode::Pro]
-        );
+        assert_eq!(astra.reasoning_modes, [ReasoningMode::Standard]);
         assert_eq!(astra.effective_speeds, Speed::ALL);
         assert!(!astra.effort_fixed_after_start);
 

@@ -1,5 +1,5 @@
 use crate::app::{auth::ClaudeApiKey, config::Config, secret::SecretString};
-use nanocodex::{
+use nanocode::{
     ClaudeModel, Model, OpenAi, Thinking,
     claude::{ClaudeClient, ContentBlock, Message, MessagesRequest, Role},
     oai::transport::ResponsesTransport,

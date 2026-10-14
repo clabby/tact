@@ -232,7 +232,7 @@ mod tests {
         },
         tui::components::{AppNode, RootNode},
     };
-    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use nanocode::agent::events::{AgentEvent, AgentEventKind};
     use serde_json::{json, value::to_raw_value};
     use std::{fs, path::Path, sync::Arc};
     use tact_memory::MemoryKey;

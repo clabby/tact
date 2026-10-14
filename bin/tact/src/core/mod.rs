@@ -45,16 +45,13 @@ use crate::{
     },
 };
 pub(crate) use instructions::{IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT};
-use nanocodex::{
-    AgentEvents, HarnessModel as Model, Nanocodex, NanocodexError,
-    ReasoningMode as NativeReasoningMode, Tools,
-};
+use nanocode::{Agent, AgentEvents, NanocodexError, ReasoningMode as NativeReasoningMode, Tools};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
 use tact_memory::{RemoteMemoryClient, RemoteToken, SelectedMemoryStore};
-use tact_subagents::{AgentContext, ScopedAgentUpdate, Subagents};
+use tact_subagents::{AgentContext, HarnessModel as Model, ScopedAgentUpdate, Subagents};
 use tokio::sync::mpsc;
 
 /// A root agent built from the configuration, with everything a front-end needs to drive it.
@@ -64,7 +61,7 @@ use tokio::sync::mpsc;
 /// and forwards `subagent_updates` from the session tree that `subagent_control` manages.
 pub(crate) struct ConfiguredAgent {
     pub(crate) workspace: PathBuf,
-    pub(crate) agent: Nanocodex,
+    pub(crate) agent: Agent,
     pub(crate) context: AgentContext,
     pub(crate) events: AgentEvents,
     pub(crate) instructions: Arc<str>,
@@ -193,10 +190,10 @@ fn base_tools(config: &Config) -> Result<Tools> {
 }
 
 pub(crate) async fn set_speed(
-    agent: &Nanocodex,
+    agent: &Agent,
     model: Model,
     speed: Speed,
-) -> nanocodex::agent::Result<()> {
+) -> nanocode::agent::Result<()> {
     let speed = speed.for_model(model);
     match model {
         Model::Codex(_) => agent.set_service_tier(speed.into()).await,
@@ -242,8 +239,8 @@ mod tests {
         config::{Config, ConfigOverrides},
         error::{Error, RuntimeError},
     };
-    use nanocodex::{
-        HarnessModel as Model, Model as CodexModel, Nanocodex, OpenAi, ReasoningMode,
+    use nanocode::{
+        Agent, Model as CodexModel, OpenAi, ReasoningMode,
         oai::{
             ResponseError,
             tower::{ResponsesAttempt, ResponsesServiceConfig, ResponsesServiceResponse},
@@ -258,6 +255,7 @@ mod tests {
         time::Duration,
     };
     use tact_memory::{MemoryError, MemorySource, MemoryStore};
+    use tact_subagents::HarnessModel as Model;
     use tempfile::tempdir;
     use tokio::{sync::Notify, time::timeout};
     use tokio_util::sync::CancellationToken;
@@ -381,14 +379,14 @@ mod tests {
             })
             .build()
             .unwrap();
-        let (agent, events) = Nanocodex::builder(openai).build().unwrap();
+        let (agent, events) = Agent::builder(openai).build().unwrap();
         let (subagent_control, subagent_updates) = tact_subagents::Subagents::new(32);
         let configured = ConfiguredAgent {
             workspace: std::env::current_dir().unwrap(),
             agent,
             context: tact_subagents::AgentContext {
                 model: Model::Codex(CodexModel::Astra),
-                thinking: nanocodex::Thinking::Low,
+                thinking: nanocode::Thinking::Low,
                 reasoning_mode: ReasoningMode::Standard,
             },
             events,

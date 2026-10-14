@@ -2,8 +2,8 @@
 
 Claude is opt-in through `[claude] enabled = true`. Tact uses Nanocodex's native Claude client,
 model and effort types, and Code Mode tool runtime.
-The temporary dependency uses the fork branch `cl/claude-integration`;
-`Cargo.lock` pins [the combined runtime fixes](https://github.com/clabby/nanocodex/commit/c0a030f24686ff82851997ac61eba0d03e177b07).
+Claude support is built into the `nanocode` crate; `Cargo.toml` pins
+[gakonst/nanocode@56d35fb](https://github.com/gakonst/nanocode/commit/56d35fb0c9313026845fee7ccd5be245e1aec4b3).
 
 ## Authentication
 

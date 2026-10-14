@@ -1,12 +1,13 @@
 use crate::{app::config::Config, core::session::AgentSnapshot};
 use futures_util::StreamExt;
-use nanocodex::{
-    AgentEvents, Claude, HarnessModel as Model, Nanocodex, NanocodexError, Thinking, Tools,
+use nanocode::{
+    Agent, AgentEvents, Claude, NanocodexError, Thinking, Tools,
     agent::{AgentHandle, Result},
     claude::{
         ClaudeClient, ClaudeToolInvocation, ClaudeToolReply, ClaudeTools,
         ToolDefinition as NativeDefinition, ToolResultContent,
     },
+    codex_tools,
     oai::{
         __private::EventSink,
         events::{AgentEvent, AgentEventKind, AgentEventPublisher},
@@ -16,7 +17,7 @@ use nanocodex::{
         ToolDefinition, ToolInput,
         contract::{DEFAULT_TOOL_OUTPUT_TOKENS, ToolOutputBody, ToolOutputContent},
         embedded::{CodeModeObserver, CodeModeUpdate, OwnedToolContext},
-        runtime::{ImageGenerationConfig, ToolRuntime, WebSearchConfig},
+        runtime::ToolRuntime,
     },
 };
 use serde_json::{Value, json, value::to_raw_value};
@@ -25,7 +26,7 @@ use std::{
     path::Path,
     sync::{Arc, Mutex, OnceLock},
 };
-use tact_subagents::AgentContext;
+use tact_subagents::{AgentContext, HarnessModel as Model};
 use tokio::sync::Notify;
 
 mod lifecycle;
@@ -39,47 +40,33 @@ pub(super) fn tool_runtime(
     workspace: &Path,
     tools: &Tools,
 ) -> Result<ToolRuntime> {
-    let (web_search, image_generation) = if tools.web_search_enabled()
-        || tools.image_generation_enabled()
-    {
-        let auth = config.auth().load().map_err(|error| invalid(format!(
-            "enabled web search and image generation tools require OpenAI authentication: {error}; configure OpenAI authentication or disable agent.web_search and agent.image_generation for an Anthropic-only setup"
-        )))?;
-        let tool_config = ResponsesServiceConfig {
-            api_base_url: config
-                .agent()
-                .api_base_url()
-                .unwrap_or_else(|| auth.mode().default_api_base_url())
-                .to_owned(),
-            auth,
-            ..ResponsesServiceConfig::default()
-        };
-        (
-            tools.web_search_enabled().then(|| WebSearchConfig {
-                endpoint: tool_config.search_endpoint(),
-                auth: tool_config.auth.clone(),
-            }),
-            tools
-                .image_generation_enabled()
-                .then(|| ImageGenerationConfig {
-                    api_base_url: tool_config.api_base_url,
-                    auth: tool_config.auth,
-                    save_root: workspace.to_path_buf(),
-                }),
-        )
-    } else {
-        (None, None)
+    // The Codex runtime owns the workspace tools (shell, patch, plan) that Claude agents reach
+    // through code mode, so every Claude agent gets its runtime from it. OpenAI credentials are
+    // read only when a tool that calls the OpenAI API is enabled.
+    if !tools.web_search_enabled() && !tools.image_generation_enabled() {
+        return Ok(codex_tools::tool_runtime(
+            workspace,
+            &ResponsesServiceConfig::default(),
+            tools,
+        ));
+    }
+    let auth = config.auth().load().map_err(|error| invalid(format!(
+        "enabled web search and image generation tools require OpenAI authentication: {error}; configure OpenAI authentication or disable agent.web_search and agent.image_generation for an Anthropic-only setup"
+    )))?;
+    let tool_config = ResponsesServiceConfig {
+        api_base_url: config
+            .agent()
+            .api_base_url()
+            .unwrap_or_else(|| auth.mode().default_api_base_url())
+            .to_owned(),
+        auth,
+        ..ResponsesServiceConfig::default()
     };
-    Ok(ToolRuntime::new_with_tools(
-        workspace,
-        web_search,
-        image_generation,
-        tools,
-    ))
+    Ok(codex_tools::tool_runtime(workspace, &tool_config, tools))
 }
 
 pub(super) type CleanAgentFactory =
-    Arc<dyn Fn(AgentContext, bool) -> Result<(Nanocodex, AgentEvents)> + Send + Sync>;
+    Arc<dyn Fn(AgentContext, bool) -> Result<(Agent, AgentEvents)> + Send + Sync>;
 
 #[derive(Default)]
 pub(super) struct ClaudeSession<'a> {
@@ -96,7 +83,7 @@ pub(super) fn build_client(
     session: ClaudeSession<'_>,
     runtime: ToolRuntime,
     spawn: Option<CleanAgentFactory>,
-) -> Result<(Nanocodex, AgentEvents)> {
+) -> Result<(Agent, AgentEvents)> {
     let ClaudeSession {
         session_id,
         snapshot,
@@ -119,7 +106,7 @@ pub(super) fn build_client(
     });
     // The native recipe retains this factory; it must not retain the bridge's owner handle.
     let callbacks = Arc::downgrade(&bridge);
-    let mut builder = Nanocodex::builder(Claude::new(client, model.as_str()))
+    let mut builder = Agent::builder(Claude::new(client, model.as_str()))
         .system(instructions.as_ref())
         .workspace(workspace.to_string_lossy())
         .tools_factory(move |agent| {
@@ -135,12 +122,13 @@ pub(super) fn build_client(
         builder = builder.session_id(id);
     }
     if let Some(snapshot) = snapshot {
-        builder = builder.restore_runtime(snapshot.into_claude()?)?;
+        builder = builder.resume(snapshot.into_checkpoint())?;
     }
-    // Adaptive reasoning and generated code share the output-token budget.
+    // Adaptive reasoning and generated code share the output-token budget. Fast mode is a
+    // preference that the native builder rejects on models without a fast tier.
     builder = builder
         .thinking(thinking)?
-        .fast_mode(fast_mode)
+        .fast_mode(fast_mode && Model::Claude(model).supports_fast_mode())
         .cache_one_hour()
         .max_tokens(128_000);
     let (native, native_events) = builder.build()?;
@@ -512,15 +500,16 @@ mod tests {
         app::config::Speed,
         core::{prompt::Submission, set_speed},
     };
+    use async_trait::async_trait;
     use axum::{
         Json, Router,
         extract::State,
         http::{HeaderMap, header},
         routing::post,
     };
-    use nanocodex::{
+    use nanocode::{
         ClaudeModel, ReasoningMode, Tool,
-        tools::contract::{ToolContext, ToolOutput, ToolResult, async_trait},
+        tools::contract::{ToolContext, ToolOutput, ToolResult},
     };
     use std::{
         collections::VecDeque,
@@ -631,11 +620,11 @@ mod tests {
     fn final_text() -> ResponseFactory {
         Box::new(|_| Box::pin(async { json!({"type":"text","text":"finished"}) }))
     }
-    fn agent(server: &Server, workspace: &Path, tools: Tools) -> (Nanocodex, AgentEvents) {
+    fn agent(server: &Server, workspace: &Path, tools: Tools) -> (Agent, AgentEvents) {
         build_client(
             ClaudeClient::new(reqwest::Client::new(), &server.endpoint, "fixture-key"),
             AgentContext {
-                model: Model::Claude(nanocodex::ClaudeModel::Opus55),
+                model: Model::Claude(nanocode::ClaudeModel::Opus55),
                 thinking: Thinking::Medium,
                 reasoning_mode: ReasoningMode::Standard,
             },
@@ -646,12 +635,12 @@ mod tests {
                 snapshot: None,
                 ..ClaudeSession::default()
             },
-            ToolRuntime::new_with_tools(workspace, None, None, &tools),
+            codex_tools::tool_runtime(workspace, &ResponsesServiceConfig::default(), &tools),
             None,
         )
         .unwrap()
     }
-    fn tools() -> nanocodex::tools::ToolsBuilder {
+    fn tools() -> nanocode::tools::ToolsBuilder {
         Tools::builder().web_search(false).image_generation(false)
     }
 
@@ -751,7 +740,7 @@ mod tests {
         model: ClaudeModel,
         session: ClaudeSession<'_>,
         spawn: Option<CleanAgentFactory>,
-    ) -> (Nanocodex, AgentEvents) {
+    ) -> (Agent, AgentEvents) {
         let selected = tools().build().unwrap();
         build_client(
             ClaudeClient::new(reqwest::Client::new(), endpoint, "fixture-key"),
@@ -763,13 +752,13 @@ mod tests {
             workspace,
             Arc::from("test instructions"),
             session,
-            ToolRuntime::new_with_tools(workspace, None, None, &selected),
+            ToolRuntime::new_with_tools(workspace, Vec::new(), &selected),
             spawn,
         )
         .unwrap()
     }
 
-    async fn assert_fast_request(server: &mut Server, agent: &Nanocodex, expected: bool) -> Value {
+    async fn assert_fast_request(server: &mut Server, agent: &Agent, expected: bool) -> Value {
         timeout(
             Duration::from_secs(10),
             agent.prompt("fast fixture").await.unwrap(),
@@ -824,8 +813,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_fast_request(&mut server, &original, false).await;
-            let snapshot =
-                AgentSnapshot::from_claude(original.runtime_snapshot().await.unwrap()).unwrap();
+            let snapshot = AgentSnapshot::from(original.checkpoint().await.unwrap());
             original.shutdown().await.unwrap();
             let (restored, _) = fast_agent(
                 &server.endpoint,
@@ -840,8 +828,7 @@ mod tests {
             );
             let resumed = assert_fast_request(&mut server, &restored, supported).await;
             assert!(resumed["messages"].as_array().unwrap().len() > 1);
-            let snapshot =
-                AgentSnapshot::from_claude(restored.runtime_snapshot().await.unwrap()).unwrap();
+            let snapshot = AgentSnapshot::from(restored.checkpoint().await.unwrap());
             restored.shutdown().await.unwrap();
             let (standard, _) = fast_agent(
                 &server.endpoint,
@@ -969,11 +956,11 @@ mod tests {
         let server = server(vec![]).await;
         let workspace = tempfile::tempdir().unwrap();
         for model in [
-            nanocodex::ClaudeModel::Haiku55,
-            nanocodex::ClaudeModel::Sonnet55,
-            nanocodex::ClaudeModel::Opus55,
-            nanocodex::ClaudeModel::Fable51,
-            nanocodex::ClaudeModel::Mythos51,
+            nanocode::ClaudeModel::Haiku55,
+            nanocode::ClaudeModel::Sonnet55,
+            nanocode::ClaudeModel::Opus55,
+            nanocode::ClaudeModel::Fable51,
+            nanocode::ClaudeModel::Mythos51,
         ] {
             let selected = tools().build().unwrap();
             let (agent, _) = build_client(
@@ -986,12 +973,11 @@ mod tests {
                 workspace.path(),
                 Arc::from("test instructions"),
                 ClaudeSession::default(),
-                ToolRuntime::new_with_tools(workspace.path(), None, None, &selected),
+                ToolRuntime::new_with_tools(workspace.path(), Vec::new(), &selected),
                 None,
             )
             .unwrap();
-            let snapshot =
-                AgentSnapshot::from_claude(agent.runtime_snapshot().await.unwrap()).unwrap();
+            let snapshot = AgentSnapshot::from(agent.checkpoint().await.unwrap());
             let budget = snapshot.context_budget().unwrap();
             assert_eq!(budget.window_tokens, 1_000_000, "{model:?}");
             assert_eq!(budget.active_tokens, 0);
@@ -1020,22 +1006,22 @@ mod tests {
         .await;
         let workspace = tempfile::tempdir().unwrap();
         let client = ClaudeClient::new(reqwest::Client::new(), &server.endpoint, "fixture-key");
-        let (seed, _) = Nanocodex::builder(Claude::new(
+        let (seed, _) = Agent::builder(Claude::new(
             client.clone(),
-            nanocodex::ClaudeModel::Opus55.as_str(),
+            nanocode::ClaudeModel::Opus55.as_str(),
         ))
         .session_id("compaction-fixture")
         .context_window_tokens(1_000)
         .build()
         .unwrap();
-        let snapshot = AgentSnapshot::from_claude(seed.runtime_snapshot().await.unwrap()).unwrap();
+        let snapshot = AgentSnapshot::from(seed.checkpoint().await.unwrap());
         seed.shutdown().await.unwrap();
         let (tx, mut calls) = mpsc::unbounded_channel();
         let selected = tools().tool(Inspect(tx)).build().unwrap();
         let (agent, _) = build_client(
             client,
             AgentContext {
-                model: Model::Claude(nanocodex::ClaudeModel::Opus55),
+                model: Model::Claude(nanocode::ClaudeModel::Opus55),
                 thinking: Thinking::Medium,
                 reasoning_mode: ReasoningMode::Standard,
             },
@@ -1046,7 +1032,7 @@ mod tests {
                 snapshot: Some(snapshot),
                 ..ClaudeSession::default()
             },
-            ToolRuntime::new_with_tools(workspace.path(), None, None, &selected),
+            ToolRuntime::new_with_tools(workspace.path(), Vec::new(), &selected),
             None,
         )
         .unwrap();
@@ -1110,7 +1096,7 @@ mod tests {
                     .any(|block| block["type"] == "tool_result"
                         && block["tool_use_id"] == "after-compact"))
         );
-        let snapshot = AgentSnapshot::from_claude(agent.runtime_snapshot().await.unwrap()).unwrap();
+        let snapshot = AgentSnapshot::from(agent.checkpoint().await.unwrap());
         let budget = snapshot.context_budget().unwrap();
         assert_eq!(budget.window_tokens, 1_000);
         assert_eq!(budget.active_tokens, 15 + 25 + 35 + 3);
@@ -1153,7 +1139,7 @@ mod tests {
             tools().tool(Inspect(tx)).build().unwrap(),
         );
         let turn = agent
-            .prompt(nanocodex::oai::Prompt::new("exercise tools").with_instruction_revision(17))
+            .prompt(nanocode::oai::Prompt::new("exercise tools").with_instruction_revision(17))
             .await
             .unwrap();
         let id = turn.id().to_owned();
@@ -1163,7 +1149,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.final_message(), "finished");
         let (model, session, turn, call, revision) = calls.recv().await.unwrap();
-        assert_eq!(model, nanocodex::ClaudeModel::Opus55.as_str());
+        assert_eq!(model, nanocode::ClaudeModel::Opus55.as_str());
         assert_eq!(session, agent.session_id());
         assert_eq!(turn, id);
         assert!(call.starts_with("call-exec/"));
@@ -1220,11 +1206,12 @@ mod tests {
     async fn restore_applies_effort_and_caching_after_native_checkpoint() {
         let mut server = server(vec![final_text(), final_text()]).await;
         let workspace = tempfile::tempdir().unwrap();
-        let (original, _) = Nanocodex::builder(Claude::new(
+        let (original, _) = Agent::builder(Claude::new(
             ClaudeClient::new(reqwest::Client::new(), &server.endpoint, "fixture-key"),
-            nanocodex::ClaudeModel::Opus55.as_str(),
+            nanocode::ClaudeModel::Opus55.as_str(),
         ))
         .system("test instructions")
+        .workspace(workspace.path().to_string_lossy())
         .thinking(Thinking::Medium)
         .unwrap()
         .build()
@@ -1236,14 +1223,13 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        let snapshot =
-            AgentSnapshot::from_claude(original.runtime_snapshot().await.unwrap()).unwrap();
+        let snapshot = AgentSnapshot::from(original.checkpoint().await.unwrap());
         original.shutdown().await.unwrap();
         let selected = tools().build().unwrap();
         let (restored, _) = build_client(
             ClaudeClient::new(reqwest::Client::new(), &server.endpoint, "fixture-key"),
             AgentContext {
-                model: Model::Claude(nanocodex::ClaudeModel::Opus55),
+                model: Model::Claude(nanocode::ClaudeModel::Opus55),
                 thinking: Thinking::High,
                 reasoning_mode: ReasoningMode::Standard,
             },
@@ -1254,7 +1240,7 @@ mod tests {
                 snapshot: Some(snapshot),
                 ..ClaudeSession::default()
             },
-            ToolRuntime::new_with_tools(workspace.path(), None, None, &selected),
+            ToolRuntime::new_with_tools(workspace.path(), Vec::new(), &selected),
             None,
         )
         .unwrap();
@@ -1267,7 +1253,10 @@ mod tests {
         .unwrap();
         let first = server.requests.recv().await.unwrap();
         assert_eq!(first["output_config"]["effort"], "medium");
-        assert!(first.get("cache_control").is_none());
+        assert_ne!(
+            first.get("cache_control"),
+            Some(&json!({"type":"ephemeral","ttl":"1h"}))
+        );
         let resumed = server.requests.recv().await.unwrap();
         assert_eq!(resumed["output_config"]["effort"], "high");
         assert_eq!(resumed["max_tokens"], 128_000);
@@ -1275,7 +1264,7 @@ mod tests {
             resumed["cache_control"],
             json!({"type":"ephemeral","ttl":"1h"})
         );
-        assert_eq!(resumed["system"][0]["text"], first["system"]);
+        assert_eq!(resumed["system"][0]["text"], first["system"][0]["text"]);
         assert_eq!(
             resumed["system"][0]["cache_control"],
             json!({"type":"ephemeral","ttl":"1h"})
@@ -1304,7 +1293,7 @@ mod tests {
     #[tokio::test]
     async fn context_usage_updates_before_code_mode_turn_finishes() {
         use crate::core::transcript::TranscriptRecord;
-        use nanocodex::oai::events::ModelCallCompleted;
+        use nanocode::oai::events::ModelCallCompleted;
 
         let server = server(vec![
             tool(

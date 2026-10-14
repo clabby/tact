@@ -7,11 +7,10 @@
 //! target's running turn, or starts a turn with the message when the target is idle. Sessions
 //! live in other processes are visible through `SessionLock` but cannot be messaged.
 
-use nanocodex::{
+use async_trait::async_trait;
+use nanocode::{
     Tool,
-    tools::contract::{
-        ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, async_trait,
-    },
+    tools::contract::{ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

@@ -25,12 +25,13 @@ use crate::{
     },
     tui::components::{AppEvent, AppNode, DraftReset},
 };
-use nanocodex::{AgentEvents, HarnessModel as Model};
+use nanocode::AgentEvents;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tact_subagents::HarnessModel as Model;
 use tokio::{
     sync::oneshot,
     task::{JoinError, JoinSet},

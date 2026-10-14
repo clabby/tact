@@ -268,7 +268,7 @@ mod tests {
             },
         },
     };
-    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use nanocode::agent::events::{AgentEvent, AgentEventKind};
     use rusqlite::Connection;
     use serde_json::{json, value::to_raw_value};
     use std::{path::Path, sync::Arc};

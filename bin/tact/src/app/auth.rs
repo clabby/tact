@@ -5,7 +5,7 @@ use crate::app::{
     error::{AuthError, AuthResult, SecretError},
     secret::SecretString,
 };
-use nanocodex::{
+use nanocode::{
     claude::{ClaudeAuthFuture, ClaudeAuthProvider, ClaudeAuthUnavailable},
     oai::auth::{
         ChatGptAuthStatus, ChatGptLogin, OpenAiAuth, load_chatgpt_auth, logout_chatgpt,
@@ -65,15 +65,21 @@ impl GlasswingCredentials {
             .0
             .read()
             .expect("Glasswing credential lock should not be poisoned");
-        let Glasswing { key, workspace_id } = current.as_ref().ok_or(ClaudeAuthUnavailable)?;
-        validate_claude_api_key(key).map_err(|_| ClaudeAuthUnavailable)?;
-        let mut value =
-            HeaderValue::from_str(key.expose_secret()).map_err(|_| ClaudeAuthUnavailable)?;
+        let Glasswing { key, workspace_id } = current.as_ref().ok_or_else(|| {
+            ClaudeAuthUnavailable::new("Glasswing credentials are not configured")
+        })?;
+        validate_claude_api_key(key)
+            .map_err(|_| ClaudeAuthUnavailable::new("Glasswing API key is invalid"))?;
+        let mut value = HeaderValue::from_str(key.expose_secret()).map_err(|_| {
+            ClaudeAuthUnavailable::new("Glasswing API key is not a valid header value")
+        })?;
         value.set_sensitive(true);
         let mut headers = HeaderMap::new();
         headers.insert("x-api-key", value);
         if let Some(workspace_id) = workspace_id {
-            let value = HeaderValue::from_str(workspace_id).map_err(|_| ClaudeAuthUnavailable)?;
+            let value = HeaderValue::from_str(workspace_id).map_err(|_| {
+                ClaudeAuthUnavailable::new("Glasswing workspace id is not a valid header value")
+            })?;
             headers.insert("anthropic-workspace-id", value);
         }
         Ok(headers)
@@ -332,7 +338,7 @@ mod tests {
         error::{AuthError, SecretError},
         secret::SecretString,
     };
-    use nanocodex::oai::auth::OpenAiAuthMode;
+    use nanocode::oai::auth::OpenAiAuthMode;
     use std::{cell::Cell, fs, sync::Arc};
     use tempfile::tempdir;
 

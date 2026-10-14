@@ -9,13 +9,11 @@
 
 use super::*;
 use futures_util::{FutureExt, Stream};
-use nanocodex::{
-    AgentSessionContext, HarnessFamily, HarnessModel, PromptRequest, ReasoningMode, TurnControl,
-    TurnResult,
-    agent::{ChildSnapshot, SpawnOptions},
-    oai::Prompt,
+use nanocode::{
+    AgentSessionContext, Capabilities, ForkRequest, HarnessFamily, ModelSelection, PromptRequest,
+    ReasoningMode, SessionCheckpoint, TurnControl, TurnResult, agent::SpawnOptions, oai::Prompt,
 };
-use nanocodex_agent::backend::{
+use nanocode_agent::backend::{
     BackendFuture, BackendPrompt, BackendPromptRoute, BackendRuntime, BackendTurn, BackendTurnKey,
     LifecycleBackend,
 };
@@ -25,15 +23,16 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     task::Poll,
 };
+use tact_subagents::HarnessModel;
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use tokio_util::sync::CancellationToken;
 
 pub(super) fn wrap(
-    native: Nanocodex,
+    native: Agent,
     bridge: Arc<Bridge>,
     spawn: Option<CleanAgentFactory>,
     fast_mode: bool,
-) -> (Nanocodex, AgentEvents) {
+) -> (Agent, AgentEvents) {
     let (runtime, events) = BackendRuntime::new(native.session_id());
     let state = Arc::new(State {
         native,
@@ -54,7 +53,7 @@ struct Active {
     done: CancellationToken,
 }
 struct State {
-    native: Nanocodex,
+    native: Agent,
     bridge: Arc<Bridge>,
     spawn: Option<CleanAgentFactory>,
     // Clean recipes inherit the last successfully applied fast-mode setting.
@@ -131,7 +130,7 @@ impl State {
         })
     }
 
-    async fn drive(&self, mut turn: nanocodex::Turn) -> (Result<TurnResult>, Option<AgentEvent>) {
+    async fn drive(&self, mut turn: nanocode::Turn) -> (Result<TurnResult>, Option<AgentEvent>) {
         let mut terminal = None;
         let mut event_error = None;
         let result = loop {
@@ -253,6 +252,15 @@ impl LifecycleBackend for Driver {
     fn harness_family(&self) -> HarnessFamily {
         HarnessFamily::Claude
     }
+    fn capabilities(&self) -> Capabilities {
+        // The wrapper routes prompts through Tact's turn queue and does not fork the native agent.
+        let mut capabilities = self.0.native.capabilities();
+        capabilities.fork = false;
+        capabilities.fork_at = false;
+        capabilities.side_conversation = false;
+        capabilities.side_question = false;
+        capabilities
+    }
     fn submit(&self, request: BackendPrompt) -> BackendFuture<Result<BackendTurn>> {
         let state = self.0.clone();
         Box::pin(async move {
@@ -296,14 +304,7 @@ impl LifecycleBackend for Driver {
             result
         })
     }
-    fn set_model(&self, model: nanocodex::Model) -> BackendFuture<Result<()>> {
-        let state = self.0.clone();
-        Box::pin(async move {
-            let _idle = state.idle().await?;
-            state.native.set_model(model).await
-        })
-    }
-    fn set_harness_model(&self, model: HarnessModel) -> BackendFuture<Result<()>> {
+    fn set_harness_model(&self, model: ModelSelection) -> BackendFuture<Result<()>> {
         let state = self.0.clone();
         Box::pin(async move {
             let _idle = state.idle().await?;
@@ -350,14 +351,14 @@ impl LifecycleBackend for Driver {
             state.native.context().await
         })
     }
-    fn runtime_snapshot(&self) -> BackendFuture<Result<ChildSnapshot>> {
+    fn checkpoint(&self) -> BackendFuture<Result<SessionCheckpoint>> {
         let state = self.0.clone();
         Box::pin(async move {
             let _idle = state.idle().await?;
-            state.native.runtime_snapshot().await
+            state.native.checkpoint().await
         })
     }
-    fn spawn(&self, options: SpawnOptions) -> BackendFuture<Result<(Nanocodex, AgentEvents)>> {
+    fn spawn(&self, options: SpawnOptions) -> BackendFuture<Result<(Agent, AgentEvents)>> {
         let state = self.0.clone();
         Box::pin(async move {
             let _admission = state.active.lock().await;
@@ -373,16 +374,16 @@ impl LifecycleBackend for Driver {
                 .owner
                 .get()
                 .ok_or_else(|| invalid("Claude tool owner is unavailable"))?;
-            let (model, thinking) = owner.settings().await?;
-            let options = options.resolve(model, thinking)?;
-            if options.selected_harness_model() != Some(model) {
+            let (selection, thinking) = owner.settings().await?;
+            let options = options.resolve(selection.clone(), thinking)?;
+            if options.selected_harness_model() != Some(selection.clone()) {
                 return Err(invalid(
                     "Claude clean spawn cannot change models; use spawn_agent",
                 ));
             }
             spawn(
                 AgentContext {
-                    model,
+                    model: HarnessModel::try_from(&selection).map_err(invalid)?,
                     thinking: options.selected_thinking().unwrap_or(thinking),
                     reasoning_mode: ReasoningMode::Standard,
                 },
@@ -390,17 +391,14 @@ impl LifecycleBackend for Driver {
             )
         })
     }
-    fn fork(
-        &self,
-        _completed: Option<TurnResult>,
-    ) -> BackendFuture<Result<(Nanocodex, AgentEvents)>> {
+    fn fork(&self, _request: ForkRequest) -> BackendFuture<Result<(Agent, AgentEvents)>> {
         Box::pin(async { Err(invalid("native Claude does not support forks")) })
     }
     fn flush(&self) -> BackendFuture<Result<()>> {
         let state = self.0.clone();
         Box::pin(async move {
             let _idle = state.idle().await?;
-            state.native.flush_rollout().await
+            state.native.flush().await
         })
     }
     fn shutdown(&self) -> BackendFuture<Result<()>> {

@@ -3,8 +3,8 @@
 //! Values that may hold credentials never appear in these errors: parser errors drop their
 //! retained input, and rejected URLs are reported by kind only.
 
-use nanocodex::HarnessModel as Model;
 use std::{io, path::PathBuf};
+use tact_subagents::HarnessModel as Model;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

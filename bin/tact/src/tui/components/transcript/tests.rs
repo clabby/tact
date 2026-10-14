@@ -16,8 +16,8 @@ use crate::{
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use nanocodex::{
-    HarnessModel as Model, Model as CodexModel,
+use nanocode::{
+    Model as CodexModel,
     agent::events::{AgentEvent, AgentEventKind},
 };
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, layout::Position};
@@ -29,7 +29,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tact_subagents::{AgentMessageUpdate, MessageSender};
+use tact_subagents::{AgentMessageUpdate, HarnessModel as Model, MessageSender};
 
 const FIVE_LINE_PROMPT: &str = "prompt one\nprompt two\nprompt three\nprompt four\nprompt five";
 

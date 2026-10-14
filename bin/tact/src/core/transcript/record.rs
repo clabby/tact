@@ -13,7 +13,7 @@ use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
     core::context::ContextBudget,
 };
-use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+use nanocode::agent::events::{AgentEvent, AgentEventKind};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{self, Visitor, value::StrDeserializer},
@@ -589,7 +589,7 @@ mod tests {
         TurnId, UserSteered, UserSubmitted, WorkerTurnFinished,
     };
     use crate::app::config::Speed;
-    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use nanocode::agent::events::{AgentEvent, AgentEventKind};
     use serde_json::{Value, json, value::to_raw_value};
     use std::sync::Arc;
 

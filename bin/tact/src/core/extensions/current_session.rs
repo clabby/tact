@@ -1,10 +1,9 @@
 //! Access to the identity of the agent's active session.
 
-use nanocodex::{
+use async_trait::async_trait;
+use nanocode::{
     Tool,
-    tools::contract::{
-        ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, async_trait,
-    },
+    tools::contract::{ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult},
 };
 use serde_json::json;
 
@@ -51,7 +50,7 @@ struct EmptyInput {}
 #[cfg(test)]
 mod tests {
     use super::CurrentSessionTool;
-    use nanocodex::{
+    use nanocode::{
         Tool,
         tools::contract::{ToolContext, ToolInput, ToolOutputBody},
     };

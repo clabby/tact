@@ -77,7 +77,10 @@ use crate::{
 };
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+use nanocode::{
+    Lineage, ModelSelection, SessionCheckpoint, Thinking,
+    agent::events::{AgentEvent, AgentEventKind},
+};
 use ratatui::{Terminal, backend::TestBackend};
 use serde_json::{json, value::to_raw_value};
 use std::{
@@ -405,7 +408,7 @@ fn write_session(config_path: &Path, session_id: &str, workspace: &Path, event_c
             session_id: session_id.to_owned(),
             parent_session_id: None,
             parent_sequence: None,
-            model: nanocodex::oai::MODEL.to_owned(),
+            model: nanocode::oai::MODEL.to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
             speed: Speed::Standard,
@@ -443,7 +446,7 @@ fn write_mixed_session_segment(config_path: &Path, session_id: &str, workspace: 
             session_id: session_id.to_owned(),
             parent_session_id: None,
             parent_sequence: None,
-            model: nanocodex::oai::MODEL.to_owned(),
+            model: nanocode::oai::MODEL.to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
             speed: Speed::Standard,
@@ -460,9 +463,9 @@ fn write_mixed_session_segment(config_path: &Path, session_id: &str, workspace: 
 }
 
 fn save_benchmark_checkpoint(config_path: &Path, session_id: &str) {
-    let snapshot = serde_json::from_value(json!({
+    let conversation = json!({
         "version": 1,
-        "model": nanocodex::oai::MODEL,
+        "model": nanocode::oai::MODEL,
         "lineage_id": session_id,
         "prompt_cache_key": "benchmark-cache-key",
         "workspace": "/benchmark-workspace",
@@ -480,10 +483,19 @@ fn save_benchmark_checkpoint(config_path: &Path, session_id: &str) {
             "role": "user",
             "content": [{"type": "input_text", "text": "benchmark"}]
         }]
-    }))
-    .unwrap();
+    });
+    let snapshot = SessionCheckpoint::native(
+        session_id,
+        ModelSelection::Codex(nanocode::Model::Astra),
+        Thinking::Medium,
+        Lineage::root(session_id),
+        session_id,
+        None,
+        true,
+        json!({"service_tier": "standard", "conversation": conversation}),
+    );
     let resume_state = session::encode_checkpoint(
-        &session::AgentSnapshot::Codex(Box::new(snapshot)),
+        &session::AgentSnapshot::from(snapshot),
         "benchmark instructions",
         false,
     )

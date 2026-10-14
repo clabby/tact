@@ -21,7 +21,7 @@ use crate::{
         transcript::{LocalEvent, SessionStarted},
     },
 };
-use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+use nanocode::agent::events::{AgentEvent, AgentEventKind};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -368,7 +368,7 @@ mod tests {
             },
         },
     };
-    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use nanocode::agent::events::{AgentEvent, AgentEventKind};
     use rusqlite::{Connection, ffi::ErrorCode};
     use serde_json::{Value, json, value::to_raw_value};
     use std::sync::Arc;

@@ -8,11 +8,10 @@ use crate::{
         transcript::TranscriptRecord,
     },
 };
-use nanocodex::{
+use async_trait::async_trait;
+use nanocode::{
     Tool,
-    tools::contract::{
-        ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, async_trait,
-    },
+    tools::contract::{ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -777,7 +776,7 @@ mod tests {
             transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId, UserSubmitted},
         },
     };
-    use nanocodex::{
+    use nanocode::{
         Tool,
         agent::events::{AgentEvent, AgentEventKind},
         tools::contract::{ToolContext, ToolInput, ToolOutputBody},

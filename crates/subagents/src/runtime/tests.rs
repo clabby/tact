@@ -6,16 +6,13 @@ use super::{
     state::{AgentReservation, ChildSession, RegistryState, complete_session},
 };
 use crate::{
-    AgentContext, AgentUpdate, MessageDeliveryState, MessageDisposition, MessagePriority,
-    MessagePurpose, Speed,
+    AgentContext, AgentUpdate, HarnessModel as Model, MessageDeliveryState, MessageDisposition,
+    MessagePriority, MessagePurpose, Speed,
     error::{DeliveryFailure, SpawnError, SubagentError},
     output::OutputContract,
     test_support::{PendingService, pending_agent},
 };
-use nanocodex::{
-    HarnessModel as Model, Model as CodexModel, Nanocodex, NanocodexError, OpenAi, ReasoningMode,
-    Thinking,
-};
+use nanocode::{Agent, Model as CodexModel, NanocodexError, OpenAi, ReasoningMode, Thinking};
 use serde_json::json;
 use std::{
     sync::{Arc, Mutex},
@@ -280,10 +277,9 @@ async fn harness_injects_descriptor_context_on_initial_and_reused_turns() {
         })
         .build()
         .unwrap();
-    let (agent, events) = Nanocodex::builder(openai)
-        .model(nanocodex::Model::Sol)
+    let (agent, events) = Agent::builder(openai)
+        .model(nanocode::Model::Sol)
         .thinking(Thinking::Medium)
-        .reasoning_mode(ReasoningMode::Pro)
         .build()
         .unwrap();
     let reservation = registry.reserve("root").await.unwrap();
@@ -291,7 +287,7 @@ async fn harness_injects_descriptor_context_on_initial_and_reused_turns() {
         &registry,
         &reservation,
         None,
-        ReasoningMode::Pro,
+        ReasoningMode::Standard,
         agent,
         events,
     )
@@ -310,18 +306,16 @@ async fn harness_injects_descriptor_context_on_initial_and_reused_turns() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(model, nanocodex::Model::Sol);
+        assert_eq!(model, nanocode::Model::Sol);
         assert_eq!(thinking, Thinking::Medium);
         assert!(prompt.contains(&format!("task {token}")), "{prompt}");
         assert!(prompt.contains(&format!("turn_token: {token}")));
         assert!(prompt.contains("<agent_context>"));
-        assert!(
-            prompt.contains(
-                "This turn runs on sol with medium reasoning effort in pro reasoning mode."
-            )
-        );
+        assert!(prompt.contains(
+            "This turn runs on sol with medium reasoning effort in standard reasoning mode."
+        ));
         let directory = registry.directory("root", true, false).await;
-        assert_eq!(directory[0].reasoning_mode, ReasoningMode::Pro);
+        assert_eq!(directory[0].reasoning_mode, ReasoningMode::Standard);
         registry.interrupt("root", reservation.id).await.unwrap();
     }
     registry.close("root", reservation.id).await.unwrap();
@@ -393,8 +387,8 @@ async fn insert_runtime_session(
     reservation: &AgentReservation,
     parent: Option<AgentId>,
     reasoning_mode: ReasoningMode,
-    agent: Nanocodex,
-    events: nanocodex::AgentEvents,
+    agent: Agent,
+    events: nanocode::AgentEvents,
 ) -> String {
     let session_id = events.request_id().to_owned();
     let descriptor = AgentDescriptor {
@@ -1460,9 +1454,10 @@ async fn wait_returns_a_turn_that_ended_before_a_queued_turn_started() {
         .harness_turn_finished(
             "main",
             id,
-            Ok(nanocodex::TurnResult::from_backend(
+            Ok(nanocode::TurnResult::from_backend(
                 None,
                 String::new(),
+                None,
                 None,
             )),
         )

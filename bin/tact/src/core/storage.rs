@@ -13,7 +13,7 @@ use crate::{
     },
 };
 pub(crate) use conversation_search::{ConversationMatch, search_terms};
-use nanocodex::agent::events::AgentEventKind;
+use nanocode::agent::events::AgentEventKind;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, ffi::ErrorCode, params,
     params_from_iter, types::Value,
