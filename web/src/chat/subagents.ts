@@ -10,8 +10,10 @@ import type { Theme } from "../core/theme";
 import { toast } from "../ui/toast";
 import type { Subagent } from "../core/wire";
 
-/** A live subagent viewer; the app forwards roster, entry, and theme changes. */
+/** A live subagent viewer; the app forwards session, roster, entry, and theme changes. */
 export type SubagentsView = {
+  /** A snapshot replaced the session's view, including the transcripts the page holds. */
+  sessionChanged(): void;
   rosterChanged(): void;
   entryChanged(agent: number, entry: number): void;
   themeChanged(): void;
@@ -105,18 +107,18 @@ export function openSubagents(
     setView("split");
     renderGraph();
     renderHead();
-    if (!current.agents.has(agent.id)) {
-      try {
-        const { entries } = await api.agentEntries(current.id, agent.id);
-        const data = current.agents.get(agent.id) ?? transcriptData([]);
-        for (const entry of entries) upsert(data, entry);
-        current.agents.set(agent.id, data);
-      } catch (error) {
-        toast(describeError(error), "warning");
-        return;
-      }
+    // The stream only adds entries written after the page's last snapshot, so a held transcript
+    // may lack its start; the full read fills it in, and revisions keep whichever copy is newer.
+    try {
+      const { entries } = await api.agentEntries(current.id, agent.id);
+      const data = current.agents.get(agent.id) ?? transcriptData([]);
+      for (const entry of entries) upsert(data, entry);
+      current.agents.set(agent.id, data);
+    } catch (error) {
+      toast(describeError(error), "warning");
+      if (!current.agents.has(agent.id)) return;
     }
-    if (closed || selected !== agent.id) return;
+    if (closed || selected !== agent.id || session() !== current) return;
     transcript.show({
       key: `${current.id}/${agent.id}`,
       data: current.agents.get(agent.id)!,
@@ -233,17 +235,22 @@ export function openSubagents(
     if (agent && !closed) void select(agent);
   };
   if (initial !== undefined) selectId(initial);
+  const rosterChanged = () => {
+    if (closed) return;
+    if (selected !== null && !roster().agents.some((agent) => agent.id === selected)) {
+      selected = null;
+      transcript.show(null);
+    }
+    renderGraph();
+    renderHead();
+  };
   return {
     select: selectId,
-    rosterChanged: () => {
-      if (closed) return;
-      if (selected !== null && !roster().agents.some((agent) => agent.id === selected)) {
-        selected = null;
-        transcript.show(null);
-      }
-      renderGraph();
-      renderHead();
+    sessionChanged: () => {
+      rosterChanged();
+      if (selected !== null) selectId(selected);
     },
+    rosterChanged,
     entryChanged: (agent, entry) => {
       if (!closed && agent === selected) transcript.entryChanged(entry);
     },

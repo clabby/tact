@@ -265,6 +265,7 @@ class App {
           break;
         case "session":
           this.transcript.show(state.session && this.sessionSource(state.session.id));
+          this.subagents?.sessionChanged();
           this.rail.refresh();
           this.openLink();
           this.composer.show(state.session);
