@@ -46,10 +46,18 @@ kbd { font: 500 var(--text-xs)/1 var(--font-ui); color: var(--faint); }
 /* Layout */
 .app {
   --sidebar-width: 264px;
+  --scrollbar-thumb: color-mix(in srgb, var(--text) 20%, transparent);
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   height: 100%;
   overflow: hidden;
+  /* Scroll areas show only a rounded thumb; the track blends into whatever it scrolls over. */
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+@supports not (scrollbar-color: auto) {
+  .app ::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
+  .app ::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 999px; background: var(--scrollbar-thumb) padding-box; }
 }
 
 .app > .sidebar {
@@ -235,7 +243,7 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 }
 
 /* Transcript */
-.transcript-scroller { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; scrollbar-gutter: stable both-edges; overscroll-behavior: contain; container: transcript / inline-size; }
+.transcript-scroller { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; scrollbar-width: thin; scrollbar-gutter: stable both-edges; overscroll-behavior: contain; container: transcript / inline-size; }
 .transcript {
   --column: 760px;
   display: flex; flex-direction: column;
@@ -1142,7 +1150,7 @@ button.outcome-item:hover { text-decoration: underline; text-underline-offset: 3
 .agent-task summary { width: fit-content; color: var(--faint); font-size: var(--text-xs); font-weight: 600; letter-spacing: .05em; text-transform: uppercase; cursor: pointer; }
 .agent-task p { margin: var(--space-1) 0 0; max-height: 160px; overflow-y: auto; color: var(--muted); font-size: var(--text-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
 .agent-error { margin: 0; padding: 8px 12px; border-radius: var(--radius-md); background: var(--danger-soft); color: var(--danger); font-size: var(--text-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
-.agent-scroller { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.agent-scroller { flex: 1; min-height: 0; overflow-y: auto; overflow-anchor: none; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-gutter: stable; }
 .agent-scroller .transcript { --column: 100%; max-width: none; padding: var(--space-4) var(--space-5) var(--space-6); }
 .agent-view .jump-latest { bottom: var(--space-4); }
 .sheet.xl { width: min(1360px, calc(100vw - 32px)); height: min(900px, 92dvh); max-height: none; }
