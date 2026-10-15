@@ -752,6 +752,9 @@ button.outcome-item:hover { text-decoration: underline; text-underline-offset: 3
 .agents-sphere .sphere { display: block; }
 .status-line.agents-only .agents-chip { margin-left: 0; }
 .status-line.agents-only .status-text { display: none; }
+/* The running turn's clock sits at the line's end, as the terminal right-aligns it on the composer. */
+.turn-timer { flex: none; margin-left: auto; color: var(--muted); font-size: var(--text-sm); font-weight: 450; font-variant-numeric: tabular-nums; }
+.turn-timer[hidden] { display: none; }
 
 .queue { display: flex; flex-direction: column; gap: 2px; margin: 0 0 var(--space-2); padding: var(--space-1); list-style: none; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); }
 .queue-item { display: flex; align-items: center; gap: var(--space-2); min-height: 34px; padding: 0 var(--space-1) 0 var(--space-2); border-radius: var(--radius-md); font-size: var(--text-md); }

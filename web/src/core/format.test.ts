@@ -1,9 +1,13 @@
 import type { Subagent } from "./wire";
 import { expect, test } from "bun:test";
-import { agentModelLabel, firstLine, formatAge, formatDuration, formatTokens, inputBlocked, statusLabel } from "./format";
+import { agentModelLabel, firstLine, formatAge, formatDuration, formatTokens, formatTurnDuration, inputBlocked, statusLabel } from "./format";
 
 test("durations print like the TUI", () => {
   expect([840e6, 4.2e9, 42e9, 402e9, 3_900e9].map(formatDuration)).toEqual(["840ms", "4.2s", "42s", "6m 42s", "1h 05m"]);
+});
+
+test("turn durations print like the TUI's turn timer", () => {
+  expect([0, 999e6, 65e9, 3_605e9, 93_784e9].map(formatTurnDuration)).toEqual(["0s", "0s", "1m 5s", "1h 5s", "1d 2h 3m 4s"]);
 });
 
 test("ages are relative to now", () => {

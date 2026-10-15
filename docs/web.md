@@ -85,6 +85,7 @@ that harmless.
 | `snapshot` | `SessionSnapshot` |
 | `entry` | `{ session, entry: WireEntry }` upsert by `(id, revision)`; clients drop anything older than what they hold |
 | `status` | `{ session, status: TransientStatus \| null }` |
+| `turn_timer` | `{ session, elapsed_ns: number \| null }` when the oldest running turn changes: how long the new one has run, or `null` once none runs. Clients count on with a monotonic clock, as the composer's turn timer |
 | `queue` | `{ session, items: QueuedPrompt[] }` |
 | `draft` | `{ session, rev, text, origin }`, origin is `"terminal"` or `"web:<client>"` |
 | `settings` | `{ session, model, effort, reasoning_mode, speed }` |
@@ -109,6 +110,7 @@ type SessionSnapshot = {
   reasoning_mode: "standard" | "pro"; speed: Speed;
   entries: WireEntry[]; status: TransientStatus | null; queue: QueuedPrompt[];
   draft: Draft; running: boolean;
+  turn_elapsed_ns: number | null; // how long the oldest running turn has run, as of this frame
   context: { active_tokens: number; window_tokens: number } | null;
   subagents: SubagentRoster;
 };

@@ -199,6 +199,11 @@ impl TranscriptModel {
         self.active_runs > 0 || matches!(self.manual_compaction, Some(ManualCompaction::Running))
     }
 
+    /// When the oldest running turn started, which the composer's turn timer counts from.
+    pub(crate) fn turn_started_at_unix_ms(&self) -> Option<u64> {
+        self.run_started_at_unix_ms.front().copied()
+    }
+
     pub(crate) fn has_running_tools(&self) -> bool {
         !self.running_tools.is_empty()
     }

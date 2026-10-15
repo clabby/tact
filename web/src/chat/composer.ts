@@ -5,6 +5,7 @@ import { DraftSync } from "./draft";
 import { effortColor, formatTokens, inputBlocked, modelColor, statusLabel } from "../core/format";
 import { glyph } from "../ui/glyphs";
 import { completeMention, findMention, type Mention } from "./mentions";
+import { TurnTimer } from "./turn-timer";
 import { openMenu } from "../ui/menu";
 import { effectiveSpeed, speedChoices } from "../core/speed";
 import { availableFirst, type PaletteCommand } from "../ui/palette";
@@ -51,6 +52,7 @@ export class Composer {
   private readonly message: HTMLElement;
   private readonly queue: HTMLElement;
   private readonly status: HTMLElement;
+  private readonly turnTimer: TurnTimer;
   private readonly mirror: HTMLElement;
   private readonly images: HTMLElement;
   private readonly mentions: HTMLElement;
@@ -72,6 +74,7 @@ export class Composer {
       <div class="status-line" hidden>
         <span class="status-pulse" aria-hidden="true"></span><span class="status-text"></span>
         <button type="button" class="agents-chip" hidden><span class="agents-sphere" aria-hidden="true"></span><span class="agents-label"></span></button>
+        <span class="turn-timer" title="Time this turn has run"></span>
       </div>
       <div class="interrupt-confirm" role="alert" hidden><span><kbd>Esc</kbd> again to interrupt</span><span class="interrupt-cancel">any other key cancels</span></div>
       <ol class="queue" aria-label="Queued prompts" hidden></ol>
@@ -110,6 +113,7 @@ export class Composer {
     this.message = root.querySelector(".composer-message")!;
     this.queue = root.querySelector(".queue")!;
     this.status = root.querySelector(".status-line")!;
+    this.turnTimer = new TurnTimer(root.querySelector(".turn-timer")!);
     this.mirror = root.querySelector(".mirror-cue")!;
     this.images = root.querySelector(".composer-images")!;
     this.mentions = root.querySelector(".mention-list")!;
@@ -257,7 +261,8 @@ export class Composer {
     const chip = this.status.querySelector<HTMLButtonElement>(".agents-chip")!;
     chip.hidden = agents === 0;
     chip.querySelector(".agents-label")!.textContent = `${agents} agent${agents === 1 ? "" : "s"} running`;
-    this.status.hidden = label === null && agents === 0;
+    this.turnTimer.show(this.session?.turnStartedAt ?? null);
+    this.status.hidden = label === null && agents === 0 && !this.turnTimer.running;
     this.status.classList.toggle("agents-only", label === null);
     this.status.querySelector<HTMLElement>(".status-pulse")!.hidden = label === null;
     this.status.classList.toggle("error", this.session?.status?.kind === "error");

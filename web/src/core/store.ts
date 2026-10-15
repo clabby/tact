@@ -33,6 +33,11 @@ export type SessionView = TranscriptData & {
   reasoningMode: ReasoningMode;
   speed: Speed;
   status: TransientStatus | null;
+  /**
+   * When the oldest running turn started, on the `performance.now()` clock, or null when no turn
+   * runs. It is derived from the server's elapsed time, so the browser's wall clock cannot skew it.
+   */
+  turnStartedAt: number | null;
   queue: QueuedPrompt[];
   draft: { rev: number; text: string; images: DraftImage[]; origin: DraftOrigin | null };
   running: boolean;
@@ -90,7 +95,7 @@ export function upsert(data: TranscriptData, entry: WireEntry): { added: boolean
   return { added: !held };
 }
 
-function sessionView(snapshot: SessionSnapshot): SessionView {
+function sessionView(snapshot: SessionSnapshot, now: number): SessionView {
   return {
     ...transcriptData(snapshot.entries),
     id: snapshot.session,
@@ -101,6 +106,7 @@ function sessionView(snapshot: SessionSnapshot): SessionView {
     reasoningMode: snapshot.reasoning_mode,
     speed: snapshot.speed,
     status: snapshot.status,
+    turnStartedAt: turnStartedAt(snapshot.turn_elapsed_ns ?? null, now),
     queue: snapshot.queue,
     draft: { rev: snapshot.draft.rev, text: snapshot.draft.text, images: snapshot.draft.images ?? [], origin: null },
     running: snapshot.running,
@@ -110,12 +116,17 @@ function sessionView(snapshot: SessionSnapshot): SessionView {
   };
 }
 
+function turnStartedAt(elapsedNs: number | null, now: number) {
+  return elapsedNs === null ? null : now - elapsedNs / 1e6;
+}
+
 /**
  * Applies one stream event to `state` in place and reports what changed. Session-scoped events
  * for any session other than the displayed one are ignored: the stream follows the active session
- * and a stale event must not leak into another transcript.
+ * and a stale event must not leak into another transcript. `now` is the `performance.now()` time
+ * the event arrived.
  */
-export function reduce(state: AppState, event: StreamEvent): Change[] {
+export function reduce(state: AppState, event: StreamEvent, now = performance.now()): Change[] {
   switch (event.type) {
     case "hello":
       state.protocolVersion = event.data.protocol_version;
@@ -139,7 +150,7 @@ export function reduce(state: AppState, event: StreamEvent): Change[] {
       state.active = event.data.session;
       return [{ type: "live" }];
     case "snapshot":
-      state.session = sessionView(event.data);
+      state.session = sessionView(event.data, now);
       state.active = event.data.session;
       return [{ type: "session" }];
     case "closed": {
@@ -178,6 +189,9 @@ export function reduce(state: AppState, event: StreamEvent): Change[] {
       return [{ type: "subagents" }];
     case "status":
       session.status = event.data.status;
+      return [{ type: "status" }];
+    case "turn_timer":
+      session.turnStartedAt = turnStartedAt(event.data.elapsed_ns, now);
       return [{ type: "status" }];
     case "queue":
       session.queue = event.data.items;

@@ -122,6 +122,7 @@ struct ActiveSent {
     queue: Vec<QueuedPrompt>,
     settings: Settings,
     status: Option<WireStatus>,
+    turn_started_at_unix_ms: Option<u64>,
     context: Option<ContextBudget>,
     roster: SubagentRoster,
     agent_entries: HashMap<AgentId, Vec<(usize, u64)>>,
@@ -378,6 +379,14 @@ pub(super) fn now_unix_ms() -> u64 {
         })
 }
 
+/// How long ago `started_at_unix_ms` was. Clients count on from this with their own monotonic
+/// clock, so a browser clock that disagrees with this machine's cannot skew a running clock.
+pub(super) fn elapsed_ns_since(started_at_unix_ms: u64) -> u64 {
+    now_unix_ms()
+        .saturating_sub(started_at_unix_ms)
+        .saturating_mul(1_000_000)
+}
+
 impl Live {
     fn running(&self) -> bool {
         self.busy.turns > 0 || self.busy.shells > 0
@@ -472,6 +481,7 @@ impl Live {
                 images: self.draft.images.iter().map(WireImage::from).collect(),
             },
             running: self.running(),
+            turn_elapsed_ns: self.model.turn_started_at_unix_ms().map(elapsed_ns_since),
             context: self.context,
             subagents: self.roster.clone(),
         }
@@ -485,6 +495,7 @@ impl Live {
             queue: self.queue.clone(),
             settings: self.settings(),
             status: self.model.transient().map(WireStatus::from),
+            turn_started_at_unix_ms: self.model.turn_started_at_unix_ms(),
             context: self.context,
             roster: self.roster.clone(),
             agent_entries: self
@@ -884,6 +895,11 @@ fn diff_active(live: &mut Live, previous: &ActiveSent, frames: &mut Vec<Frame>) 
         status: Option<WireStatus>,
     }
     #[derive(Serialize)]
+    struct TurnTimerEvent<'a> {
+        session: &'a str,
+        elapsed_ns: Option<u64>,
+    }
+    #[derive(Serialize)]
     struct QueueEvent<'a> {
         session: &'a str,
         items: Vec<WireQueued>,
@@ -935,6 +951,16 @@ fn diff_active(live: &mut Live, previous: &ActiveSent, frames: &mut Vec<Frame>) 
     let status = live.model.transient().map(WireStatus::from);
     if status != previous.status {
         frames.push(frame("status", &StatusEvent { session, status }));
+    }
+    let turn_started_at_unix_ms = live.model.turn_started_at_unix_ms();
+    if turn_started_at_unix_ms != previous.turn_started_at_unix_ms {
+        frames.push(frame(
+            "turn_timer",
+            &TurnTimerEvent {
+                session,
+                elapsed_ns: turn_started_at_unix_ms.map(elapsed_ns_since),
+            },
+        ));
     }
 
     if live.context != previous.context
@@ -1490,6 +1516,67 @@ mod tests {
         let transcript = fixture.hub.agent_entries("s1", AgentId::new(4)).unwrap();
         assert_eq!(transcript.len(), 1);
         assert!(fixture.hub.agent_entries("s1", AgentId::new(9)).is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_turn_timer_follows_the_oldest_running_turn() {
+        fn run(sequence: u64, recorded_at_unix_ms: u64, kind: AgentEventKind) -> Publication {
+            Publication::Record {
+                session: "s1".into(),
+                record: Arc::new(TranscriptRecord::from_agent(
+                    sequence,
+                    recorded_at_unix_ms,
+                    AgentEvent {
+                        protocol_version: 1,
+                        request_id: Arc::from("s1"),
+                        seq: sequence,
+                        kind,
+                        payload: to_raw_value(&json!({})).unwrap().into(),
+                    },
+                )),
+            }
+        }
+        fn timers(events: &[(String, Value)]) -> Vec<Option<u64>> {
+            events
+                .iter()
+                .filter(|(name, _)| name == "turn_timer")
+                .map(|(_, data)| data["elapsed_ns"].as_u64())
+                .collect()
+        }
+        let seconds = |elapsed_ns: Option<u64>| elapsed_ns.map(|ns| ns / 1_000_000_000);
+
+        let fixture = fixture();
+        fixture.open("s1", None);
+        fixture.activate("s1");
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        settle().await;
+        drain(&mut subscription);
+
+        let now = super::now_unix_ms();
+        fixture.publish(run(1, now - 65_000, AgentEventKind::RunStarted));
+        fixture.publish(run(2, now - 5_000, AgentEventKind::RunStarted));
+        settle().await;
+        let started = timers(&drain(&mut subscription));
+        assert_eq!(started.len(), 1, "only the oldest turn's start is reported");
+        assert_eq!(seconds(started[0]), Some(65));
+
+        let mut reconnected = fixture.hub.subscribe().unwrap();
+        let snapshot = drain(&mut reconnected).pop().unwrap();
+        assert_eq!(snapshot.0, "snapshot");
+        assert_eq!(seconds(snapshot.1["turn_elapsed_ns"].as_u64()), Some(65));
+        drop(reconnected);
+
+        fixture.publish(run(3, now, AgentEventKind::RunCompleted));
+        settle().await;
+        let promoted = timers(&drain(&mut subscription));
+        assert_eq!(
+            promoted.iter().copied().map(seconds).collect::<Vec<_>>(),
+            [Some(5)]
+        );
+
+        fixture.publish(run(4, now, AgentEventKind::RunFailed));
+        settle().await;
+        assert_eq!(timers(&drain(&mut subscription)), [None]);
     }
     #[tokio::test(start_paused = true)]
     async fn saved_history_invalidations_are_coalesced_for_connected_clients() {

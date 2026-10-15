@@ -2,7 +2,7 @@
 //! transcript entries onto them.
 
 use super::{
-    hub::now_unix_ms,
+    hub::elapsed_ns_since,
     outcome::{PatchStats, ToolOutcome},
 };
 use crate::{
@@ -84,6 +84,8 @@ pub(super) struct SessionSnapshot {
     pub(super) queue: Vec<WireQueued>,
     pub(super) draft: WireDraft,
     pub(super) running: bool,
+    /// How long the oldest running turn has run, as of this frame, for the composer's turn timer.
+    pub(super) turn_elapsed_ns: Option<u64>,
     pub(super) context: Option<ContextBudget>,
     pub(super) subagents: SubagentRoster,
 }
@@ -386,11 +388,8 @@ impl WireBody {
                 ToolState::Failed => WireToolState::Failed,
             },
             duration_ns: tool.duration_ns,
-            elapsed_ns: (tool.state == ToolState::Running).then(|| {
-                now_unix_ms()
-                    .saturating_sub(tool.started_at_unix_ms)
-                    .saturating_mul(1_000_000)
-            }),
+            elapsed_ns: (tool.state == ToolState::Running)
+                .then(|| elapsed_ns_since(tool.started_at_unix_ms)),
             substeps: tool.substeps.iter().map(|step| cap(step)).collect(),
             child_count: tool.child_count,
             has_detail: true,
@@ -749,11 +748,13 @@ fn numeric(id: impl std::fmt::Display) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MAX_STRING_BYTES, Significance, WireBody, WireEntry, cap, now_unix_ms, tool_summary,
-    };
-    use crate::core::transcript::{
-        LocalEvent, ToolEntry, ToolState, TranscriptModel, TranscriptRecord, TurnId, UserSubmitted,
+    use super::{MAX_STRING_BYTES, Significance, WireBody, WireEntry, cap, tool_summary};
+    use crate::{
+        core::transcript::{
+            LocalEvent, ToolEntry, ToolState, TranscriptModel, TranscriptRecord, TurnId,
+            UserSubmitted,
+        },
+        web::hub::now_unix_ms,
     };
     use nanocodex::agent::events::{AgentEvent, AgentEventKind};
     use serde_json::{Value, json, value::to_raw_value};

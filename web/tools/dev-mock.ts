@@ -154,6 +154,8 @@ class MockSession {
   failed = false;
   lastActivity = Date.now();
   turn: AbortController | null = null;
+  /** The `Date.now()` time the running turn started. */
+  turnStartedAt: number | null = null;
   private nextEntry = 1;
 
   constructor(
@@ -198,9 +200,14 @@ class MockSession {
       queue: this.queue.map((item) => ({ ...item })),
       draft: structuredClone(this.draft),
       running: this.running,
+      turn_elapsed_ns: this.turnElapsedNs(),
       context: { ...this.context },
       subagents: structuredClone(this.subagents),
     };
+  }
+
+  turnElapsedNs() {
+    return this.turnStartedAt === null ? null : (Date.now() - this.turnStartedAt) * 1e6;
   }
 
   push(body: EntryBody, parent: number | null = null, at = Date.now()): WireEntry {
@@ -704,6 +711,11 @@ export class MockTact {
     this.emit("status", { session: session.id, status });
   }
 
+  private setTurnStart(session: MockSession, startedAt: number | null) {
+    session.turnStartedAt = startedAt;
+    this.emit("turn_timer", { session: session.id, elapsed_ns: session.turnElapsedNs() });
+  }
+
   private async stream(session: MockSession, entry: WireEntry, text: string, signal: AbortSignal) {
     let shown = "";
     const pieces = words(text);
@@ -722,6 +734,7 @@ export class MockTact {
     session.failed = false;
     if (session.title === "New chat") this.generateTitle(session, prompt);
     const started = Date.now();
+    this.setTurnStart(session, started);
     if (showPrompt) this.append(session, { kind: "user", text: prompt });
     this.publishLive();
     const signal = turn.signal;
@@ -776,6 +789,7 @@ export class MockTact {
       interrupted = true;
     }
     session.turn = null;
+    this.setTurnStart(session, null);
     this.setStatus(session, null);
     if (interrupted) {
       if (this.sessions.has(session.id)) this.append(session, { kind: "interrupted", count: 1 });
@@ -1090,6 +1104,7 @@ export class MockTact {
     }
     // The root turn has finished its own work and waits on the agents it started.
     main.turn = new AbortController();
+    main.turnStartedAt = Date.now() - 65_000;
     main.status = { kind: "waiting_for_background_work" };
     // Each agent's transcript shows the threads it takes part in.
     for (const [thread, messages] of [[1, THREAD_DOCS], [2, THREAD_SCHEMA], [3, THREAD_FAILED]] as const) {

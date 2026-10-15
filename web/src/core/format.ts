@@ -12,6 +12,14 @@ export function formatDuration(nanoseconds: number) {
   return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
 }
 
+/** A turn's length the way the terminal's turn timer prints it: 5s, 1m 5s, 2h 3s, 1d 4h 2m 9s. */
+export function formatTurnDuration(nanoseconds: number) {
+  const total = Math.max(0, Math.floor(nanoseconds / 1e9));
+  const units: [number, string][] = [[Math.floor(total / 86_400), "d"], [Math.floor(total / 3600) % 24, "h"], [Math.floor(total / 60) % 60, "m"]];
+  const parts = units.filter(([value]) => value > 0).map(([value, unit]) => `${value}${unit}`);
+  return [...parts, `${total % 60}s`].join(" ");
+}
+
 /** "now", "5m", "3h", "2d", then a short date. */
 export function formatAge(unixMs: number, now = Date.now()) {
   const seconds = Math.max(0, (now - unixMs) / 1000);

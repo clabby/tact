@@ -173,6 +173,8 @@ export type SessionSnapshot = {
   queue: QueuedPrompt[];
   draft: Draft;
   running: boolean;
+  /** How long the oldest running turn had run when the server sent this; absent from older servers. */
+  turn_elapsed_ns?: number | null;
   context: ContextBudget | null;
   subagents: SubagentRoster;
 };
@@ -187,6 +189,8 @@ export type StreamEvents = {
   snapshot: SessionSnapshot;
   entry: { session: string; entry: WireEntry };
   status: { session: string; status: TransientStatus | null };
+  /** The oldest running turn changed: how long the new one has run, or null when none runs. */
+  turn_timer: { session: string; elapsed_ns: number | null };
   queue: { session: string; items: QueuedPrompt[] };
   draft: { session: string; rev: number; text: string; images?: DraftImage[]; origin: DraftOrigin };
   settings: { session: string; model: string; effort: Effort; reasoning_mode: ReasoningMode; speed: Speed };
@@ -205,7 +209,7 @@ export type StreamEvent = {
 }[StreamEventName];
 
 export const STREAM_EVENTS = [
-  "hello", "live", "active", "snapshot", "entry", "status", "queue", "draft", "settings", "context",
+  "hello", "live", "active", "snapshot", "entry", "status", "turn_timer", "queue", "draft", "settings", "context",
   "subagents", "subagent_entry", "closed", "workspace", "history_changed",
 ] as const satisfies readonly StreamEventName[];
 
