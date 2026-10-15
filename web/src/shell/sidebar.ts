@@ -122,8 +122,9 @@ export class Sidebar {
 
   renderFooter(connection: Connection, instances: SiblingInstance[]) {
     const others = instances.filter((instance) => !instance.current);
-    // This instance's sessions come from the live stream; the others' counts come from polling.
-    const live = others.reduce((total, instance) => total + instance.live, this.live.length);
+    // Live counts running Tact instances, this one included even before the first poll lists it.
+    // Running counts sessions: this instance's come from the live stream, the others' from polling.
+    const live = others.length + 1;
     const running = others.reduce(
       (total, instance) => total + instance.running,
       this.live.filter((session) => session.state === "running").length,

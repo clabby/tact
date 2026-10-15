@@ -36,17 +36,21 @@ function footerSummary(live: SessionSummary[], instances: SiblingInstance[]) {
 }
 
 describe("sidebar footer", () => {
-  test("counts live and running sessions across every instance", () => {
+  test("counts live instances and running sessions across every instance", () => {
     const summary = footerSummary(
       [session("a", "idle"), session("b", "idle")],
       [instance(1, true), instance(2), instance(1)],
     );
 
-    expect(summary).toBe("4 live · 3 running");
+    expect(summary).toBe("3 live · 3 running");
   });
 
   test("omits the running count when nothing runs", () => {
     expect(footerSummary([session("a", "idle")], [instance(0, true), instance(0)])).toBe("2 live");
+  });
+
+  test("counts this instance before sibling instances are known", () => {
+    expect(footerSummary([session("a", "idle"), session("b", "idle")], [])).toBe("1 live");
   });
 });
 
