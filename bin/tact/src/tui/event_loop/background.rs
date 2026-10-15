@@ -16,7 +16,7 @@ use crate::{
     },
     core::{
         pane::PaneId,
-        session::{RecentPrompt, SessionSummary},
+        session::{ConversationMatches, RecentPrompt, SessionSummary},
     },
     tui::{
         components::AppEvent,
@@ -38,6 +38,8 @@ pub(super) enum TaskKind {
     NewSession,
     /// Listing stored sessions for a picker.
     SessionList,
+    /// Searching stored conversations for a session picker or the live-sessions overlay.
+    SessionSearch,
     /// Loading the recent prompts of every stored session.
     RecentPrompts,
     /// Restoring a stored session into a pane.
@@ -63,7 +65,7 @@ impl TaskKind {
             Self::Effort => Some(RuntimeError::EffortUpdateTask(error)),
             Self::Speed => Some(RuntimeError::SpeedUpdateTask(error)),
             Self::NewSession => Some(RuntimeError::NewSessionTask(error)),
-            Self::SessionList | Self::RecentPrompts | Self::ResumeSession => {
+            Self::SessionList | Self::SessionSearch | Self::RecentPrompts | Self::ResumeSession => {
                 Some(RuntimeError::SessionTask(error))
             }
             Self::UpdateCheck => None,
@@ -80,6 +82,11 @@ pub(super) enum TaskOutput {
     SessionList {
         pane: PaneId,
         sessions: Result<Vec<SessionSummary>>,
+    },
+    SessionSearch {
+        pane: PaneId,
+        query: String,
+        matches: Result<ConversationMatches>,
     },
     RecentPrompts(Result<Vec<RecentPrompt>>),
     ResumeSession(Box<ResumedSession>),
@@ -186,6 +193,11 @@ impl EventLoop {
             TaskOutput::Speed(update) => self.on_speed_persisted(update?)?,
             TaskOutput::NewSession(session) => self.on_new_session_configured(session)?,
             TaskOutput::SessionList { pane, sessions } => self.on_sessions_listed(pane, sessions),
+            TaskOutput::SessionSearch {
+                pane,
+                query,
+                matches,
+            } => self.on_sessions_searched(pane, query, matches),
             TaskOutput::RecentPrompts(prompts) => self.on_recent_prompts_loaded(prompts),
             TaskOutput::ResumeSession(session) => self.on_session_restored(*session)?,
             TaskOutput::UpdateCheck(Ok(Some(version))) => {

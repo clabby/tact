@@ -292,6 +292,13 @@ impl EventLoop {
             TaskKind::RecentPrompts,
             recent_prompts::load(SessionStore::new(config.path())),
         );
+        let conversations = SessionStore::new(config.path());
+        // Searches answer from whatever is indexed so far, and an interrupted run resumes at the
+        // next start, so the outcome needs no handling. A plain thread keeps a long first run
+        // from delaying shutdown.
+        let _ = std::thread::Builder::new()
+            .name("conversation-index".to_owned())
+            .spawn(move || drop(conversations.index_past_conversations()));
         if !crate::app::installation::current().is_development() {
             tasks.spawn(TaskKind::UpdateCheck, async {
                 TaskOutput::UpdateCheck(crate::app::update::check_for_update().await)

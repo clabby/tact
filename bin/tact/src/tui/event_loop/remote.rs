@@ -63,14 +63,26 @@ fn prepare(query: Query, state: &QueryState<'_>) -> Result<Answer<QueryReply>, C
         Query::History { query, cursor } => {
             let store = SessionStore::new(state.config.path());
             let workspace = state.workspace.to_path_buf();
+            let live_sessions = state.app.live_session_ids();
             Answer::pending(async move {
                 let sessions = store
                     .list_workspace_family(&workspace, true)
                     .await
                     .map_err(failed)?;
-                HistoryPage::new(sessions, &query, cursor.as_deref())
-                    .map(QueryReply::History)
-                    .map_err(CommandError::Invalid)
+                let search = query.clone();
+                let conversation = store
+                    .run_blocking(move |store| store.search_conversations(&search))
+                    .await
+                    .map_err(failed)?;
+                HistoryPage::new(
+                    sessions,
+                    &query,
+                    cursor.as_deref(),
+                    conversation,
+                    &live_sessions,
+                )
+                .map(QueryReply::History)
+                .map_err(CommandError::Invalid)
             })
         }
         Query::Files { query } => {
@@ -203,7 +215,7 @@ mod tests {
     use super::{Answer, QueryState, answer, delete_memory};
     use crate::{
         app::{
-            config::{Config, ConfigOverrides, ReasoningEffort},
+            config::{Config, ConfigOverrides, ReasoningEffort, ReasoningMode, Speed},
             model::ModelCatalog,
             theme::Theme,
         },
@@ -211,10 +223,14 @@ mod tests {
             pane::PaneId,
             protocol::{CommandError, Query, QueryReply},
             session::{RecentPrompt, RecentPromptScope},
+            storage::SessionStorage,
+            transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId, UserSubmitted},
         },
         tui::components::{AppNode, RootNode},
     };
-    use std::{fs, path::Path};
+    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use serde_json::{json, value::to_raw_value};
+    use std::{fs, path::Path, sync::Arc};
     use tact_memory::MemoryKey;
     use tempfile::tempdir;
 
@@ -319,6 +335,90 @@ mod tests {
             .await,
             Ok(QueryReply::Skills(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn history_searches_conversations_and_reports_matching_live_sessions() {
+        let directory = tempdir().unwrap();
+        let config = config(directory.path());
+        let app = app(directory.path());
+        let mut storage = SessionStorage::open(config.path()).unwrap();
+        for (session_id, prompt, reply) in [
+            (
+                "saved",
+                "same first prompt",
+                "the lexer now handles unicode",
+            ),
+            ("other", "same first prompt", "nothing relevant"),
+            ("main", "live work", "a lexer for the live session"),
+        ] {
+            let start = SessionStarted {
+                session_id: session_id.to_owned(),
+                parent_session_id: None,
+                parent_sequence: None,
+                model: "model".to_owned(),
+                effort: ReasoningEffort::Medium,
+                reasoning_mode: ReasoningMode::Standard,
+                speed: Speed::Standard,
+                workspace: directory.path().to_path_buf(),
+                application_version: "test".to_owned(),
+            };
+            let prompt = UserSubmitted {
+                id: TurnId::new(1),
+                text: prompt.to_owned(),
+            };
+            let reply = AgentEvent {
+                protocol_version: 1,
+                request_id: Arc::from("request"),
+                seq: 1,
+                kind: AgentEventKind::AssistantMessage,
+                payload: to_raw_value(
+                    &json!({ "model_call_index": 0, "phase": null, "text": reply }),
+                )
+                .unwrap()
+                .into(),
+            };
+            let records = [
+                TranscriptRecord::from_local(1, 1, LocalEvent::SessionStarted(start)).unwrap(),
+                TranscriptRecord::from_local(2, 2, LocalEvent::UserSubmitted(prompt)).unwrap(),
+                TranscriptRecord::from_agent(3, 3, reply),
+            ];
+            storage
+                .append_records(session_id, &records.map(Arc::new))
+                .unwrap();
+            if session_id != "main" {
+                storage.save_resume_state(session_id, b"{}").unwrap();
+            }
+        }
+        let state = QueryState {
+            app: &app,
+            config: &config,
+            workspace: directory.path(),
+            memory_store: None,
+            recent_prompts: None,
+        };
+
+        let Ok(QueryReply::History(history)) = resolve(answer(
+            Query::History {
+                query: "LEXER".to_owned(),
+                cursor: None,
+            },
+            &state,
+        ))
+        .await
+        else {
+            panic!("history");
+        };
+        let found = history
+            .sessions
+            .iter()
+            .map(|session| (session.session_id.as_str(), session.snippet.as_deref()))
+            .collect::<Vec<_>>();
+        assert_eq!(found, [("saved", Some("the lexer now handles unicode"))]);
+        assert_eq!(
+            history.live_matches.get("main").map(String::as_str),
+            Some("a lexer for the live session")
+        );
     }
 
     #[tokio::test]

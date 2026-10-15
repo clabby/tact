@@ -50,6 +50,8 @@ export class Sidebar {
   private historyLoaded = false;
   /** Every History page loaded so far; rows for sessions that are live are not shown. */
   private history: PersistedSession[] = [];
+  /** Snippets of the live sessions whose conversation matches `historyQuery`, by session id. */
+  private liveMatches: Record<string, string> = {};
   private searchTimer = 0;
 
   constructor(private readonly root: HTMLElement, private readonly host: SidebarHost) {
@@ -100,8 +102,10 @@ export class Sidebar {
 
   private renderLive() {
     const needle = this.filter.trim().toLowerCase();
+    // Conversation matches answer the last History query, which lags the field while typing.
+    const matches = this.historyQuery === this.filter.trim() ? this.liveMatches : {};
     const visible = needle
-      ? this.live.filter((session) => `${session.title} ${session.model}`.toLowerCase().includes(needle))
+      ? this.live.filter((session) => session.id in matches || `${session.title} ${session.model}`.toLowerCase().includes(needle))
       : this.live;
     this.root.querySelector(".live-count")!.textContent = this.live.length ? String(this.live.length) : "";
     // While searching, a Live section with no match would only be noise above the results.
@@ -110,7 +114,7 @@ export class Sidebar {
       this.liveList.innerHTML = needle ? "" : `<li class="list-empty">No live sessions</li>`;
       return;
     }
-    this.liveList.replaceChildren(...visible.map((session) => this.liveRow(session)));
+    this.liveList.replaceChildren(...visible.map((session) => this.liveRow(session, needle ? matches[session.id] : undefined)));
   }
 
   renderFooter(connection: Connection, instances: SiblingInstance[]) {
@@ -177,7 +181,7 @@ export class Sidebar {
     }
   }
 
-  private liveRow(session: SessionSummary) {
+  private liveRow(session: SessionSummary, snippet: string | undefined) {
     const row = document.createElement("li");
     row.className = "session-row";
     const pinned = this.pinned.has(session.id);
@@ -197,6 +201,7 @@ export class Sidebar {
     // The globe's visible diameter matches the 8px steady-state dots (the canvas is slightly larger).
     if (session.state === "running") row.querySelector(".session-marker")!.append(createSphere(10, 14));
     row.querySelector(".session-title")!.textContent = session.title || "New chat";
+    renderSnippet(row, snippet);
     row.querySelector(".session-model")!.textContent = label;
     this.renderWorkspace(row, session.workspace);
     row.querySelector(".session-age")!.textContent = formatAge(session.last_activity_unix_ms);
@@ -300,6 +305,10 @@ export class Sidebar {
       if (this.historyRequest !== request) return;
       this.historyLoaded = true;
       this.history = reset ? page.sessions : [...this.history, ...page.sessions];
+      if (reset) {
+        this.liveMatches = page.live_matches;
+        this.renderLive();
+      }
       this.renderHistory();
       this.historyCursor = page.next_cursor;
       this.more.hidden = page.next_cursor === null;
@@ -328,6 +337,7 @@ export class Sidebar {
     row.className = "session-row history-row";
     row.innerHTML = `<button type="button" class="session-main"><span class="session-text"><span class="session-title"></span><span class="session-meta"><span class="model-dot"></span><span class="session-model"></span><span class="session-workspace"></span><span class="session-age"></span></span></span></button>`;
     row.querySelector(".session-title")!.textContent = session.preview || session.session_id.slice(0, 8);
+    renderSnippet(row, session.snippet);
     row.querySelector(".session-model")!.textContent = this.host.catalog()?.models.find((model) => model.id === session.model)?.label ?? session.model;
     this.renderWorkspace(row, session.workspace);
     row.querySelector(".session-age")!.textContent = formatAge(session.started_at_unix_ms);
@@ -336,4 +346,13 @@ export class Sidebar {
     row.querySelector(".session-main")!.addEventListener("click", () => void this.open({ resume: { session: session.session_id } }));
     return row;
   }
+}
+
+/** Shows where a search matched a session's conversation, under the row's title. */
+function renderSnippet(row: HTMLElement, snippet: string | undefined) {
+  if (!snippet) return;
+  const line = document.createElement("span");
+  line.className = "session-snippet";
+  line.textContent = snippet;
+  row.querySelector(".session-title")!.after(line);
 }

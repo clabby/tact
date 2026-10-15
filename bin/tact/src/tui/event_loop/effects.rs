@@ -109,6 +109,7 @@ impl EventLoop {
             }
             RootEffect::NewSession(model) => self.new_session(pane, model, workspace),
             RootEffect::LoadSessions(kind) => self.load_sessions(pane, kind, workspace),
+            RootEffect::SearchSessions(query) => self.search_sessions(pane, query),
             RootEffect::LoadRecentPrompts(current_prompts) => {
                 self.load_recent_prompts(pane, current_prompts, workspace);
             }

@@ -31,7 +31,7 @@ use crate::{
             Busy, Command, CommandError, Draft, DraftImage, Origin, Publication, Publisher,
             QueuedPrompt, SessionInfo,
         },
-        session::{RecentPrompt, SessionSummary},
+        session::{ConversationMatches, RecentPrompt, SessionSummary},
         transcript::TranscriptRecord,
     },
 };
@@ -134,6 +134,11 @@ pub(crate) enum AppEvent {
     SessionsLoaded {
         pane: PaneId,
         sessions: Vec<SessionSummary>,
+    },
+    SessionsSearched {
+        pane: PaneId,
+        query: String,
+        matches: ConversationMatches,
     },
     RecentPromptsLoaded {
         pane: PaneId,
@@ -498,6 +503,17 @@ impl AppNode {
             AppEvent::SessionsLoaded { pane, sessions } => {
                 self.update_root(pane, RootEvent::SessionsLoaded(sessions))
             }
+            AppEvent::SessionsSearched {
+                pane,
+                query,
+                matches,
+            } => {
+                if let Some(AppOverlay::Sessions(overlay)) = &mut self.overlay {
+                    let update = overlay.set_conversation_matches(query, matches);
+                    return ComponentUpdate::render(update.render);
+                }
+                self.update_root(pane, RootEvent::SessionsSearched { query, matches })
+            }
             AppEvent::RecentPromptsLoaded {
                 pane,
                 session_id,
@@ -797,6 +813,13 @@ impl AppNode {
                 self.overlay = None;
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
+            SessionsEffect::Search(query) => ComponentUpdate {
+                effects: vec![AppEffect::Pane {
+                    pane: self.focus,
+                    effect: RootEffect::SearchSessions(query),
+                }],
+                render: RenderRequest::Immediate,
+            },
             SessionsEffect::Activate(pane) => {
                 self.overlay = None;
                 self.activate(pane);
@@ -862,6 +885,10 @@ impl AppNode {
                 let busy = root.busy();
                 LiveSession {
                     pane,
+                    session_id: entry
+                        .published
+                        .as_ref()
+                        .map(|published| published.session.clone()),
                     title: root.title().unwrap_or(UNTITLED_SESSION).to_owned(),
                     model: model::name(root.composer().model()).to_owned(),
                     running: busy.turns > 0 || busy.shells > 0,
@@ -1209,6 +1236,14 @@ impl AppNode {
                 .is_some_and(|published| published.session == session)
                 .then_some(pane)
         })
+    }
+
+    /// The ids of the sessions live in this process.
+    pub(crate) fn live_session_ids(&self) -> Vec<String> {
+        self.panes
+            .values()
+            .filter_map(|entry| Some(entry.published.as_ref()?.session.clone()))
+            .collect()
     }
 
     fn pane_mut(&mut self, pane: PaneId) -> Option<&mut RootNode> {

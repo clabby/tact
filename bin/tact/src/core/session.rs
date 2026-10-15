@@ -7,10 +7,13 @@ use crate::{
         model,
     },
     core::{
-        storage::{SessionStorage, StorageError, StoredSession, database_path},
+        storage::{
+            ConversationMatch, SessionStorage, StorageError, StoredSession, database_path,
+            search_terms,
+        },
         transcript::{LocalKind, SessionStarted, TerminalStopReason, TranscriptRecord},
     },
-    search::rank,
+    search::{fuzzy_score, rank},
 };
 use nanocodex::{
     HarnessModel, HarnessModel as Model, Model as CodexModel, NanocodexError, Thinking,
@@ -18,7 +21,8 @@ use nanocodex::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    cmp::Reverse,
+    collections::{HashMap, HashSet},
     fs::{self, File, TryLockError},
     path::{Path, PathBuf},
     sync::Arc,
@@ -29,6 +33,15 @@ const RESUME_STATE_FORMAT_VERSION: u32 = 2;
 pub(crate) const MAX_RECENT_PROMPTS: usize = 100;
 /// The most persisted sessions one history page holds.
 const HISTORY_PAGE_SIZE: usize = 50;
+/// How much of a session's preview typo-tolerant search compares, so that a subsequence match
+/// stays within the part of the first prompt a reader sees as its title.
+const FUZZY_TITLE_CHARS: usize = 80;
+/// Events one conversation-index backfill transaction covers. Small enough that journal writers
+/// waiting on the write lock are delayed by milliseconds, not seconds.
+const CONVERSATION_BACKFILL_BATCH: usize = 1_000;
+
+/// The best conversation match of each matching session, by session id.
+pub(crate) type ConversationMatches = HashMap<String, ConversationMatch>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct SessionSummary {
@@ -39,6 +52,9 @@ pub(crate) struct SessionSummary {
     pub(crate) reasoning_mode: ReasoningMode,
     pub(crate) workspace: PathBuf,
     pub(crate) preview: String,
+    /// Conversation text around a search match, when the session was found by its conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) snippet: Option<String>,
 }
 
 impl From<StoredSession> for SessionSummary {
@@ -51,40 +67,96 @@ impl From<StoredSession> for SessionSummary {
             reasoning_mode: session.reasoning_mode,
             workspace: session.workspace,
             preview: session.preview,
+            snippet: None,
         }
     }
 }
 
 impl SessionSummary {
-    /// Whether a session-picker search matches. `query` must already be lowercase.
-    pub(crate) fn matches(&self, query: &str) -> bool {
-        query.is_empty()
-            || self.session_id.to_ascii_lowercase().contains(query)
-            || self.preview.to_ascii_lowercase().contains(query)
-            || self.model.to_ascii_lowercase().contains(query)
-            || self
-                .workspace
-                .to_string_lossy()
-                .to_ascii_lowercase()
-                .contains(query)
+    /// Whether every one of the lowercase `words` occurs in the session's id, preview, model, or
+    /// workspace.
+    fn matches(&self, words: &[&str]) -> bool {
+        let fields = [
+            self.session_id.to_ascii_lowercase(),
+            self.preview.to_ascii_lowercase(),
+            self.model.to_ascii_lowercase(),
+            self.workspace.to_string_lossy().to_ascii_lowercase(),
+        ];
+        words
+            .iter()
+            .all(|word| fields.iter().any(|field| field.contains(word)))
     }
 }
 
-/// One page of persisted sessions matching a search, in listing order (newest first).
+/// The indices of the `sessions` that match `query`, best first, as the resume picker and web
+/// history list them. `sessions` must be newest first, which breaks every tie.
+///
+/// Sessions whose id, preview, model, or workspace contain every word come first, newest first.
+/// Then come sessions found only by their `conversation`, best bm25 score first. Last come
+/// sessions whose short title matches the query as a subsequence, which tolerates typos.
+/// Conversation and typo-tolerant matching apply only when the query has a word long enough for
+/// the conversation index; shorter queries only filter by the session's own fields.
+pub(crate) fn search_sessions(
+    sessions: &[SessionSummary],
+    query: &str,
+    conversation: &ConversationMatches,
+) -> Vec<usize> {
+    let query = query.trim().to_ascii_lowercase();
+    let words = query.split_whitespace().collect::<Vec<_>>();
+    let searchable = search_terms(&query).next().is_some();
+    let mut fields = Vec::new();
+    let mut conversations = Vec::new();
+    let mut titles = Vec::new();
+    for (index, session) in sessions.iter().enumerate() {
+        if session.matches(&words) {
+            fields.push(index);
+            continue;
+        }
+        if !searchable {
+            continue;
+        }
+        if let Some(found) = conversation.get(&session.session_id) {
+            conversations.push((index, found.rank));
+            continue;
+        }
+        let title = session
+            .preview
+            .chars()
+            .take(FUZZY_TITLE_CHARS)
+            .collect::<String>();
+        if let Some(score) = fuzzy_score(&title, &query) {
+            titles.push((index, score));
+        }
+    }
+    conversations.sort_by(|left, right| left.1.total_cmp(&right.1).then(left.0.cmp(&right.0)));
+    titles.sort_by_key(|&(index, score)| (Reverse(score), index));
+    fields
+        .into_iter()
+        .chain(conversations.into_iter().map(|(index, _)| index))
+        .chain(titles.into_iter().map(|(index, _)| index))
+        .collect()
+}
+
+/// One page of persisted sessions matching a search, best match first.
 #[derive(Debug, Serialize)]
 pub(crate) struct HistoryPage {
     pub(crate) sessions: Vec<SessionSummary>,
     /// Passed back as `cursor` to read the next page; `None` on the last page.
     pub(crate) next_cursor: Option<String>,
+    /// Snippets of the live sessions whose conversation matches the query, by session id. Live
+    /// sessions are listed apart from history, so these do not depend on the history scope.
+    pub(crate) live_matches: HashMap<String, String>,
 }
 
 impl HistoryPage {
-    /// Pages through `sessions` filtered by `query`. The cursor is opaque to clients; an
-    /// unparsable one is a client error.
+    /// Pages through `sessions` ranked by [`search_sessions`]. The cursor is opaque to clients;
+    /// an unparsable one is a client error.
     pub(crate) fn new(
         sessions: Vec<SessionSummary>,
         query: &str,
         cursor: Option<&str>,
+        mut conversation: ConversationMatches,
+        live_sessions: &[String],
     ) -> Result<Self, String> {
         let skip = cursor
             .map(|cursor| {
@@ -94,19 +166,33 @@ impl HistoryPage {
             })
             .transpose()?
             .unwrap_or(0);
-        let query = query.to_ascii_lowercase();
-        let mut matching = sessions
+        let ranked = search_sessions(&sessions, query, &conversation);
+        let next_cursor = (ranked.len() > skip.saturating_add(HISTORY_PAGE_SIZE))
+            .then(|| (skip + HISTORY_PAGE_SIZE).to_string());
+        let live_matches = live_sessions
+            .iter()
+            .filter_map(|session_id| {
+                let found = conversation.get(session_id)?;
+                Some((session_id.clone(), found.snippet.clone()))
+            })
+            .collect();
+        let mut sessions = sessions.into_iter().map(Some).collect::<Vec<_>>();
+        let sessions = ranked
             .into_iter()
-            .filter(|session| session.matches(&query))
-            .skip(skip);
-        let sessions = matching
-            .by_ref()
+            .skip(skip)
             .take(HISTORY_PAGE_SIZE)
-            .collect::<Vec<_>>();
-        let next_cursor = matching.next().map(|_| (skip + sessions.len()).to_string());
+            .filter_map(|index| {
+                let mut session = sessions[index].take()?;
+                session.snippet = conversation
+                    .remove(&session.session_id)
+                    .map(|found| found.snippet);
+                Some(session)
+            })
+            .collect();
         Ok(Self {
             sessions,
             next_cursor,
+            live_matches,
         })
     }
 }
@@ -573,6 +659,29 @@ impl SessionStore {
             .await
     }
 
+    /// The best conversation match of each stored session for `query`.
+    pub(crate) fn search_conversations(
+        &self,
+        query: &str,
+    ) -> Result<ConversationMatches, SessionError> {
+        let Some(storage) = self.open()? else {
+            return Ok(ConversationMatches::new());
+        };
+        Ok(storage.search_conversations(query)?)
+    }
+
+    /// Indexes the conversations recorded before the conversation index existed. Each batch
+    /// commits on its own, so an interrupted run keeps its progress and the next run continues
+    /// from there.
+    pub(crate) fn index_past_conversations(&self) -> Result<(), SessionError> {
+        if !database_path(&self.config_path).exists() {
+            return Ok(());
+        }
+        let mut storage = SessionStorage::open(&self.config_path)?;
+        while storage.backfill_conversation_index(CONVERSATION_BACKFILL_BATCH)? {}
+        Ok(())
+    }
+
     /// The most recent prompts across every session, newest first.
     pub(crate) fn recent_prompts(&self) -> Result<Vec<RecentPrompt>, SessionError> {
         let Some(storage) = self.open()? else {
@@ -755,14 +864,14 @@ impl LoadedTranscript {
 #[cfg(test)]
 mod tests {
     use super::{
-        HistoryPage, LoadedTranscript, RecentPrompt, RecentPromptScope, RecentPrompts,
-        SessionError, SessionLock, SessionStore, SessionSummary, TerminalStopReason,
+        ConversationMatches, HistoryPage, LoadedTranscript, RecentPrompt, RecentPromptScope,
+        RecentPrompts, SessionError, SessionLock, SessionStore, SessionSummary, TerminalStopReason,
         encode_checkpoint,
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
         core::{
-            storage::{BUSY_TIMEOUT, SessionStorage, database_path},
+            storage::{BUSY_TIMEOUT, ConversationMatch, SessionStorage, database_path},
             transcript::{
                 CompactionFinished, LocalEvent, LocalKind, SessionStarted, TranscriptJournal,
                 TranscriptRecord, TurnId, UserSubmitted, WorkerTurnFinished,
@@ -786,6 +895,7 @@ mod tests {
             reasoning_mode: ReasoningMode::Standard,
             workspace: PathBuf::from("/work"),
             preview: preview.to_owned(),
+            snippet: None,
         }
     }
 
@@ -794,19 +904,91 @@ mod tests {
         let sessions = (0..120)
             .map(|index| summary(index, if index % 2 == 0 { "Fix Parser" } else { "docs" }))
             .collect::<Vec<_>>();
+        let page = |query, cursor| {
+            HistoryPage::new(
+                sessions.clone(),
+                query,
+                cursor,
+                ConversationMatches::new(),
+                &[],
+            )
+        };
 
-        let first = HistoryPage::new(sessions.clone(), "PARSER", None).unwrap();
+        let first = page("PARSER", None).unwrap();
         assert_eq!(first.sessions.len(), 50);
         assert_eq!(first.sessions[1].session_id, "session-2");
         let cursor = first.next_cursor.unwrap();
-        let second = HistoryPage::new(sessions.clone(), "parser", Some(&cursor)).unwrap();
+        let second = page("parser", Some(&cursor)).unwrap();
         assert_eq!(second.sessions.len(), 10);
         assert_eq!(second.sessions[0].session_id, "session-100");
         assert_eq!(second.next_cursor, None);
 
-        let by_id = HistoryPage::new(sessions.clone(), "session-7", None).unwrap();
+        let by_id = page("session-7", None).unwrap();
         assert_eq!(by_id.sessions.len(), 11, "session-7 and session-70..79");
-        assert!(HistoryPage::new(sessions, "", Some("not a cursor")).is_err());
+        assert_eq!(page("fix parser", None).unwrap().sessions.len(), 50);
+        assert!(page("parser fix", None).unwrap().next_cursor.is_some());
+        assert!(page("", Some("not a cursor")).is_err());
+    }
+
+    #[test]
+    fn history_ranks_own_fields_then_conversations_then_typo_tolerant_titles() {
+        let sessions = vec![
+            summary(0, "docs cleanup"),
+            summary(1, "Fix Parser"),
+            summary(2, "unrelated"),
+            summary(3, "pa-rs-er notes"),
+            summary(4, "nothing here"),
+        ];
+        let conversation = |entries: &[(&str, f64)]| {
+            entries
+                .iter()
+                .map(|(session_id, rank)| {
+                    let snippet = format!("{session_id} said parser");
+                    (
+                        (*session_id).to_owned(),
+                        ConversationMatch {
+                            rank: *rank,
+                            snippet,
+                        },
+                    )
+                })
+                .collect::<ConversationMatches>()
+        };
+        let matches = conversation(&[
+            ("session-0", -1.0),
+            ("session-1", -9.0),
+            ("session-2", -5.0),
+            ("live", -2.0),
+        ]);
+        let live = ["live".to_owned(), "session-4".to_owned()];
+
+        let page =
+            HistoryPage::new(sessions.clone(), "parser", None, matches.clone(), &live).unwrap();
+        let found = page
+            .sessions
+            .iter()
+            .map(|session| (session.session_id.as_str(), session.snippet.as_deref()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found,
+            [
+                ("session-1", Some("session-1 said parser")),
+                ("session-2", Some("session-2 said parser")),
+                ("session-0", Some("session-0 said parser")),
+                ("session-3", None),
+            ]
+        );
+        assert_eq!(
+            page.live_matches.into_iter().collect::<Vec<_>>(),
+            [("live".to_owned(), "live said parser".to_owned())]
+        );
+
+        let short = HistoryPage::new(sessions, "pa", None, matches, &live).unwrap();
+        let ids = short
+            .sessions
+            .iter()
+            .map(|session| session.session_id.as_str());
+        assert_eq!(ids.collect::<Vec<_>>(), ["session-1", "session-3"]);
     }
 
     #[test]

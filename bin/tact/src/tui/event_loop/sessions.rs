@@ -17,7 +17,7 @@ use crate::{
     core::{
         ConfiguredAgent,
         pane::PaneId,
-        session::{SessionLock, SessionStore, SessionSummary},
+        session::{ConversationMatches, SessionLock, SessionStore, SessionSummary},
         supported_reasoning_mode,
         transcript::TranscriptRecord,
     },
@@ -256,6 +256,43 @@ impl EventLoop {
                 pane,
                 error: format!("Could not load sessions: {error}"),
             },
+        });
+        self.scheduler.request_immediate(Instant::now());
+    }
+
+    /// Searches stored conversations for a session search query. A newer search replaces an
+    /// older one, so only the latest query is answered.
+    pub(super) fn search_sessions(&mut self, pane: PaneId, query: String) {
+        let store = SessionStore::new(self.config.path());
+        self.tasks.spawn(TaskKind::SessionSearch, async move {
+            let search = query.clone();
+            let matches = store
+                .run_blocking(move |store| store.search_conversations(&search))
+                .await
+                .map_err(Into::into);
+            TaskOutput::SessionSearch {
+                pane,
+                query,
+                matches,
+            }
+        });
+    }
+
+    /// Hands conversation matches to the picker. A failed search leaves the picker matching the
+    /// sessions' own fields.
+    pub(super) fn on_sessions_searched(
+        &mut self,
+        pane: PaneId,
+        query: String,
+        matches: Result<ConversationMatches>,
+    ) {
+        let Ok(matches) = matches else {
+            return;
+        };
+        self.show(AppEvent::SessionsSearched {
+            pane,
+            query,
+            matches,
         });
         self.scheduler.request_immediate(Instant::now());
     }

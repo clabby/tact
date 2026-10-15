@@ -265,6 +265,8 @@ export type PersistedSession = {
   reasoning_mode: ReasoningMode;
   workspace: string;
   preview: string;
+  /** Conversation text around the search match, when the session was found by its conversation. */
+  snippet?: string;
 };
 
 export type RecentPrompt = { text: string; recorded_at_unix_ms: number; session_id: string; workspace: string };
@@ -349,7 +351,11 @@ export type Workspaces = { default: string; checkouts: Checkout[]; recent: strin
 /** Query arguments and replies; `undefined` arguments mark a query without `args`. */
 export type Queries = {
   models: { args: undefined; reply: ModelCatalog };
-  history: { args: { query?: string; cursor?: string | null }; reply: { sessions: PersistedSession[]; next_cursor: string | null } };
+  history: {
+    args: { query?: string; cursor?: string | null };
+    /** `live_matches`: snippets of the live sessions whose conversation matches, by session id. */
+    reply: { sessions: PersistedSession[]; next_cursor: string | null; live_matches: Record<string, string> };
+  };
   files: { args: { query?: string }; reply: { paths: string[] } };
   skills: { args: { query?: string }; reply: { skills: { name: string; description: string }[] } };
   recent_prompts: {

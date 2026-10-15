@@ -776,6 +776,7 @@ class App {
         group: "History",
         icon: "history",
         hint: formatAge(session.started_at_unix_ms),
+        detail: session.snippet,
         run: () => this.command("open_session", { resume: { session: session.session_id } }),
       })),
     });

@@ -1,5 +1,7 @@
 //! SQLite-backed V2 session persistence.
 
+mod conversation_search;
+
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
     core::transcript::{
@@ -7,6 +9,7 @@ use crate::{
         TerminalStopReason, TranscriptRecord, TurnId, WorkerTurnAccepted,
     },
 };
+pub(crate) use conversation_search::{ConversationMatch, search_terms};
 use nanocodex::agent::events::AgentEventKind;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, ffi::ErrorCode, params,
@@ -168,6 +171,7 @@ impl SessionStorage {
         configure(&connection, &path)?;
         initialize(&connection, &path)?;
         ensure_discovery_indexes(&connection, &path)?;
+        conversation_search::ensure_schema(&connection, &path)?;
         set_private_file_permissions(&path)?;
         Ok(Self {
             path,

@@ -128,6 +128,7 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 .session-row.unread:not([data-state="running"]) .session-marker { border: 0; background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .session-text { display: flex; flex: 1; flex-direction: column; gap: 1px; min-width: 0; }
 .session-title { overflow: hidden; font-size: var(--text-md); text-overflow: ellipsis; white-space: nowrap; }
+.session-snippet { overflow: hidden; color: var(--muted); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
 .session-row.unread .session-title, .session-row.active .session-title { font-weight: 600; }
 .session-meta { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--faint); font-size: var(--text-xs); }
 .model-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; }

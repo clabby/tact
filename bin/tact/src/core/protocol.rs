@@ -323,7 +323,8 @@ impl Serialize for Reply {
 pub(crate) enum Query {
     /// The selectable models with their effort, reasoning-mode, and speed couplings.
     Models,
-    /// Persisted sessions, newest first, filtered like the Resume picker.
+    /// Persisted sessions ranked like the Resume picker, with the live sessions whose conversation
+    /// matches the query.
     History {
         #[serde(default)]
         query: String,

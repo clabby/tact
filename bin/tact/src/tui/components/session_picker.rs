@@ -7,12 +7,24 @@
 //! [SessionPickerEffect::Resume] or [SessionPickerEffect::Mention] with the
 //! highlighted session id, depending on the mode. Esc, or Backspace on an empty
 //! query, emits [SessionPickerEffect::Dismiss].
+//!
+//! Sessions are ranked by [search_sessions]. A query long enough to search
+//! conversations emits [SessionPickerEffect::Search]; the host answers with
+//! [SessionPicker::set_conversation_matches], and until then the picker matches
+//! the sessions' own fields only.
 
 use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::{app::theme::Theme, core::session::SessionSummary, tui::format::format_age};
+use crate::{
+    app::theme::Theme,
+    core::{
+        session::{ConversationMatches, SessionSummary, search_sessions},
+        storage::search_terms,
+    },
+    tui::format::{format_age, sanitize_terminal_text_inline},
+};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
@@ -39,6 +51,8 @@ pub(super) enum SessionPickerEffect {
     Dismiss,
     Resume(String),
     Mention(String),
+    /// Search the conversations of stored sessions for this query.
+    Search(String),
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +67,8 @@ pub(super) struct SessionPicker {
     matches: Vec<usize>,
     selected: usize,
     mode: SessionPickerMode,
+    /// Conversation matches and the query they answer; ignored once the query changes.
+    conversation: (String, ConversationMatches),
 }
 
 impl SessionPicker {
@@ -64,7 +80,27 @@ impl SessionPicker {
             matches,
             selected: 0,
             mode,
+            conversation: Default::default(),
         }
+    }
+
+    /// Applies the conversation matches for `query` unless the query has changed since. The
+    /// highlighted session stays highlighted when it still matches.
+    pub(super) fn set_conversation_matches(
+        &mut self,
+        query: String,
+        matches: ConversationMatches,
+    ) -> ComponentUpdate<SessionPickerEffect> {
+        if query != self.query {
+            return ComponentUpdate::none();
+        }
+        let highlighted = self.matches.get(self.selected).copied();
+        self.conversation = (query, matches);
+        self.refresh_matches();
+        self.selected = highlighted
+            .and_then(|index| self.matches.iter().position(|&found| found == index))
+            .unwrap_or(0);
+        ComponentUpdate::render(RenderRequest::Immediate)
     }
 
     fn update_key(
@@ -79,7 +115,7 @@ impl SessionPicker {
             KeyCode::Backspace if !self.query.is_empty() => {
                 if let Some((index, _)) = self.query.grapheme_indices(true).next_back() {
                     self.query.truncate(index);
-                    self.refresh_matches();
+                    return self.query_changed();
                 }
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
@@ -101,8 +137,7 @@ impl SessionPicker {
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 self.query.push(character);
-                self.refresh_matches();
-                ComponentUpdate::render(RenderRequest::Immediate)
+                self.query_changed()
             }
             _ => ComponentUpdate::none(),
         }
@@ -111,8 +146,16 @@ impl SessionPicker {
     fn insert_paste(&mut self, text: &str) -> ComponentUpdate<SessionPickerEffect> {
         self.query
             .extend(text.chars().filter(|character| !character.is_control()));
+        self.query_changed()
+    }
+
+    fn query_changed(&mut self) -> ComponentUpdate<SessionPickerEffect> {
         self.refresh_matches();
-        ComponentUpdate::render(RenderRequest::Immediate)
+        self.selected = 0;
+        if search_terms(&self.query).next().is_none() {
+            return ComponentUpdate::render(RenderRequest::Immediate);
+        }
+        Self::effect(SessionPickerEffect::Search(self.query.clone()))
     }
 
     fn select(&mut self) -> ComponentUpdate<SessionPickerEffect> {
@@ -135,15 +178,14 @@ impl SessionPicker {
     }
 
     fn refresh_matches(&mut self) {
-        let query = self.query.to_ascii_lowercase();
-        self.matches = self
-            .sessions
-            .iter()
-            .enumerate()
-            .filter(|(_, session)| session.matches(&query))
-            .map(|(index, _)| index)
-            .collect();
-        self.selected = 0;
+        let empty = ConversationMatches::new();
+        let conversation = self.current_conversation().unwrap_or(&empty);
+        self.matches = search_sessions(&self.sessions, &self.query, conversation);
+    }
+
+    fn current_conversation(&self) -> Option<&ConversationMatches> {
+        let (query, conversation) = &self.conversation;
+        (*query == self.query).then_some(conversation)
     }
 
     fn render_search(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
@@ -194,7 +236,7 @@ impl SessionPicker {
                 session.effort,
                 session.workspace.display()
             );
-            ListItem::new(vec![
+            let mut lines = vec![
                 Line::from(Span::styled(
                     title,
                     Style::default()
@@ -202,7 +244,19 @@ impl SessionPicker {
                         .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(Span::styled(detail, Style::default().fg(theme.muted()))),
-            ])
+            ];
+            let found = self
+                .current_conversation()
+                .and_then(|conversation| conversation.get(&session.session_id));
+            if let Some(found) = found {
+                lines.push(Line::from(Span::styled(
+                    format!("“{}”", sanitize_terminal_text_inline(&found.snippet)),
+                    Style::default()
+                        .fg(theme.muted())
+                        .add_modifier(Modifier::ITALIC),
+                )));
+            }
+            ListItem::new(lines)
         });
         let list = List::new(items)
             .highlight_symbol("› ")
@@ -266,7 +320,7 @@ mod tests {
     };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode},
-        core::session::SessionSummary,
+        core::{session::SessionSummary, storage::ConversationMatch},
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use std::path::PathBuf;
@@ -284,7 +338,44 @@ mod tests {
             reasoning_mode: ReasoningMode::Standard,
             workspace: PathBuf::from("/work"),
             preview: preview.to_owned(),
+            snippet: None,
         }
+    }
+
+    #[test]
+    fn conversation_matches_for_the_current_query_join_the_results() {
+        let mut picker = SessionPicker::new(
+            vec![summary("one", "fix parser"), summary("two", "write docs")],
+            SessionPickerMode::Resume,
+        );
+        assert!(picker.update(key(KeyCode::Char('l'))).effects.is_empty());
+        picker.update(key(KeyCode::Char('e')));
+        assert_eq!(
+            picker.update(key(KeyCode::Char('x'))).effects,
+            [SessionPickerEffect::Search("lex".to_owned())]
+        );
+        assert!(picker.matches.is_empty());
+        let found = |session_id: &str| {
+            let found = ConversationMatch {
+                rank: -1.0,
+                snippet: "the lexer".to_owned(),
+            };
+            [(session_id.to_owned(), found)].into_iter().collect()
+        };
+
+        picker.set_conversation_matches("le".to_owned(), found("one"));
+        assert!(picker.matches.is_empty(), "an answer to an earlier query");
+        picker.set_conversation_matches("lex".to_owned(), found("two"));
+        assert_eq!(picker.matches, [1]);
+        assert_eq!(
+            picker.update(key(KeyCode::Enter)).effects,
+            [SessionPickerEffect::Resume("two".to_owned())]
+        );
+        picker.update(key(KeyCode::Char('e')));
+        assert!(
+            picker.matches.is_empty(),
+            "matches for \"lex\" do not answer \"lexe\""
+        );
     }
 
     #[test]

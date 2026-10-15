@@ -14,13 +14,20 @@
 //! - The "New session" row always leads the list, even when the query filters
 //!   out every session. When starting a session is not allowed, the row stays
 //!   visible with the reason and selecting it emits nothing.
+//! - A query long enough to search conversations emits [SessionsEffect::Search].
+//!   The host answers with [SessionsOverlay::set_conversation_matches], which
+//!   adds the sessions whose conversation matches, each with a snippet.
 
 use super::{
     fit::ellipsize,
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::{app::theme::Theme, core::pane::PaneId, tui::format::sanitize_terminal_text_inline};
+use crate::{
+    app::theme::Theme,
+    core::{pane::PaneId, session::ConversationMatches, storage::search_terms},
+    tui::format::sanitize_terminal_text_inline,
+};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
@@ -46,6 +53,8 @@ const HIGHLIGHT_SYMBOL_WIDTH: usize = 2;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LiveSession {
     pub(crate) pane: PaneId,
+    /// The stored session the pane hosts, once it has one.
+    pub(crate) session_id: Option<String>,
     /// First prompt of the session, or a placeholder when it has none.
     pub(crate) title: String,
     /// Display label of the session's model.
@@ -70,6 +79,8 @@ pub(super) enum SessionsEffect {
     New,
     Close(PaneId),
     Cancel,
+    /// Search the conversations of stored sessions for this query.
+    Search(String),
 }
 
 /// A selectable row. The "New session" row is always present so that filtering
@@ -87,6 +98,8 @@ pub(super) struct SessionsOverlay {
     query: String,
     rows: Vec<Row>,
     selected: usize,
+    /// Conversation matches and the query they answer; ignored once the query changes.
+    conversation: (String, ConversationMatches),
 }
 
 impl SessionsOverlay {
@@ -97,9 +110,26 @@ impl SessionsOverlay {
             query: String::new(),
             rows: Vec::new(),
             selected: 0,
+            conversation: Default::default(),
         };
         overlay.refresh_rows(None);
         overlay
+    }
+
+    /// Applies the conversation matches for `query` unless the query has changed since. The
+    /// highlighted session stays highlighted when it still matches.
+    pub(super) fn set_conversation_matches(
+        &mut self,
+        query: String,
+        matches: ConversationMatches,
+    ) -> ComponentUpdate<SessionsEffect> {
+        if query != self.query {
+            return ComponentUpdate::none();
+        }
+        let highlighted = self.selected_session().map(|session| session.pane);
+        self.conversation = (query, matches);
+        self.refresh_rows(highlighted);
+        ComponentUpdate::render(RenderRequest::Immediate)
     }
 
     /// Replaces the listed sessions while the overlay is open. The highlighted
@@ -136,7 +166,7 @@ impl SessionsOverlay {
             KeyCode::Backspace => {
                 if let Some((index, _)) = self.query.grapheme_indices(true).next_back() {
                     self.query.truncate(index);
-                    self.refresh_rows(None);
+                    return self.query_changed();
                 }
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
@@ -157,8 +187,7 @@ impl SessionsOverlay {
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 self.query.push(character);
-                self.refresh_rows(None);
-                ComponentUpdate::render(RenderRequest::Immediate)
+                self.query_changed()
             }
             _ => ComponentUpdate::none(),
         }
@@ -167,8 +196,15 @@ impl SessionsOverlay {
     fn insert_paste(&mut self, text: &str) -> ComponentUpdate<SessionsEffect> {
         self.query
             .extend(text.chars().filter(|character| !character.is_control()));
+        self.query_changed()
+    }
+
+    fn query_changed(&mut self) -> ComponentUpdate<SessionsEffect> {
         self.refresh_rows(None);
-        ComponentUpdate::render(RenderRequest::Immediate)
+        if search_terms(&self.query).next().is_none() {
+            return ComponentUpdate::render(RenderRequest::Immediate);
+        }
+        Self::effect(SessionsEffect::Search(self.query.clone()))
     }
 
     fn activate(&self) -> ComponentUpdate<SessionsEffect> {
@@ -205,7 +241,9 @@ impl SessionsOverlay {
                 self.sessions
                     .iter()
                     .enumerate()
-                    .filter(|(_, session)| session.matches(&query))
+                    .filter(|(_, session)| {
+                        session.matches(&query) || self.snippet(session).is_some()
+                    })
                     .map(|(index, _)| Row::Session(index)),
             )
             .collect();
@@ -216,6 +254,16 @@ impl SessionsOverlay {
                 )
             })
             .unwrap_or_else(|| usize::from(self.rows.len() > 1 && !query.is_empty()));
+    }
+
+    /// The snippet of `session`'s conversation match for the current query.
+    fn snippet(&self, session: &LiveSession) -> Option<&str> {
+        let (query, conversation) = &self.conversation;
+        if *query != self.query {
+            return None;
+        }
+        let found = conversation.get(session.session_id.as_deref()?)?;
+        Some(&found.snippet)
     }
 
     fn render_search(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
@@ -244,7 +292,10 @@ impl SessionsOverlay {
         let width = usize::from(area.width).saturating_sub(HIGHLIGHT_SYMBOL_WIDTH);
         let items = self.rows.iter().map(|row| match row {
             Row::New => self.new_session_item(theme),
-            Row::Session(index) => self.sessions[*index].item(width, theme),
+            Row::Session(index) => {
+                let session = &self.sessions[*index];
+                session.item(width, self.snippet(session), theme)
+            }
         });
         let list = List::new(items)
             .highlight_symbol("› ")
@@ -282,9 +333,10 @@ impl LiveSession {
             || self.model.to_ascii_lowercase().contains(query)
     }
 
-    /// Renders one row: state glyph, truncated title, then right-hand details.
+    /// Renders one row: state glyph, truncated title, then right-hand details,
+    /// and below them the conversation `snippet` when the search matched one.
     /// The title absorbs all width pressure so the details stay visible.
-    fn item(&self, width: usize, theme: &Theme) -> ListItem<'static> {
+    fn item(&self, width: usize, snippet: Option<&str>, theme: &Theme) -> ListItem<'static> {
         let muted = Style::default().fg(theme.muted());
         let accent = Style::default().fg(theme.accent());
         let (glyph, glyph_style) = if self.running {
@@ -323,7 +375,18 @@ impl LiveSession {
             ),
         ];
         spans.extend(details);
-        ListItem::new(Line::from(spans))
+        let mut lines = vec![Line::from(spans)];
+        if let Some(snippet) = snippet {
+            let snippet = format!("“{}”", sanitize_terminal_text_inline(snippet));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    ellipsize(snippet.into(), width.saturating_sub(2)).into_owned(),
+                    muted.add_modifier(Modifier::ITALIC),
+                ),
+            ]));
+        }
+        ListItem::new(lines)
     }
 }
 
@@ -372,7 +435,10 @@ fn visible_tail(query: &str, width: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{Component, LiveSession, SessionsEffect, SessionsEvent, SessionsOverlay};
-    use crate::{app::theme::Theme, core::pane::PaneId};
+    use crate::{
+        app::theme::Theme,
+        core::{pane::PaneId, session::ConversationMatches, storage::ConversationMatch},
+    };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -387,6 +453,7 @@ mod tests {
     fn session(pane: PaneId, title: &str, model: &str) -> LiveSession {
         LiveSession {
             pane,
+            session_id: Some(title.to_owned()),
             title: title.to_owned(),
             model: model.to_owned(),
             running: false,
@@ -538,6 +605,35 @@ mod tests {
         assert_eq!(
             overlay.update(key(KeyCode::Enter)).effects,
             [SessionsEffect::New]
+        );
+    }
+
+    #[test]
+    fn conversation_matches_add_live_sessions_with_their_snippet() {
+        let mut overlay = SessionsOverlay::new(sessions(), Ok(()));
+        type_text(&mut overlay, "le");
+        assert_eq!(
+            overlay.update(key(KeyCode::Char('x'))).effects,
+            [SessionsEffect::Search("lex".to_owned())]
+        );
+        let found = |session_id: &str| -> ConversationMatches {
+            let found = ConversationMatch {
+                rank: -1.0,
+                snippet: "the lexer rewrite".to_owned(),
+            };
+            [(session_id.to_owned(), found)].into_iter().collect()
+        };
+
+        overlay.set_conversation_matches("le".to_owned(), found("refactor"));
+        assert!(!render(&mut overlay, 90).contains("refactor"), "stale");
+        overlay.set_conversation_matches("lex".to_owned(), found("refactor"));
+        let rendered = render(&mut overlay, 90);
+        assert!(rendered.contains("○ refactor · gpt"));
+        assert!(rendered.contains("“the lexer rewrite”"));
+        assert!(!rendered.contains("fix parser"));
+        assert_eq!(
+            overlay.update(key(KeyCode::Enter)).effects,
+            [SessionsEffect::Activate(PaneId::Fork(2))]
         );
     }
 

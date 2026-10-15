@@ -51,7 +51,7 @@ use crate::{
         extensions::Skill,
         prompt::{QueueId, Submission},
         protocol::{Busy, CommandError},
-        session::{RecentPrompt, SessionSummary},
+        session::{ConversationMatches, RecentPrompt, SessionSummary},
         transcript::TranscriptRecord,
     },
 };
@@ -186,6 +186,10 @@ pub(crate) enum RootEvent {
     ForkReady,
     NewSessionFailed(String),
     SessionsLoaded(Vec<SessionSummary>),
+    SessionsSearched {
+        query: String,
+        matches: ConversationMatches,
+    },
     RecentPromptsLoaded {
         session_id: String,
         prompts: Vec<RecentPrompt>,
@@ -267,6 +271,8 @@ pub(crate) enum RootEffect {
     ReloadConfig,
     NewSession(Model),
     LoadSessions(SessionListKind),
+    /// Search stored conversations for a session search; answered by `AppEvent::SessionsSearched`.
+    SearchSessions(String),
     LoadRecentPrompts(Vec<RecentPromptDraft>),
     LoadMemories,
     DeleteMemory(MemoryKey),
@@ -1813,6 +1819,10 @@ impl RootNode {
         };
         let update = picker.update(SessionPickerEvent::Terminal(event));
         match update.effects.into_iter().next() {
+            Some(SessionPickerEffect::Search(query)) => ComponentUpdate {
+                effects: vec![RootEffect::SearchSessions(query)],
+                render: update.render,
+            },
             Some(SessionPickerEffect::Dismiss) => {
                 self.overlay = None;
                 self.pending_session_mention = None;
@@ -2741,6 +2751,13 @@ impl Component for RootNode {
             RootEvent::ForkReady => self.fork_ready(),
             RootEvent::NewSessionFailed(message) => self.new_session_failed(message),
             RootEvent::SessionsLoaded(sessions) => self.sessions_loaded(sessions),
+            RootEvent::SessionsSearched { query, matches } => {
+                let Some(Overlay::Sessions(picker)) = &mut self.overlay else {
+                    return ComponentUpdate::none();
+                };
+                let update = picker.set_conversation_matches(query, matches);
+                ComponentUpdate::render(update.render)
+            }
             RootEvent::RecentPromptsLoaded {
                 session_id,
                 prompts,
