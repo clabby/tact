@@ -1650,6 +1650,67 @@ fn code_workflow_promotes_a_standalone_tool_when_the_second_child_arrives() {
 }
 
 #[test]
+fn yielded_batch_runs_until_its_cell_completes() {
+    let scan = json!({"operation": "scan", "query": "test"});
+    let code_result = |sequence, recorded_at, call_id: &str, tool: &str, text: &str| {
+        agent_with_payload_at(
+            sequence,
+            recorded_at,
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": call_id,
+                "tool": tool,
+                "status": "completed",
+                "duration_ns": 31_000_000_000_u64,
+                "result": [{"text": text}],
+                "structured_result": [{"text": text}],
+                "metadata": null,
+            }),
+        )
+    };
+    let mut transcript = transcript_of([
+        tool_call_at(1, 1_000, "workflow", "exec", json!("await poll()")),
+        tool_call_at(2, 2_000, "workflow/code-1", "memory", scan.clone()),
+        tool_call_at(3, 3_000, "workflow/code-2", "memory", scan),
+        code_result(
+            4,
+            32_000,
+            "workflow",
+            "exec",
+            "Script running with cell ID 7",
+        ),
+    ]);
+    let workflow = tool_id(&transcript, "exec");
+
+    reset_running_durations(&mut transcript);
+    let yielded = render(&mut transcript, 80, 8);
+    assert_eq!(
+        yielded.rows[yielded.first_row(workflow)],
+        "  ▶ ⠋ Batch  2 tools · 0ms"
+    );
+
+    transcript.update(TranscriptEvent::Record(tool_call_at(
+        5,
+        33_000,
+        "wait",
+        "wait",
+        json!({"cell_id": "7"}),
+    )));
+    transcript.update(TranscriptEvent::Record(code_result(
+        6,
+        92_000,
+        "wait",
+        "wait",
+        "Script completed",
+    )));
+    let completed = render(&mut transcript, 80, 8);
+    assert_eq!(
+        completed.rows[completed.first_row(workflow)],
+        "  ▶ ✓ Batch  2 tools · 91.0s"
+    );
+}
+
+#[test]
 fn final_multiline_workflow_child_connects_through_its_last_row() {
     let mut transcript = transcript_of([
         tool_call(

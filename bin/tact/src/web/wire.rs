@@ -1055,6 +1055,47 @@ mod tests {
     }
 
     #[test]
+    fn yielded_code_cells_report_elapsed_time_until_they_finish() {
+        let mut model = TranscriptModel::default();
+        model.apply(&call(1, "cell", "exec", json!("await poll()")));
+        model.apply(&call(
+            2,
+            "cell/code-1",
+            "view_image",
+            json!({"path": "a.png"}),
+        ));
+        model.apply(&call(
+            3,
+            "cell/code-2",
+            "view_image",
+            json!({"path": "b.png"}),
+        ));
+        model.apply(&finish(
+            4,
+            "cell",
+            "exec",
+            "completed",
+            json!([{"text": "Script running with cell ID 7"}]),
+        ));
+        let running = &projected(&model)[0];
+        assert_eq!(running["name"], "exec");
+        assert_eq!(running["state"], "running");
+        assert!(running["elapsed_ns"].is_u64());
+
+        model.apply(&call(5, "wait", "wait", json!({"cell_id": "7"})));
+        model.apply(&finish(
+            6,
+            "wait",
+            "wait",
+            "completed",
+            json!([{"text": "Script completed"}]),
+        ));
+        let finished = &projected(&model)[0];
+        assert_eq!(finished["state"], "succeeded");
+        assert!(finished["elapsed_ns"].is_null());
+    }
+
+    #[test]
     fn only_running_tools_report_elapsed_time() {
         let mut entry = tool("exec_command", json!({"cmd": "sleep 1"}));
         entry.state = ToolState::Running;

@@ -825,8 +825,15 @@ impl TranscriptModel {
         };
         let resumed_result = resumed_shell.map(|_| result.clone());
         let state = tool_result_state(&payload.tool, &payload.status, &result);
+        let running_code_cell = (payload.tool == "exec")
+            .then(|| running_code_cell_id(&result))
+            .flatten()
+            .map(str::to_owned);
+        // A yielded cell keeps running, and keeps calling tools, until a `wait` observes its end.
         let entry_state = if resumed_shell.is_some() && state == ToolState::Running {
             ToolState::Succeeded
+        } else if running_code_cell.is_some() {
+            ToolState::Running
         } else {
             state
         };
@@ -862,10 +869,6 @@ impl TranscriptModel {
                 self.tools.insert(payload.call_id.clone(), id);
                 id
             });
-        let running_code_cell = (payload.tool == "exec")
-            .then(|| running_code_cell_id(&result))
-            .flatten()
-            .map(str::to_owned);
         let observed_code_cell = (payload.tool == "wait")
             .then(|| self.requested_code_cell(id))
             .flatten()
@@ -927,9 +930,20 @@ impl TranscriptModel {
         if let Some(cell_id) = observed_code_cell
             && let Some(terminal) = code_cell_terminal
             && let Some(parent) = self.code_cells.remove(&cell_id)
-            && terminal == CodeCellTerminal::Terminated
         {
-            self.fail_unfinished_code_children(parent);
+            if terminal == CodeCellTerminal::Terminated {
+                self.fail_unfinished_code_children(parent);
+            }
+            self.update(parent, |kind| {
+                if let EntryKind::Tool(tool) = kind {
+                    tool.state = state;
+                    tool.duration_ns = Some(
+                        elapsed_nanoseconds(tool.started_at_unix_ms, record.recorded_at_unix_ms())
+                            .max(tool.duration_ns.unwrap_or_default()),
+                    );
+                }
+            });
+            self.running_tools.remove(&parent);
         }
         self.transient = self.is_active().then_some(TransientStatus::Thinking);
         Ok(true)
@@ -1075,12 +1089,20 @@ impl TranscriptModel {
     }
 
     fn fail_unfinished_tools(&mut self, unfinished: &[EntryId]) {
+        // A tool that ends without its own result ran until the record that ended it.
+        let ended_at_unix_ms = self.applying_at_unix_ms;
         for id in unfinished {
             self.update(*id, |kind| {
                 let EntryKind::Tool(tool) = kind else {
                     return;
                 };
                 tool.state = ToolState::Failed;
+                if let Some(ended_at_unix_ms) = ended_at_unix_ms {
+                    tool.duration_ns = Some(
+                        elapsed_nanoseconds(tool.started_at_unix_ms, ended_at_unix_ms)
+                            .max(tool.duration_ns.unwrap_or_default()),
+                    );
+                }
                 let result = tool.result.get_or_insert_with(|| serde_json::json!({}));
                 if let Value::Object(result) = result
                     && result.get("error").is_none_or(Value::is_null)
@@ -1096,6 +1118,7 @@ impl TranscriptModel {
         self.shell_sessions.retain(|_, id| !unfinished.contains(id));
         self.shell_followups
             .retain(|_, id| !unfinished.contains(id));
+        self.code_cells.retain(|_, id| !unfinished.contains(id));
     }
 
     pub(crate) fn agent_stream_closed(&mut self) -> bool {
@@ -1562,7 +1585,7 @@ mod tests {
         core::transcript::{
             EffortChanged, LocalEvent, ReflectionStarted, SessionEnded, SessionMessageReceived,
             SessionOutcome, SessionStarted, ShellFinished, ShellId, ShellStarted, SpeedChanged,
-            TranscriptRecord, TurnId, UserSteered, UserSubmitted, WorkerTurnAccepted,
+            ToolEntry, TranscriptRecord, TurnId, UserSteered, UserSubmitted, WorkerTurnAccepted,
             WorkerTurnFinished, WorkerTurnsInterrupted,
         },
     };
@@ -3458,6 +3481,148 @@ mod tests {
                     && tool.result.as_ref().and_then(|result| result["error"].as_str())
                         == Some("tool call ended without a terminal result")
         ));
+    }
+
+    fn tool_call_at(
+        at: u64,
+        call_id: &str,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> TranscriptRecord {
+        agent_at(
+            at,
+            AgentEventKind::ToolCall,
+            json!({"call_id": call_id, "tool": tool, "arguments": arguments}),
+        )
+    }
+
+    fn tool_result_at(
+        at: u64,
+        call_id: &str,
+        tool: &str,
+        duration_ns: u64,
+        result: serde_json::Value,
+    ) -> TranscriptRecord {
+        agent_at(
+            at,
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": call_id,
+                "tool": tool,
+                "status": "completed",
+                "duration_ns": duration_ns,
+                "result": result,
+                "structured_result": result,
+                "metadata": null,
+            }),
+        )
+    }
+
+    /// Applies a code-mode batch that ran two tools and then yielded as cell 7, 31 seconds after
+    /// its call at 1 second.
+    fn yielded_batch() -> TranscriptModel {
+        let mut model = TranscriptModel::default();
+        model.apply(&agent_at(1_000, AgentEventKind::RunStarted, json!({})));
+        model.apply(&tool_call_at(1_000, "cell", "exec", json!("await poll()")));
+        for (child, at) in [(1, 2_000), (2, 4_000)] {
+            let call_id = format!("cell/code-{child}");
+            model.apply(&tool_call_at(
+                at,
+                &call_id,
+                "memory",
+                json!({"operation": "scan"}),
+            ));
+            model.apply(&tool_result_at(
+                at + 1_000,
+                &call_id,
+                "memory",
+                1,
+                json!("ok"),
+            ));
+        }
+        model.apply(&tool_result_at(
+            32_000,
+            "cell",
+            "exec",
+            31_000_000_000,
+            json!([{"text": "Script running with cell ID 7"}]),
+        ));
+        model
+    }
+
+    fn batch(model: &TranscriptModel) -> &ToolEntry {
+        match &model.entries()[0].kind {
+            EntryKind::Tool(tool) if tool.name == "exec" => tool,
+            kind => panic!("expected the batch entry, found {kind:?}"),
+        }
+    }
+
+    #[test]
+    fn yielded_code_cell_runs_until_a_wait_observes_its_completion() {
+        let mut model = yielded_batch();
+        let id = model.entries()[0].id;
+
+        assert_eq!(batch(&model).state, ToolState::Running);
+        assert!(model.running_tool_ids().any(|running| running == id));
+
+        model.apply(&tool_call_at(
+            33_000,
+            "wait-1",
+            "wait",
+            json!({"cell_id": "7"}),
+        ));
+        model.apply(&tool_call_at(
+            40_000,
+            "cell/code-3",
+            "memory",
+            json!({"operation": "scan"}),
+        ));
+        model.apply(&tool_result_at(
+            46_000,
+            "cell/code-3",
+            "memory",
+            1,
+            json!("ok"),
+        ));
+        model.apply(&tool_result_at(
+            63_000,
+            "wait-1",
+            "wait",
+            30_000_000_000,
+            json!([{"text": "Script running with cell ID 7"}]),
+        ));
+        assert_eq!(batch(&model).state, ToolState::Running);
+
+        model.apply(&tool_call_at(
+            64_000,
+            "wait-2",
+            "wait",
+            json!({"cell_id": "7"}),
+        ));
+        model.apply(&tool_result_at(
+            1_020_000,
+            "wait-2",
+            "wait",
+            1,
+            json!([{"text": "Script completed"}]),
+        ));
+
+        let tool = batch(&model);
+        assert_eq!(tool.state, ToolState::Succeeded);
+        assert_eq!(tool.duration_ns, Some(1_019_000_000_000));
+        assert!(!model.running_tool_ids().any(|running| running == id));
+    }
+
+    #[test]
+    fn ending_a_run_settles_a_yielded_code_cell_at_the_end_of_the_run() {
+        let mut model = yielded_batch();
+
+        model.apply(&agent_at(90_000, AgentEventKind::RunCompleted, json!({})));
+
+        let tool = batch(&model);
+        assert_eq!(tool.state, ToolState::Failed);
+        assert_eq!(tool.duration_ns, Some(89_000_000_000));
+        assert!(!model.has_running_tools());
     }
 
     #[test]
