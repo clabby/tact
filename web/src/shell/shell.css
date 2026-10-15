@@ -130,6 +130,27 @@ diffs-container { --diffs-light-bg: var(--bg); --diffs-dark-bg: var(--bg); }
 .session-title { overflow: hidden; font-size: var(--text-md); text-overflow: ellipsis; white-space: nowrap; }
 .session-snippet { overflow: hidden; color: var(--muted); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
 .session-row.unread .session-title, .session-row.active .session-title { font-weight: 600; }
+/*
+ * A title that is still being generated shows its fallback muted under a slow shimmer. The
+ * generated title then sweeps in from the left over TITLE_REVEAL_MS (session-title.ts). Under
+ * reduced motion the muted colour alone marks the pending title and the swap is instant.
+ */
+@keyframes title-reveal { from { opacity: .3; filter: blur(3px); -webkit-mask-position: 100% 0; mask-position: 100% 0; } }
+.app .title-pending {
+  background: linear-gradient(90deg, var(--muted) 0%, var(--muted) 38%, color-mix(in srgb, var(--muted) 20%, var(--text)) 50%, var(--muted) 62%, var(--muted) 100%);
+  background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: shimmer 2.8s linear infinite;
+}
+.app .title-reveal {
+  width: fit-content; max-width: 100%;
+  -webkit-mask-image: linear-gradient(90deg, #000 40%, transparent 60%); mask-image: linear-gradient(90deg, #000 40%, transparent 60%);
+  -webkit-mask-size: 250% 100%; mask-size: 250% 100%; -webkit-mask-position: 0 0; mask-position: 0 0;
+  animation: title-reveal 380ms var(--ease-out) backwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .app .title-pending { background: none; color: var(--muted); animation: none; }
+  .app .title-reveal { animation: none; }
+}
 .session-meta { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--faint); font-size: var(--text-xs); }
 .model-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; }
 .session-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

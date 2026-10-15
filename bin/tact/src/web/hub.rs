@@ -28,7 +28,7 @@ use crate::{
     core::{
         context::ContextBudget,
         protocol::{Busy, Draft, Origin, Publication, QueuedPrompt, SessionInfo},
-        titles::fallback,
+        titles::{Title, fallback},
         transcript::{
             EntryKind, TranscriptEntry, TranscriptModel, TranscriptRecord, TransientStatus,
         },
@@ -98,7 +98,7 @@ struct Live {
     busy: Busy,
     unread: bool,
     last_activity_unix_ms: u64,
-    title: Option<String>,
+    title: Option<Title>,
     context: Option<ContextBudget>,
     roster: SubagentRoster,
     /// The transcript of each subagent, projected like the session's own.
@@ -392,18 +392,24 @@ impl Live {
         }
     }
 
-    fn title(&mut self) -> String {
+    fn title(&mut self) -> Title {
         if self.title.is_none() {
             self.title = self
                 .model
                 .entries()
                 .iter()
                 .find_map(|entry| match &entry.kind {
-                    EntryKind::User { text, .. } => Some(fallback(text)),
+                    EntryKind::User { text, .. } => Some(Title {
+                        text: fallback(text),
+                        pending: false,
+                    }),
                     _ => None,
                 });
         }
-        self.title.clone().unwrap_or_else(|| "New chat".to_owned())
+        self.title.clone().unwrap_or_else(|| Title {
+            text: "New chat".to_owned(),
+            pending: false,
+        })
     }
 
     fn errored(&self) -> bool {
@@ -425,9 +431,11 @@ impl Live {
         } else {
             SummaryState::Idle
         };
+        let title = self.title();
         SessionSummary {
             id: self.info.id.clone(),
-            title: self.title(),
+            title: title.text,
+            title_pending: title.pending,
             model: self.info.model.clone(),
             workspace: self.info.workspace.to_string_lossy().into_owned(),
             state,
@@ -442,9 +450,11 @@ impl Live {
     }
 
     fn snapshot(&mut self) -> SessionSnapshot {
+        let title = self.title();
         SessionSnapshot {
             session: self.info.id.clone(),
-            title: self.title(),
+            title: title.text,
+            title_pending: title.pending,
             model: self.info.model.clone(),
             workspace: self.info.workspace.to_string_lossy().into_owned(),
             effort: self.info.effort,
@@ -997,6 +1007,7 @@ mod tests {
         app::config::{ReasoningEffort, ReasoningMode, Speed},
         core::{
             protocol::{Busy, Draft, Origin, Publication, QueuedPrompt, SessionInfo},
+            titles::Title,
             transcript::{
                 LocalEvent, SessionStarted, TranscriptModel, TranscriptRecord, TurnId,
                 UserSubmitted, WorkerTurnAccepted, WorkerTurnFinished,
@@ -1510,19 +1521,26 @@ mod tests {
         settle().await;
         drain(&mut subscription);
 
-        fixture.publish(Publication::Title {
-            session: "s1".into(),
-            title: "Parser cleanup".into(),
-        });
-        settle().await;
-        let events = drain(&mut subscription);
-        let live = events.iter().find(|event| event.0 == "live").unwrap();
-        assert_eq!(live.1["sessions"][0]["title"], "Parser cleanup");
+        for (text, pending) in [("Fix the parser", true), ("Parser cleanup", false)] {
+            fixture.publish(Publication::Title {
+                session: "s1".into(),
+                title: Title {
+                    text: text.into(),
+                    pending,
+                },
+            });
+            settle().await;
+            let events = drain(&mut subscription);
+            let live = events.iter().find(|event| event.0 == "live").unwrap();
+            assert_eq!(live.1["sessions"][0]["title"], text);
+            assert_eq!(live.1["sessions"][0]["title_pending"], pending);
 
-        let mut reconnected = fixture.hub.subscribe().unwrap();
-        let events = drain(&mut reconnected);
-        let snapshot = events.iter().find(|event| event.0 == "snapshot").unwrap();
-        assert_eq!(snapshot.1["title"], "Parser cleanup");
+            let mut reconnected = fixture.hub.subscribe().unwrap();
+            let events = drain(&mut reconnected);
+            let snapshot = events.iter().find(|event| event.0 == "snapshot").unwrap();
+            assert_eq!(snapshot.1["title"], text);
+            assert_eq!(snapshot.1["title_pending"], pending);
+        }
     }
 
     #[tokio::test(start_paused = true)]

@@ -97,6 +97,7 @@ that harmless.
 ```ts
 type SessionSummary = {
   id: string; title: string; model: string;
+  title_pending: boolean;     // title is the first prompt's fallback while a generated title is expected
   workspace: string;          // the directory the session's agent runs in
   state: "idle" | "running" | "error";
   unread: boolean;            // finished or errored while not active
@@ -104,7 +105,7 @@ type SessionSummary = {
   last_activity_unix_ms: number;
 };
 type SessionSnapshot = {
-  session: string; title: string; model: string; workspace: string; effort: Effort;
+  session: string; title: string; title_pending: boolean; model: string; workspace: string; effort: Effort;
   reasoning_mode: "standard" | "pro"; speed: Speed;
   entries: WireEntry[]; status: TransientStatus | null; queue: QueuedPrompt[];
   draft: Draft; running: boolean;
@@ -321,6 +322,7 @@ type Checkout = {
 type PersistedSession = {
   session_id: string; started_at_unix_ms: number; model: string; effort: Effort;
   reasoning_mode: "standard" | "pro"; workspace: string; preview: string;
+  title_pending?: true;       // preview is a fallback while a claimed title is being generated
 };
 type ContextDiagnostics = {
   model_window_tokens: number; auto_compact_token_limit: number | null;

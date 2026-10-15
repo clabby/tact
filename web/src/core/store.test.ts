@@ -4,7 +4,7 @@ import type { SessionSnapshot, StreamEvent, WireEntry } from "./wire";
 
 function snapshot(session: string, entries: WireEntry[] = []): SessionSnapshot {
   return {
-    session, title: `Session ${session}`, model: "sol", effort: "high", reasoning_mode: "standard", speed: "standard",
+    session, title: `Session ${session}`, title_pending: false, model: "sol", effort: "high", reasoning_mode: "standard", speed: "standard",
     entries, status: null, queue: [], draft: { rev: 1, text: "", images: [] }, running: false, context: null,
     subagents: { max_subagents: 4, agents: [] },
   };
@@ -65,7 +65,7 @@ test("live updates do not disturb the transcript", () => {
     type: "live",
     data: {
       active: "a",
-      sessions: [{ id: "a", title: "Session a", model: "sol", state: "running", unread: false, has_draft: false, last_activity_unix_ms: 1, workspace: "/src/tact" }],
+      sessions: [{ id: "a", title: "Session a", title_pending: false, model: "sol", state: "running", unread: false, has_draft: false, last_activity_unix_ms: 1, workspace: "/src/tact" }],
     },
   });
 
@@ -73,6 +73,18 @@ test("live updates do not disturb the transcript", () => {
   expect(state.session).toBe(session);
   expect(state.session!.entries).toBe(entries);
   expect(state.live).toHaveLength(1);
+});
+
+test("live summaries carry the displayed session's pending title and its final replacement", () => {
+  const state = connected();
+  const summary = { id: "a", model: "sol", state: "running", unread: false, has_draft: false, last_activity_unix_ms: 1, workspace: "/src/tact" } as const;
+  const live = (title: string, title_pending: boolean): StreamEvent => ({ type: "live", data: { active: "a", sessions: [{ ...summary, title, title_pending }] } });
+
+  expect(reduce(state, live("Fix the parser", true))).toEqual([{ type: "live" }, { type: "settings" }]);
+  expect(state.session).toMatchObject({ title: "Fix the parser", titlePending: true });
+  expect(reduce(state, live("Fix the parser", false))).toEqual([{ type: "live" }, { type: "settings" }]);
+  expect(state.session).toMatchObject({ title: "Fix the parser", titlePending: false });
+  expect(reduce(state, live("Fix the parser", false))).toEqual([{ type: "live" }]);
 });
 
 test("a stale draft revision is dropped and a newer one records its origin", () => {

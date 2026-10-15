@@ -5,7 +5,8 @@ use crate::{
     app::config::Config,
     core::{
         protocol::{CommandError, Reply},
-        storage::SessionStorage,
+        storage::{SessionStorage, StorageError},
+        titles::{self, Title},
     },
     tui::components::{AppEvent, RenderRequest},
 };
@@ -25,7 +26,11 @@ pub(super) struct Rename {
 }
 
 pub(super) enum TitleUpdate {
-    Snapshot(HashMap<String, String>),
+    Snapshot {
+        titles: HashMap<String, Title>,
+        /// Whether sessions without a stored title yet can expect a generated one.
+        generating: bool,
+    },
     Renamed {
         request: Rename,
         result: Result<(), CommandError>,
@@ -60,14 +65,15 @@ pub(super) fn spawn(
                     }
                 }
                 _ = interval.tick() => {
-                    let path = config.path().to_owned();
+                    let config = config.clone();
                     let result = tokio::task::spawn_blocking(move || {
-                        SessionStorage::open_read_only(&path)?
+                        let titles = SessionStorage::open_read_only(config.path())?
                             .map(|storage| storage.titles()).transpose()
-                            .map(Option::unwrap_or_default)
+                            .map(Option::unwrap_or_default)?;
+                        Ok::<_, StorageError>((titles, titles::available(&config)))
                     }).await;
-                    if let Ok(Ok(titles)) = result
-                        && updates.send(TitleUpdate::Snapshot(titles)).is_err()
+                    if let Ok(Ok((titles, generating))) = result
+                        && updates.send(TitleUpdate::Snapshot { titles, generating }).is_err()
                     {
                         break;
                     }
@@ -126,14 +132,21 @@ impl EventLoop {
     pub(super) fn on_title_update(&mut self, update: TitleUpdate) {
         let mut changed = false;
         match update {
-            TitleUpdate::Snapshot(titles) => {
+            TitleUpdate::Snapshot { titles, generating } => {
+                changed = self.app.set_title_generation(generating);
                 for (session, title) in titles {
                     changed |= self.app.set_session_title(&session, title);
                 }
             }
             TitleUpdate::Renamed { request, result } => {
                 if result.is_ok() {
-                    changed = self.app.set_session_title(&request.session, request.title);
+                    changed = self.app.set_session_title(
+                        &request.session,
+                        Title {
+                            text: request.title,
+                            pending: false,
+                        },
+                    );
                 }
                 if let Some(reply) = request.reply {
                     drop(reply.send(result.map(|()| Reply::Done)));

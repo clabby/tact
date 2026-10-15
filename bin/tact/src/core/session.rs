@@ -52,6 +52,9 @@ pub(crate) struct SessionSummary {
     pub(crate) reasoning_mode: ReasoningMode,
     pub(crate) workspace: PathBuf,
     pub(crate) preview: String,
+    /// The preview is a fallback title while a generated one is expected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) title_pending: bool,
     /// Conversation text around a search match, when the session was found by its conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) snippet: Option<String>,
@@ -67,6 +70,7 @@ impl From<StoredSession> for SessionSummary {
             reasoning_mode: session.reasoning_mode,
             workspace: session.workspace,
             preview: session.preview,
+            title_pending: session.title_pending,
             snippet: None,
         }
     }
@@ -585,7 +589,7 @@ impl SessionStore {
         let Some(storage) = self.open()? else {
             return Ok(None);
         };
-        Ok(storage.titles()?.remove(session_id))
+        Ok(storage.titles()?.remove(session_id).map(|title| title.text))
     }
 
     pub(crate) fn load_checkpoint(&self, session_id: &str) -> Result<ResumeState, SessionError> {
@@ -902,6 +906,7 @@ mod tests {
             reasoning_mode: ReasoningMode::Standard,
             workspace: PathBuf::from("/work"),
             preview: preview.to_owned(),
+            title_pending: false,
             snippet: None,
         }
     }

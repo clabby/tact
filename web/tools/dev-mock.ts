@@ -103,6 +103,8 @@ export const MOCK_CATALOG: ModelCatalog = {
 };
 const WINDOW_TOKENS = 272_000;
 const MAX_LIVE = 8;
+/** How long the imitated title model takes, long enough to see and screenshot the pending title. */
+const TITLE_GENERATION_MS = 4_000;
 
 export const MOCK_DEFAULT_WORKSPACE = "/Users/dev/src/tact";
 const WS2 = "/Users/dev/src/tact-ws2";
@@ -136,6 +138,7 @@ export function mockCheckoutPage<Page extends { patch: string; repository: strin
 
 class MockSession {
   title: string;
+  titlePending = false;
   entries: WireEntry[] = [];
   details = new Map<number, ToolDetail>();
   status: TransientStatus | null = null;
@@ -171,6 +174,7 @@ class MockSession {
     return {
       id: this.id,
       title: this.title,
+      title_pending: this.titlePending,
       model: this.model,
       state: this.running ? "running" : this.failed ? "error" : "idle",
       unread: this.unread,
@@ -184,6 +188,7 @@ class MockSession {
     return {
       session: this.id,
       title: this.title,
+      title_pending: this.titlePending,
       model: this.model,
       effort: this.effort,
       reasoning_mode: this.reasoningMode,
@@ -471,6 +476,7 @@ export class MockTact {
         const title = input.trim();
         if (!title) throw new MockRefusal("invalid_request", "Enter a session title.", 400);
         this.session(session).title = title;
+        this.session(session).titlePending = false;
         this.publishLive();
         return {};
       }
@@ -714,7 +720,7 @@ export class MockTact {
     const turn = new AbortController();
     session.turn = turn;
     session.failed = false;
-    if (session.title === "New chat") session.title = prompt.slice(0, 48);
+    if (session.title === "New chat") this.generateTitle(session, prompt);
     const started = Date.now();
     if (showPrompt) this.append(session, { kind: "user", text: prompt });
     this.publishLive();
@@ -854,6 +860,23 @@ export class MockTact {
     session.turn = null;
     this.setStatus(session, null);
     this.publishLive();
+  }
+
+  /**
+   * Imitates background title generation: the prompt's first line names the session while the
+   * title is pending, then the prompt's first sentence (at most six words) replaces it.
+   */
+  private generateTitle(session: MockSession, prompt: string) {
+    const line = prompt.split("\n").map((text) => text.trim()).find(Boolean) ?? "New chat";
+    session.title = line.slice(0, 80);
+    session.titlePending = true;
+    setTimeout(() => {
+      if (!session.titlePending) return;
+      const sentence = line.split(/[.?!:;,]/)[0]!.trim();
+      session.title = sentence.split(/\s+/).slice(0, 6).join(" ") || line;
+      session.titlePending = false;
+      this.publishLive();
+    }, TITLE_GENERATION_MS * this.pace);
   }
 
   private seed() {

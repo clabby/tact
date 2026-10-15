@@ -59,6 +59,8 @@ pub(super) enum SummaryState {
 pub(super) struct SessionSummary {
     pub(super) id: String,
     pub(super) title: String,
+    /// The title is a fallback while a generated title is expected.
+    pub(super) title_pending: bool,
     pub(super) model: String,
     pub(super) workspace: String,
     pub(super) state: SummaryState,
@@ -71,6 +73,7 @@ pub(super) struct SessionSummary {
 pub(super) struct SessionSnapshot {
     pub(super) session: String,
     pub(super) title: String,
+    pub(super) title_pending: bool,
     pub(super) model: String,
     pub(super) workspace: String,
     pub(super) effort: ReasoningEffort,

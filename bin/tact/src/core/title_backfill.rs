@@ -12,14 +12,16 @@ use tokio::task::JoinSet;
 
 pub(crate) async fn run(config: Config) {
     loop {
-        let path = config.path().to_owned();
+        let batch_config = config.clone();
         let batch = tokio::task::spawn_blocking(move || {
-            let storage = SessionStorage::open(&path)?;
+            let storage = SessionStorage::open(batch_config.path())?;
             storage.inherit_titles()?;
+            // Without credentials the fallback is final from the start, so it never shows as pending.
+            let generating = titles::available(&batch_config);
             let mut claimed = Vec::new();
             for (session, prompt) in storage.untitled_prompts(2)? {
                 let fallback = titles::fallback(&prompt);
-                if storage.claim_title(&session, &fallback)? {
+                if storage.claim_title(&session, &fallback, generating)? && generating {
                     claimed.push((session, prompt));
                 }
             }
@@ -31,13 +33,16 @@ pub(crate) async fn run(config: Config) {
             for (session, prompt) in batch {
                 let config = config.clone();
                 tasks.spawn(async move {
-                    if let Some(title) = titles::generate(&config, &prompt).await {
-                        let path: PathBuf = config.path().into();
-                        let _ = tokio::task::spawn_blocking(move || {
-                            SessionStorage::open(&path)?.complete_title(&session, &title)
-                        })
-                        .await;
-                    }
+                    let title = titles::generate(&config, &prompt).await;
+                    let path: PathBuf = config.path().into();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let storage = SessionStorage::open(&path)?;
+                        match title {
+                            Some(title) => storage.complete_title(&session, &title),
+                            None => storage.settle_title(&session),
+                        }
+                    })
+                    .await;
                 });
             }
         }

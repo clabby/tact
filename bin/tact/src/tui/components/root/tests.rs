@@ -1229,6 +1229,7 @@ fn second_at_switches_from_files_to_session_mentions() {
         reasoning_mode: ReasoningMode::Standard,
         workspace: workspace.path().to_path_buf(),
         preview: "earlier investigation".to_owned(),
+        title_pending: false,
         snippet: None,
     }]));
     assert!(matches!(&root.overlay, Some(Overlay::Sessions(_))));

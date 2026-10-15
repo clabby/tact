@@ -8,6 +8,8 @@ export type SessionState = "idle" | "running" | "error";
 export type SessionSummary = {
   id: string;
   title: string;
+  /** The title is the first prompt's fallback while a generated title is expected. */
+  title_pending: boolean;
   model: string;
   state: SessionState;
   /** Finished or errored while not active. */
@@ -161,6 +163,7 @@ export type SubagentRoster = { max_subagents: number; agents: Subagent[] };
 export type SessionSnapshot = {
   session: string;
   title: string;
+  title_pending: boolean;
   model: string;
   effort: Effort;
   reasoning_mode: ReasoningMode;
@@ -267,6 +270,8 @@ export type PersistedSession = {
   reasoning_mode: ReasoningMode;
   workspace: string;
   preview: string;
+  /** The preview is a fallback while a claimed title is being generated. */
+  title_pending?: true;
   /** Conversation text around the search match, when the session was found by its conversation. */
   snippet?: string;
 };

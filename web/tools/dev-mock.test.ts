@@ -68,3 +68,19 @@ test("the mock publishes agent threads to the session and to each participant's 
   const failed = snapshot.entries.find((entry) => entry.kind === "directed_message" && entry.thread === 3);
   expect(failed).toMatchObject({ delivery: "failed", messages: [{ from: 3, to: 4, delivery: "failed" }] });
 });
+
+test("a mock session's first prompt names it with a pending title until the generated one lands", async () => {
+  const mock = new MockTact();
+  mock.pace = 0;
+  const { session } = mock.command("open_session", { new: {} }, 1) as { session: string };
+  const titles: [string, boolean][] = [];
+  mock.subscribe((name, data) => {
+    const summary = name === "live" && (data as StreamEvents["live"]).sessions.find((candidate) => candidate.id === session);
+    if (summary) titles.push([summary.title, summary.title_pending]);
+  });
+  mock.command("set_draft", { session, text: "Harden the flaky bridge test. It fails on CI." }, 1);
+  mock.command("submit", { session, rev: 1 }, 1);
+  expect(titles.at(-1)).toEqual(["Harden the flaky bridge test. It fails on CI.", true]);
+  await Bun.sleep(5);
+  expect(titles.at(-1)).toEqual(["Harden the flaky bridge test", false]);
+});

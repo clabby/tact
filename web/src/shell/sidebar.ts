@@ -4,6 +4,7 @@ import { glyph } from "../ui/glyphs";
 import { createSphere } from "../ui/dot-sphere";
 import { openMenu } from "../ui/menu";
 import { orderSessions } from "./session-pins";
+import { SessionTitles } from "./session-title";
 import type { Connection } from "../core/store";
 import { toast } from "../ui/toast";
 import type { ModelCatalog, OpenSpec, PersistedSession, SessionSummary, SiblingInstance } from "../core/wire";
@@ -54,6 +55,7 @@ export class Sidebar {
   /** Snippets of the live sessions whose conversation matches `historyQuery`, by session id. */
   private liveMatches: Record<string, string> = {};
   private searchTimer = 0;
+  private readonly titles = new SessionTitles();
 
   constructor(private readonly root: HTMLElement, private readonly host: SidebarHost) {
     root.innerHTML = `
@@ -205,7 +207,7 @@ export class Sidebar {
       <button type="button" class="icon-button row-menu" aria-label="Session actions" aria-haspopup="menu">${glyph("more")}</button>`;
     // The globe's visible diameter matches the 8px steady-state dots (the canvas is slightly larger).
     if (session.state === "running") row.querySelector(".session-marker")!.append(createSphere(10, 14));
-    row.querySelector(".session-title")!.textContent = session.title || "New chat";
+    this.titles.render(row.querySelector(".session-title")!, session.id, session.title || "New chat", session.title_pending);
     renderSnippet(row, snippet);
     row.querySelector(".session-model")!.textContent = label;
     this.renderWorkspace(row, session.workspace);
@@ -342,7 +344,7 @@ export class Sidebar {
     const row = document.createElement("li");
     row.className = "session-row history-row";
     row.innerHTML = `<button type="button" class="session-main"><span class="session-text"><span class="session-title"></span><span class="session-meta"><span class="model-dot"></span><span class="session-model"></span><span class="session-workspace"></span><span class="session-age"></span></span></span></button>`;
-    row.querySelector(".session-title")!.textContent = session.preview || session.session_id.slice(0, 8);
+    this.titles.render(row.querySelector(".session-title")!, session.session_id, session.preview || session.session_id.slice(0, 8), session.title_pending ?? false);
     renderSnippet(row, session.snippet);
     row.querySelector(".session-model")!.textContent = this.host.catalog()?.models.find((model) => model.id === session.model)?.label ?? session.model;
     this.renderWorkspace(row, session.workspace);

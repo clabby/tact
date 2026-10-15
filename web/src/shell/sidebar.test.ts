@@ -110,3 +110,36 @@ test("refreshes cached history titles after the initial history load", async () 
   expect(calls).toBe(2);
   expect(root.querySelector(".history-row .session-title")!.textContent).toBe("Generated title");
 });
+
+describe("sidebar titles", () => {
+  test("live rows shimmer while their title is pending and reveal only when it resolves", () => {
+    const root = document.createElement("aside");
+    const sidebar = new Sidebar(root, host);
+    const title = () => root.querySelector(".live-list .session-title")!;
+    const classes = () => ["title-pending", "title-reveal"].filter((name) => title().classList.contains(name));
+    const live = (text: string, title_pending: boolean) => sidebar.setLive([{ ...session("a", "idle"), title: text, title_pending }], null);
+
+    live("Settled title", false);
+    expect(classes()).toEqual([]);
+    live("Fix the parser", true);
+    expect(classes()).toEqual(["title-pending"]);
+    live("Fix the parser", true);
+    expect(classes()).toEqual(["title-pending"]);
+    live("Parser repair", false);
+    expect(title().textContent).toBe("Parser repair");
+    expect(classes()).toEqual(["title-reveal"]);
+  });
+
+  test("history rows awaiting a generated title shimmer", async () => {
+    const api = {
+      query: async () => ({
+        sessions: [{ session_id: "saved", preview: "first prompt", title_pending: true, model: "sol", workspace: "/work", started_at_unix_ms: 1 } as PersistedSession],
+        next_cursor: null,
+      }),
+    } as unknown as SidebarHost["api"];
+    const root = document.createElement("aside");
+    new Sidebar(root, { ...host, api });
+    await Bun.sleep(0);
+    expect(root.querySelector(".history-row .session-title")!.classList.contains("title-pending")).toBe(true);
+  });
+});

@@ -363,6 +363,7 @@ mod tests {
             reasoning_mode: ReasoningMode::Standard,
             workspace: PathBuf::from("/work"),
             preview: preview.to_owned(),
+            title_pending: false,
             snippet: None,
         }
     }

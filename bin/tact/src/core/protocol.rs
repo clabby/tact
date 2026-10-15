@@ -18,6 +18,7 @@ use crate::{
         context::{ContextBudget, ContextDiagnostics},
         extensions::SkillMatches,
         session::{HistoryPage, RecentPromptScope, RecentPrompts},
+        titles::Title,
         transcript::TranscriptRecord,
     },
     search::FileMatches,
@@ -106,7 +107,7 @@ pub(crate) enum Publication {
     },
     Title {
         session: String,
-        title: String,
+        title: Title,
     },
     Closed {
         session: String,

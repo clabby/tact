@@ -19,6 +19,7 @@ import { PromptRail } from "./chat/prompt-rail-view";
 import { mountReviewPanel } from "./review/review-panel";
 import { Sidebar } from "./shell/sidebar";
 import { openSessionRename } from "./shell/session-rename";
+import { SessionTitles } from "./shell/session-title";
 import { effectiveSpeed, speedChoices } from "./core/speed";
 import { Store, type Change } from "./core/store";
 import { StreamClient } from "./core/stream";
@@ -60,6 +61,7 @@ class App {
   private readonly store = new Store();
   private readonly theme = new ThemeController();
   private readonly palette = new Palette();
+  private readonly headerTitle = new SessionTitles();
   private readonly transcript: Transcript;
   private readonly composer: Composer;
   private readonly rail: PromptRail;
@@ -444,7 +446,7 @@ class App {
   private renderHeader() {
     const session = this.store.state.session;
     const title = session?.title || (session ? "New chat" : "Tact");
-    root.querySelector(".chat-title h1")!.textContent = title;
+    this.headerTitle.render(root.querySelector(".chat-title h1")!, session?.id ?? "", title, session?.titlePending ?? false);
     const label = this.catalog?.models.find((model) => model.id === session?.model)?.label ?? session?.model ?? "";
     root.querySelector(".chat-model")!.textContent = label;
     const effort = root.querySelector<HTMLElement>(".chat-effort")!;

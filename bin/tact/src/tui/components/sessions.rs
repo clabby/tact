@@ -55,8 +55,10 @@ pub(crate) struct LiveSession {
     pub(crate) pane: PaneId,
     /// The stored session the pane hosts, once it has one.
     pub(crate) session_id: Option<String>,
-    /// First prompt of the session, or a placeholder when it has none.
+    /// The session's display title, or a placeholder when it has none.
     pub(crate) title: String,
+    /// The title is a fallback while a generated title is expected.
+    pub(crate) title_pending: bool,
     /// Display label of the session's model.
     pub(crate) model: String,
     pub(crate) running: bool,
@@ -366,7 +368,11 @@ impl LiveSession {
             Span::styled(
                 ellipsize(sanitize_terminal_text_inline(&self.title), title_width).into_owned(),
                 Style::default()
-                    .fg(theme.text())
+                    .fg(if self.title_pending {
+                        theme.muted()
+                    } else {
+                        theme.text()
+                    })
                     .add_modifier(if self.unread {
                         Modifier::BOLD
                     } else {
@@ -455,6 +461,7 @@ mod tests {
             pane,
             session_id: Some(title.to_owned()),
             title: title.to_owned(),
+            title_pending: false,
             model: model.to_owned(),
             running: false,
             unread: false,
