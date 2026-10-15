@@ -581,6 +581,13 @@ impl SessionStore {
         Ok(SessionStorage::open_read_only(&self.config_path)?)
     }
 
+    pub(crate) fn title(&self, session_id: &str) -> Result<Option<String>, SessionError> {
+        let Some(storage) = self.open()? else {
+            return Ok(None);
+        };
+        Ok(storage.titles()?.remove(session_id))
+    }
+
     pub(crate) fn load_checkpoint(&self, session_id: &str) -> Result<ResumeState, SessionError> {
         let missing = || SessionError::MissingCheckpoint {
             session_id: session_id.to_owned(),

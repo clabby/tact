@@ -268,6 +268,7 @@ impl Settings {
 /// The last published state of a live session.
 struct Published {
     session: String,
+    title: Option<String>,
     draft: Draft,
     queue: Vec<QueuedPrompt>,
     settings: Settings,
@@ -305,6 +306,8 @@ pub(crate) struct AppNode {
     max_live_sessions: usize,
     overlay: Option<AppOverlay>,
     publisher: Option<Publisher>,
+    /// Last persisted titles, including sessions whose panes have not opened yet.
+    titles: HashMap<String, String>,
     /// The last published active session.
     active: Option<String>,
 }
@@ -334,6 +337,7 @@ impl AppNode {
             max_live_sessions: 8,
             overlay: None,
             publisher: None,
+            titles: HashMap::new(),
             active: None,
         };
         app.refresh_layout();
@@ -559,25 +563,35 @@ impl AppNode {
             } => self.update_root(pane, RootEvent::MemoryDeleteFailed { error, conflict }),
             AppEvent::SessionRestored {
                 pane,
-                projection,
+                mut projection,
                 effort,
                 reasoning_mode,
                 preferred_reasoning_mode,
                 speed,
                 model,
                 skills,
-            } => self.update_root(
-                pane,
-                RootEvent::SessionRestored {
-                    projection,
-                    effort,
-                    reasoning_mode,
-                    preferred_reasoning_mode,
-                    speed,
-                    model,
-                    skills,
-                },
-            ),
+            } => {
+                if let Some(title) = self
+                    .panes
+                    .get(&pane)
+                    .and_then(|entry| entry.published.as_ref())
+                    .and_then(|published| self.titles.get(&published.session))
+                {
+                    projection.title = Some(title.clone());
+                }
+                self.update_root(
+                    pane,
+                    RootEvent::SessionRestored {
+                        projection,
+                        effort,
+                        reasoning_mode,
+                        preferred_reasoning_mode,
+                        speed,
+                        model,
+                        skills,
+                    },
+                )
+            }
             AppEvent::EffortUpdateFailed {
                 pane,
                 effort,
@@ -1250,6 +1264,32 @@ impl AppNode {
         self.panes.get_mut(&pane).map(|entry| &mut entry.root)
     }
 
+    pub(crate) fn set_session_title(&mut self, session: &str, title: String) -> bool {
+        if self.titles.get(session) != Some(&title) {
+            self.titles.insert(session.to_owned(), title.clone());
+            if let Some(publisher) = &self.publisher {
+                publisher.publish(Publication::HistoryChanged);
+            }
+        }
+        let mut changed = false;
+        for entry in self.panes.values_mut() {
+            changed |= entry.root.update_saved_session_title(session, &title);
+            if entry
+                .published
+                .as_ref()
+                .is_some_and(|published| published.session == session)
+                && entry.root.title() != Some(title.as_str())
+            {
+                entry.root.set_title(title.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            self.refresh_sessions_overlay();
+        }
+        changed
+    }
+
     /// Records that `pane` now hosts `session` and announces it. A pane whose session was
     /// replaced in place announces the previous session as closed first; its draft revision keeps
     /// increasing.
@@ -1263,10 +1303,14 @@ impl AppNode {
             return;
         };
         let previous = entry.published.take();
+        if let Some(title) = self.titles.get(&session) {
+            entry.root.set_title(title.clone());
+        }
         let root = &entry.root;
         let settings = Settings::of(root);
         let published = Published {
             session,
+            title: None,
             draft: Draft {
                 rev: previous.as_ref().map_or(0, |previous| previous.draft.rev),
                 text: root.shared_draft().to_owned(),
@@ -1327,6 +1371,15 @@ impl AppNode {
             let Some(published) = &mut entry.published else {
                 continue;
             };
+            if published.title.as_deref() != root.title() {
+                published.title = root.title().map(str::to_owned);
+                if let Some(title) = &published.title {
+                    publish(Publication::Title {
+                        session: published.session.clone(),
+                        title: title.clone(),
+                    });
+                }
+            }
             let draft = root.shared_draft();
             let images_changed = !images_match(&published.draft.images, root);
             if published.draft.text != draft || images_changed {
@@ -1479,7 +1532,8 @@ impl AppNode {
                 instructions,
             } => (session, PaneCommand::Reflect(instructions)),
             Command::Handoff { session } => (session, PaneCommand::Handoff),
-            Command::ReloadConfig
+            Command::RenameSession { .. }
+            | Command::ReloadConfig
             | Command::WriteConfig { .. }
             | Command::DeleteMemory { .. }
             | Command::SetMaxSubagents { .. } => {
@@ -1585,6 +1639,61 @@ mod tests {
             KeyCode::Char(character),
             KeyModifiers::CONTROL,
         )))
+    }
+
+    #[test]
+    fn titles_received_before_a_session_opens_are_installed_on_registration() {
+        let mut app = app();
+        app.set_session_title("saved", "Current title".to_owned());
+        app.session_opened(PaneId::Main, "saved".to_owned(), Vec::new());
+        assert_eq!(
+            app.root(PaneId::Main).unwrap().title(),
+            Some("Current title")
+        );
+        let projection = RootNode::project_session(ReasoningEffort::Medium, Vec::new());
+        app.update(AppEvent::SessionRestored {
+            pane: PaneId::Main,
+            projection: Box::new(projection),
+            effort: ReasoningEffort::Medium,
+            reasoning_mode: ReasoningMode::Standard,
+            preferred_reasoning_mode: ReasoningMode::Standard,
+            speed: Speed::Standard,
+            model: Model::Codex(CodexModel::Luna),
+            skills: Arc::from([]),
+        });
+        assert_eq!(
+            app.root(PaneId::Main).unwrap().title(),
+            Some("Current title")
+        );
+    }
+
+    #[test]
+    fn saved_title_updates_reach_an_open_picker_without_a_live_session() {
+        let mut app = app();
+        app.update(AppEvent::SessionsLoaded {
+            pane: PaneId::Main,
+            sessions: vec![crate::core::session::SessionSummary {
+                session_id: "saved".to_owned(),
+                started_at_unix_ms: 1,
+                model: "model".to_owned(),
+                effort: ReasoningEffort::Medium,
+                reasoning_mode: ReasoningMode::Standard,
+                workspace: PathBuf::from("/workspace"),
+                preview: "old title".to_owned(),
+                snippet: None,
+            }],
+        });
+        assert!(app.set_session_title("saved", "updated title".to_owned()));
+        assert!(!app.set_session_title("saved", "updated title".to_owned()));
+        app.update(AppEvent::Terminal(Event::Paste("updated".to_owned())));
+        let update = app.update(AppEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))));
+        assert!(matches!(update.effects.as_slice(), [AppEffect::Pane {
+            pane: PaneId::Main,
+            effect: RootEffect::ResumeSession(session),
+        }] if session == "saved"));
     }
 
     #[test]

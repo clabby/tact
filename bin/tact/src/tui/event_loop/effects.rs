@@ -64,6 +64,12 @@ impl EventLoop {
             .to_owned();
         let workspace = workspace.as_path();
         match effect {
+            RootEffect::RenameSession(title) => {
+                if let Some(runtime) = self.panes.get(pane) {
+                    let session = runtime.session_id.clone();
+                    self.rename_session(session, title, None);
+                }
+            }
             RootEffect::Submit(prompt) => self.submit(pane, prompt, workspace)?,
             RootEffect::ContinueSubagent(prompt) => {
                 let runtime = self.panes.runtime(pane)?;

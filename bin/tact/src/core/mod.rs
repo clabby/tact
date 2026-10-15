@@ -26,6 +26,8 @@ pub(crate) mod session;
 pub(crate) mod shell;
 pub(crate) mod storage;
 pub(crate) mod subagent_updates;
+pub(crate) mod title_backfill;
+pub(crate) mod titles;
 pub(crate) mod transcript;
 pub(crate) mod worker;
 

@@ -91,6 +91,7 @@ pub(crate) struct Busy {
 /// A change to shared state, from the loop to the server.
 #[derive(Debug)]
 pub(crate) enum Publication {
+    HistoryChanged,
     /// A pane became live. `records` is the persisted transcript of a resumed session.
     Opened {
         info: SessionInfo,
@@ -102,6 +103,10 @@ pub(crate) enum Publication {
     Record {
         session: String,
         record: Arc<TranscriptRecord>,
+    },
+    Title {
+        session: String,
+        title: String,
     },
     Closed {
         session: String,
@@ -224,6 +229,10 @@ pub(crate) enum Command {
     SetSpeed {
         session: String,
         speed: Speed,
+    },
+    RenameSession {
+        session: String,
+        title: String,
     },
     Activate {
         session: String,
@@ -546,6 +555,22 @@ mod tests {
                     json!({ "id": 3, "version": 2, "namespace": "team" })
                 )
                 .unwrap(),
+            }
+        );
+    }
+
+    #[test]
+    fn rename_command_targets_a_session() {
+        assert_eq!(
+            command(json!({
+                "client": 7,
+                "cmd": "rename_session",
+                "args": { "session": "s", "title": "Parser cleanup" },
+            }))
+            .1,
+            Command::RenameSession {
+                session: "s".to_owned(),
+                title: "Parser cleanup".to_owned()
             }
         );
     }

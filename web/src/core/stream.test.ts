@@ -54,10 +54,12 @@ test("named events are parsed and delivered", () => {
 
   sources[0]!.emit("hello", { protocol_version: 8, client_hint: "x" });
   sources[0]!.emit("workspace", { version: "3" });
+  sources[0]!.emit("history_changed", {});
 
   expect(events).toEqual([
     { type: "hello", data: { protocol_version: 8, client_hint: "x" } },
     { type: "workspace", data: { version: "3" } },
+    { type: "history_changed", data: {} },
   ]);
 });
 

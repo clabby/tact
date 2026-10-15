@@ -28,6 +28,7 @@ use crate::{
     core::{
         context::ContextBudget,
         protocol::{Busy, Draft, Origin, Publication, QueuedPrompt, SessionInfo},
+        titles::fallback,
         transcript::{
             EntryKind, TranscriptEntry, TranscriptModel, TranscriptRecord, TransientStatus,
         },
@@ -55,7 +56,6 @@ const FLUSH_INTERVAL: Duration = Duration::from_nanos(8_333_334);
 /// Frames buffered per client before it is considered too slow and dropped.
 const CLIENT_BUFFER: usize = 512;
 const MAX_STREAMS: usize = 32;
-const MAX_TITLE_CHARS: usize = 80;
 
 /// A cheap handle onto the shared projection.
 #[derive(Clone)]
@@ -86,6 +86,7 @@ struct State {
     /// What every connected client has already been told; `None` while nobody is connected.
     sent: Option<Sent>,
     closed: Vec<String>,
+    history_changed: bool,
 }
 
 struct Live {
@@ -398,7 +399,7 @@ impl Live {
                 .entries()
                 .iter()
                 .find_map(|entry| match &entry.kind {
-                    EntryKind::User { text, .. } => Some(title_from(text)),
+                    EntryKind::User { text, .. } => Some(fallback(text)),
                     _ => None,
                 });
         }
@@ -530,20 +531,6 @@ fn user_image(
     Some((media_type, BASE64_STANDARD.decode(data).ok()?))
 }
 
-fn title_from(prompt: &str) -> String {
-    let line = prompt
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or_default()
-        .trim();
-    let mut chars = line.chars();
-    let head = chars.by_ref().take(MAX_TITLE_CHARS).collect::<String>();
-    if chars.next().is_some() {
-        return format!("{}…", head.trim_end());
-    }
-    head
-}
-
 impl State {
     fn live(&self, session: &str) -> Option<&Live> {
         self.sessions.iter().find(|live| live.info.id == session)
@@ -557,6 +544,7 @@ impl State {
 
     fn apply(&mut self, publication: Publication) {
         match publication {
+            Publication::HistoryChanged => self.history_changed = true,
             Publication::Opened {
                 info,
                 records,
@@ -611,6 +599,11 @@ impl State {
                     live.model = inherited;
                 }
                 apply_record(live, &record);
+            }
+            Publication::Title { session, title } => {
+                if let Some(live) = self.live_mut(&session) {
+                    live.title = Some(title);
+                }
             }
             Publication::Closed { session } => {
                 let Some(index) = self
@@ -735,6 +728,7 @@ impl State {
 
     fn flush(&mut self) {
         let closed = std::mem::take(&mut self.closed);
+        let history_changed = std::mem::take(&mut self.history_changed);
         self.clients.retain(|client| !client.is_closed());
         if self.clients.is_empty() {
             self.sent = None;
@@ -744,6 +738,9 @@ impl State {
             return;
         }
         let mut sent = self.sent.take().unwrap_or_else(|| self.baseline());
+        if history_changed {
+            self.broadcast(&frame("history_changed", &serde_json::json!({})));
+        }
         for session in &closed {
             self.broadcast(&frame("closed", &SessionRef { session }));
         }
@@ -1483,6 +1480,51 @@ mod tests {
         assert_eq!(transcript.len(), 1);
         assert!(fixture.hub.agent_entries("s1", AgentId::new(9)).is_none());
     }
+    #[tokio::test(start_paused = true)]
+    async fn saved_history_invalidations_are_coalesced_for_connected_clients() {
+        let fixture = fixture();
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        settle().await;
+        drain(&mut subscription);
+        fixture.publish(Publication::HistoryChanged);
+        fixture.publish(Publication::HistoryChanged);
+        settle().await;
+        let events = drain(&mut subscription);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(event, _)| event == "history_changed")
+                .count(),
+            1
+        );
+        settle().await;
+        assert!(drain(&mut subscription).is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn title_publications_update_connected_and_reconnected_clients() {
+        let fixture = fixture();
+        fixture.open("s1", None);
+        fixture.activate("s1");
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        settle().await;
+        drain(&mut subscription);
+
+        fixture.publish(Publication::Title {
+            session: "s1".into(),
+            title: "Parser cleanup".into(),
+        });
+        settle().await;
+        let events = drain(&mut subscription);
+        let live = events.iter().find(|event| event.0 == "live").unwrap();
+        assert_eq!(live.1["sessions"][0]["title"], "Parser cleanup");
+
+        let mut reconnected = fixture.hub.subscribe().unwrap();
+        let events = drain(&mut reconnected);
+        let snapshot = events.iter().find(|event| event.0 == "snapshot").unwrap();
+        assert_eq!(snapshot.1["title"], "Parser cleanup");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn agent_messages_reach_the_session_and_each_agents_transcript() {
         use tact_subagents::{AgentId, AgentMessageUpdate};

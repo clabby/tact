@@ -842,6 +842,60 @@ fn copy_test_root() -> RootNode {
 }
 
 #[test]
+fn new_sessions_start_without_the_previous_title() {
+    let mut root = copy_test_root();
+    root.set_title("Manual title".to_owned());
+    root.reset_session(
+        Path::new("/work"),
+        ReasoningEffort::Medium,
+        ReasoningMode::Standard,
+        ReasoningMode::Standard,
+        DraftReset::Clear,
+    );
+    assert_eq!(root.title(), None);
+}
+
+#[test]
+fn restored_titles_are_installed_with_the_session_projection() {
+    let mut root = copy_test_root();
+    let mut projection = RootNode::project_session(ReasoningEffort::Medium, Vec::new());
+    projection.title = Some("Saved session title".to_owned());
+    root.install_session_projection(
+        Path::new("/work"),
+        ReasoningEffort::Medium,
+        ReasoningMode::Standard,
+        ReasoningMode::Standard,
+        Speed::Standard,
+        projection,
+    );
+    assert_eq!(root.title(), Some("Saved session title"));
+}
+
+#[test]
+fn slash_rename_does_not_submit_or_steer_a_running_turn() {
+    for command in ["/rename Parser cleanup", "/RENAME   Parser cleanup "] {
+        for paste in [false, true] {
+            let mut root = copy_test_root();
+            root.turns.start_turn();
+            if paste {
+                root.update(super::RootEvent::Terminal(Event::Paste(command.to_owned())));
+            } else {
+                for character in command.chars() {
+                    root.update(key(KeyCode::Char(character), KeyModifiers::NONE));
+                }
+            }
+            let update = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
+            assert_eq!(
+                update.effects,
+                [RootEffect::RenameSession("Parser cleanup".to_owned())]
+            );
+            assert_eq!(root.busy().turns, 1);
+            assert!(!root.queue.has_pending_steer());
+        }
+    }
+}
+
+#[test]
 fn slash_copy_selects_completed_messages_without_submitting_a_turn() {
     for (command, expected) in [
         ("/copy", "second\n```rust\ncode\n```"),

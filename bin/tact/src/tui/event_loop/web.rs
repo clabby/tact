@@ -82,6 +82,10 @@ impl EventLoop {
         } = request;
         let active = self.app.active_pane();
         let result = match command {
+            Command::RenameSession { session, title } => {
+                self.rename_session(session, title, Some(reply));
+                return Ok(());
+            }
             Command::DeleteMemory { key } => {
                 remote::delete_memory(self.memory.store(), key).deliver(reply);
                 return Ok(());

@@ -87,7 +87,8 @@ pub(super) async fn restore_session(
         let model = transcript.model()?;
         let next_sequence = transcript.next_sequence();
         let records = transcript.into_records();
-        let projection = RootNode::project_session(effort, records.clone());
+        let mut projection = RootNode::project_session(effort, records.clone());
+        projection.title = store.title(&session_id).ok().flatten();
         let configured = ConfiguredAgent::from_config_with_session(
             &config,
             effort,

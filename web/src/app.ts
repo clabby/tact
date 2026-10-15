@@ -18,6 +18,7 @@ import { Palette, type PaletteCommand } from "./ui/palette";
 import { PromptRail } from "./chat/prompt-rail-view";
 import { mountReviewPanel } from "./review/review-panel";
 import { Sidebar } from "./shell/sidebar";
+import { openSessionRename } from "./shell/session-rename";
 import { effectiveSpeed, speedChoices } from "./core/speed";
 import { Store, type Change } from "./core/store";
 import { StreamClient } from "./core/stream";
@@ -161,6 +162,7 @@ class App {
       api,
       catalog: () => this.catalog,
       navigated: () => this.dispatch({ type: "toggle-drawer", open: false }),
+      renameSession: (session) => this.renameSession(session),
       setTheme: (choice) => this.theme.set(choice),
       themeChoice: () => this.theme.choice,
       resolvedTheme: () => this.theme.current,
@@ -255,6 +257,10 @@ class App {
           }
           break;
         }
+        case "history":
+          void this.sidebar.refreshHistory();
+          void this.palette.refresh();
+          break;
         case "session":
           this.transcript.show(state.session && this.sessionSource(state.session.id));
           this.rail.refresh();
@@ -630,6 +636,11 @@ class App {
     }));
   }
 
+  private renameSession(id = this.store.state.active) {
+    const session = this.store.state.live.find((summary) => summary.id === id);
+    if (session) openSessionRename(this.api, session.id, session.title);
+  }
+
   /** Opens the subagents popup, showing `agent`'s transcript when one is named. */
   private openSubagents(agent?: number) {
     if (this.subagents) {
@@ -698,6 +709,7 @@ class App {
       commands.push(
         { id: "stop", title: "Stop", group: "Session", icon: "stop", hint: "esc", keywords: "interrupt cancel", unavailable: running ? undefined : "Nothing is running", run: () => this.command("interrupt", { session: id }) },
         { id: "recent", title: "Recent prompts…", group: "Session", icon: "history", hint: "↑", run: () => this.openRecentPrompts() },
+        { id: "rename", title: "Rename session…", group: "Session", icon: "pencil", keywords: "title name", run: () => this.renameSession() },
         { id: "compact", title: "Compact context", group: "Session", icon: "compact", unavailable: rewriteBlock, run: () => this.command("compact", { session: id }) },
         { id: "reflect", title: "Reflect…", group: "Session", icon: "reflect", keywords: "reflection learn", unavailable: rewriteBlock, run: () => openReflect(this.api, id) },
         { id: "handoff", title: "Prepare handoff", group: "Session", icon: "handoff", unavailable: rewriteBlock, run: () => this.command("handoff", { session: id }) },

@@ -179,6 +179,7 @@ export type ToolDetail = { arguments: unknown; result: unknown | null; metadata:
 export type StreamEvents = {
   hello: { protocol_version: number; client_hint: string };
   live: { active: string | null; sessions: SessionSummary[] };
+  history_changed: Record<string, never>;
   active: { session: string };
   snapshot: SessionSnapshot;
   entry: { session: string; entry: WireEntry };
@@ -202,7 +203,7 @@ export type StreamEvent = {
 
 export const STREAM_EVENTS = [
   "hello", "live", "active", "snapshot", "entry", "status", "queue", "draft", "settings", "context",
-  "subagents", "subagent_entry", "closed", "workspace",
+  "subagents", "subagent_entry", "closed", "workspace", "history_changed",
 ] as const satisfies readonly StreamEventName[];
 
 export type OpenSpec =
@@ -230,6 +231,7 @@ export type Commands = {
   activate: { session: string };
   open_session: OpenSpec;
   close_session: { session: string; force?: boolean };
+  rename_session: { session: string; title: string };
   attach_image: { session: string; data_url: string };
   reflect: { session: string; instructions?: string };
   handoff: { session: string };

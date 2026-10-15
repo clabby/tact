@@ -52,6 +52,7 @@ use crate::{
         prompt::{QueueId, Submission},
         protocol::{Busy, CommandError},
         session::{ConversationMatches, RecentPrompt, SessionSummary},
+        titles::fallback,
         transcript::TranscriptRecord,
     },
 };
@@ -240,6 +241,7 @@ pub(crate) enum RootEvent {
 }
 
 pub(crate) struct RestoredSessionProjection {
+    pub(crate) title: Option<String>,
     transcript: Transcript,
     context_diagnostics: ContextDiagnostics,
     context_tokens: Option<u64>,
@@ -261,6 +263,7 @@ pub(crate) enum SessionListKind {
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum RootEffect {
     Submit(Submission),
+    RenameSession(String),
     Reflect(Submission),
     Compact,
     RunShell(String),
@@ -661,6 +664,7 @@ impl RootNode {
         }
         let _ = transcript.update(TranscriptEvent::AgentStreamClosed);
         RestoredSessionProjection {
+            title: None,
             transcript,
             context_diagnostics,
             context_tokens,
@@ -689,10 +693,11 @@ impl RootNode {
         self.transcript = projection.transcript;
         self.context_diagnostics = projection.context_diagnostics;
         self.recent_prompts = projection.recent_prompts;
-        self.title = self
-            .recent_prompts
-            .first()
-            .map(|prompt| prompt.text.clone());
+        self.title = projection.title.or_else(|| {
+            self.recent_prompts
+                .first()
+                .map(|prompt| fallback(&prompt.text))
+        });
         if let Some(tokens) = projection.context_tokens {
             let _ = self
                 .composer
@@ -1397,6 +1402,16 @@ impl RootNode {
         let update = actions.update(ActionsEvent::Terminal(event));
         match update.effects.into_iter().next() {
             Some(ActionsEffect::Dismiss) => self.overlay = None,
+            Some(ActionsEffect::Rename(title)) => {
+                self.overlay = None;
+                return ComponentUpdate {
+                    effects: vec![RootEffect::RenameSession(title)],
+                    render: RenderRequest::Immediate,
+                };
+            }
+            Some(ActionsEffect::Trigger(Action::Rename)) => {
+                unreachable!("rename carries its title")
+            }
             Some(ActionsEffect::Copy(argument)) => {
                 self.overlay = None;
                 return self.copy_response(&argument);
@@ -1813,6 +1828,13 @@ impl RootNode {
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
+    pub(crate) fn update_saved_session_title(&mut self, session: &str, title: &str) -> bool {
+        match &mut self.overlay {
+            Some(Overlay::Sessions(picker)) => picker.update_title(session, title),
+            _ => false,
+        }
+    }
+
     fn update_session_picker(&mut self, event: Event) -> ComponentUpdate<RootEffect> {
         let Some(Overlay::Sessions(picker)) = &mut self.overlay else {
             return ComponentUpdate::none();
@@ -2166,9 +2188,13 @@ impl RootNode {
         self.queue.entries()
     }
 
-    /// The session's first prompt, which names it in session lists.
+    /// The session's display title, falling back to its first prompt.
     pub(crate) fn title(&self) -> Option<&str> {
         self.title.as_deref()
+    }
+
+    pub(crate) fn set_title(&mut self, title: String) {
+        self.title = Some(title);
     }
 
     pub(super) fn set_live_sessions(&mut self, summary: Option<LiveSessions>) -> RenderRequest {
@@ -2236,6 +2262,16 @@ impl RootNode {
             && let Some(argument) = copy_command_argument(prompt.display_text().trim())
         {
             return self.copy_response(argument);
+        }
+        if let Some(ComposerEffect::Submit(prompt)) = &update.effect {
+            let text = prompt.display_text().trim();
+            let (command, title) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+            if command.eq_ignore_ascii_case("/rename") {
+                return ComponentUpdate {
+                    effects: vec![RootEffect::RenameSession(title.trim().to_owned())],
+                    render: RenderRequest::Immediate,
+                };
+            }
         }
         let submitted = matches!(&update.effect, Some(ComposerEffect::Submit(_)));
         if submitted {
@@ -2638,7 +2674,7 @@ impl Component for RootNode {
             RootEvent::Transcript(record) => {
                 if let Some(prompt) = recent_prompt(&record) {
                     if self.title.is_none() {
-                        self.title = Some(prompt.text.clone());
+                        self.title = Some(fallback(&prompt.text));
                     }
                     self.recent_prompts.push(prompt);
                 }

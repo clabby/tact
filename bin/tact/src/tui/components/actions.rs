@@ -29,7 +29,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ACTIONS: [Action; 21] = [
+const ACTIONS: [Action; 22] = [
     Action::Effort,
     Action::Speed,
     Action::Theme,
@@ -43,6 +43,7 @@ const ACTIONS: [Action; 21] = [
     Action::Subagents,
     Action::DebugContext,
     Action::Copy,
+    Action::Rename,
     Action::Reflection,
     Action::Handoff,
     Action::OpenInBrowser,
@@ -88,6 +89,7 @@ pub(super) enum Action {
     Memory,
     DebugContext,
     Copy,
+    Rename,
     Reflection,
     Compact,
 }
@@ -96,6 +98,7 @@ pub(super) enum Action {
 pub(super) enum ActionsEffect {
     Dismiss,
     Copy(String),
+    Rename(String),
     Trigger(Action),
 }
 
@@ -202,16 +205,32 @@ impl ActionsMenu {
         self.selected = (self.selected + 1).min(self.matches.len() - 1);
     }
 
-    fn trigger_selected(&self) -> ComponentUpdate<ActionsEffect> {
-        let Some(action) = self.matches.get(self.selected) else {
+    fn trigger_selected(&mut self) -> ComponentUpdate<ActionsEffect> {
+        let Some(&index) = self.matches.get(self.selected) else {
             return ComponentUpdate::none();
         };
-        self.trigger(ACTIONS[*action])
+        self.trigger(ACTIONS[index])
     }
 
-    fn trigger(&self, action: Action) -> ComponentUpdate<ActionsEffect> {
+    fn trigger(&mut self, action: Action) -> ComponentUpdate<ActionsEffect> {
         if !self.is_enabled(action) {
             return ComponentUpdate::none();
+        }
+        if action == Action::Rename {
+            let (_, title) = self
+                .query
+                .trim()
+                .split_once(char::is_whitespace)
+                .unwrap_or(("", ""));
+            if title.trim().is_empty() {
+                self.query = "rename ".to_owned();
+                self.refresh_matches();
+                return ComponentUpdate::render(RenderRequest::Immediate);
+            }
+            return ComponentUpdate {
+                effects: vec![ActionsEffect::Rename(title.trim().to_owned())],
+                render: RenderRequest::Immediate,
+            };
         }
         if action == Action::Copy {
             return ComponentUpdate {
@@ -320,7 +339,7 @@ impl ActionsMenu {
             Action::EditConfig => true,
             Action::Memory => self.availability.memory,
             Action::DebugContext => true,
-            Action::Copy => true,
+            Action::Copy | Action::Rename => true,
         }
     }
 
@@ -373,6 +392,7 @@ impl Action {
             Self::Memory => "Memory",
             Self::DebugContext => "Debug context",
             Self::Copy => "Copy response",
+            Self::Rename => "Rename session",
             Self::Reflection => "Reflect on session",
             Self::Compact => "Compact context",
         }
@@ -396,6 +416,7 @@ impl Action {
             Self::ReloadConfig => Some("refresh"),
             Self::Memory => Some("remember/forget"),
             Self::Copy => Some("copy"),
+            Self::Rename => Some("rename"),
             Self::Reflection => Some("reflection"),
             Self::Compact => Some("compact"),
             Self::Keybindings | Self::EditConfig | Self::DebugContext => None,
@@ -403,7 +424,12 @@ impl Action {
     }
 
     fn matches(self, query: &str) -> bool {
-        (self == Self::Copy && copy_command_argument(query).is_some())
+        (self == Self::Rename
+            && query
+                .split_whitespace()
+                .next()
+                .is_some_and(|word| word.eq_ignore_ascii_case("rename")))
+            || (self == Self::Copy && copy_command_argument(query).is_some())
             || contains_ignore_ascii_case(self.label(), query)
             || self
                 .alias()
@@ -603,19 +629,19 @@ mod tests {
         );
         assert_eq!(
             row_segment(&terminal, 15, 1, 58),
-            "│  Reflect on session (alias: reflection)                │"
+            "│  Rename session (alias: rename)                        │"
         );
         assert_eq!(
             row_segment(&terminal, 16, 1, 58),
-            "│  Prepare handoff (alias: handoff)                      │"
+            "│  Reflect on session (alias: reflection)                │"
         );
         assert_eq!(
             row_segment(&terminal, 17, 1, 58),
-            "│  Open in browser (alias: web/review)                   │"
+            "│  Prepare handoff (alias: handoff)                      │"
         );
         assert_eq!(
             row_segment(&terminal, 18, 1, 58),
-            "│  Copy web link (alias: url)                            │"
+            "│  Open in browser (alias: web/review)                   │"
         );
         assert_eq!(
             row_segment(&terminal, 19, 1, 58),
@@ -726,6 +752,25 @@ mod tests {
                 [ActionsEffect::Copy(String::new())]
             );
         }
+    }
+
+    #[test]
+    fn choosing_rename_keeps_the_menu_open_to_enter_a_title() {
+        let mut menu = ActionsMenu::new(available());
+        menu.selected = menu
+            .matches
+            .iter()
+            .position(|&index| ACTIONS[index] == Action::Rename)
+            .unwrap();
+        assert!(menu.update(key(KeyCode::Enter)).effects.is_empty());
+        assert_eq!(menu.query, "rename ");
+        for character in "Parser cleanup".chars() {
+            menu.update(key(KeyCode::Char(character)));
+        }
+        assert_eq!(
+            menu.update(key(KeyCode::Enter)).effects,
+            [ActionsEffect::Rename("Parser cleanup".to_owned())]
+        );
     }
 
     #[test]

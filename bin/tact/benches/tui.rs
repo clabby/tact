@@ -13,6 +13,7 @@ fn install_tls_provider() {
 
 #[path = "../src/app"]
 mod app {
+    pub(crate) mod auth;
     pub(crate) mod browser;
     pub(crate) mod config;
     pub(crate) mod error;
@@ -32,6 +33,7 @@ mod core {
     pub(crate) mod protocol;
     pub(crate) mod session;
     pub(crate) mod storage;
+    pub(crate) mod titles;
     pub(crate) mod transcript;
 
     pub(crate) mod extensions {

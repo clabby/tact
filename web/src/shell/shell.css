@@ -929,6 +929,9 @@ button.outcome-item:hover { text-decoration: underline; text-underline-offset: 3
 .field-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .field-search .glyph { width: 15px; height: 15px; }
 .field-search input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; }
+.session-rename-label { display: flex; flex-direction: column; gap: var(--space-2); color: var(--muted); }
+.session-rename input { width: 100%; padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); color: var(--text); }
+.session-rename .sheet-footer { gap: var(--space-2); }
 .facts { display: grid; grid-template-columns: minmax(140px, auto) 1fr; gap: 10px var(--space-5); margin: 0; font-size: var(--text-md); }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }

@@ -137,6 +137,10 @@ export class Palette {
     this.dialog.close();
   }
 
+  refresh() {
+    if (this.isOpen) return this.filter(true);
+  }
+
   private show(picker: PickerSource | null, query: string) {
     if (this.dialog.open) this.dialog.close();
     this.restoreFocus = document.activeElement as HTMLElement | null;
@@ -148,12 +152,11 @@ export class Palette {
     this.input.focus();
   }
 
-  private async filter() {
+  private async filter(preserveSelection = false) {
     const query = this.input.value;
     this.request?.abort();
     if (!this.picker) {
-      this.results = rankCommands(this.providers.flatMap((provider) => provider()), query);
-      this.selected = 0;
+      this.updateResults(rankCommands(this.providers.flatMap((provider) => provider()), query), preserveSelection);
       this.render(query.trim() === "", "No matching commands");
       return;
     }
@@ -163,17 +166,27 @@ export class Palette {
     this.list.setAttribute("aria-busy", "true");
     try {
       const results = await picker.load(query, request.signal);
-      if (this.request !== request) return;
-      this.results = results;
-      this.selected = 0;
+      if (request.signal.aborted || this.request !== request) return;
+      this.updateResults(results, preserveSelection);
       this.render(false, picker.empty);
     } catch (error) {
       if (request.signal.aborted) return;
-      this.results = [];
+      this.updateResults([], false);
       this.render(false, describeError(error));
     } finally {
       if (this.request === request) this.list.removeAttribute("aria-busy");
     }
+  }
+
+  private updateResults(results: PaletteCommand[], preserveSelection: boolean) {
+    let selected = 0;
+    if (preserveSelection) {
+      const id = this.results[this.selected]?.id;
+      selected = results.findIndex((command) => command.id === id);
+      if (selected < 0) selected = Math.max(0, Math.min(this.selected, results.length - 1));
+    }
+    this.results = results;
+    this.selected = selected;
   }
 
   private render(grouped: boolean, empty: string) {

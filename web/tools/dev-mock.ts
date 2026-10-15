@@ -466,6 +466,14 @@ export class MockTact {
         this.activate(this.session((body as Commands["activate"]).session).id);
         return {};
       }
+      case "rename_session": {
+        const { session, title: input } = body as Commands["rename_session"];
+        const title = input.trim();
+        if (!title) throw new MockRefusal("invalid_request", "Enter a session title.", 400);
+        this.session(session).title = title;
+        this.publishLive();
+        return {};
+      }
       case "open_session": {
         const spec = body as Commands["open_session"];
         let session: MockSession;

@@ -12,6 +12,13 @@ function snapshot(session: string, entries: WireEntry[] = []): SessionSnapshot {
 
 const user = (id: number, revision: number, text: string): WireEntry => ({ id, revision, parent: null, kind: "user", text });
 
+test("saved history changes request a refresh without replacing the session", () => {
+  const state = connected();
+  const session = state.session;
+  expect(reduce(state, { type: "history_changed", data: {} })).toEqual([{ type: "history" }]);
+  expect(state.session).toBe(session);
+});
+
 function connected(...events: StreamEvent[]): AppState {
   const state = initialState();
   reduce(state, { type: "snapshot", data: snapshot("a", [user(1, 1, "hello")]) });

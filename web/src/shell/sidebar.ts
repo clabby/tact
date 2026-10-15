@@ -16,6 +16,7 @@ export type SidebarHost = {
   catalog(): ModelCatalog | null;
   /** Called after the user picked a session, so phones can close the drawer. */
   navigated(): void;
+  renameSession(session: string): void;
   setTheme(choice: "system" | "light" | "dark"): void;
   themeChoice(): "system" | "light" | "dark";
   /** The scheme in effect, which a "system" choice resolves to. */
@@ -174,6 +175,10 @@ export class Sidebar {
     this.search.focus();
   }
 
+  refreshHistory() {
+    if (this.historyLoaded) return this.loadHistory(true);
+  }
+
   /** Re-labels every row's workspace, e.g. once the default workspace is known. */
   refreshWorkspaces() {
     for (const row of this.root.querySelectorAll<HTMLElement>(".session-row[data-workspace]")) {
@@ -214,6 +219,7 @@ export class Sidebar {
     row.querySelector(".session-main")!.addEventListener("click", () => this.activate(session.id));
     const menu = row.querySelector<HTMLButtonElement>(".row-menu")!;
     menu.addEventListener("click", () => openMenu(menu, [
+      { label: "Rename session…", icon: glyph("pencil"), run: () => this.host.renameSession(session.id) },
       { label: "Fork", detail: "", run: () => void this.open({ fork: { session: session.id } }) },
       { label: pinned ? "Unpin" : "Pin to top", run: () => this.togglePin(session.id) },
       { label: session.state === "running" ? "Stop and close…" : "Close", danger: true, run: () => void this.close(session) },

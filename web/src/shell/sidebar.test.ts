@@ -7,6 +7,7 @@ const host: SidebarHost = {
   api: {} as SidebarHost["api"],
   catalog: () => null,
   navigated() {},
+  renameSession() {},
   setTheme() {},
   themeChoice: () => "system",
   resolvedTheme: () => "dark",
@@ -79,4 +80,33 @@ describe("sidebar search", () => {
     expect(rows(".live-list")).toEqual([["b", "a lexer in the live one"]]);
     expect(rows(".history-list")).toEqual([["same first prompt", "…the lexer now handles unicode"]]);
   });
+});
+
+test("refreshes cached history titles after the initial history load", async () => {
+  let preview = "Original title";
+  let calls = 0;
+  let finishInitial: () => void;
+  const initial = new Promise<void>((resolve) => { finishInitial = resolve; });
+  const api = {
+    async query() {
+      calls += 1;
+      if (calls === 1) await initial;
+      return {
+        sessions: [{ session_id: "saved", preview, model: "sol", workspace: "/work", started_at_unix_ms: 1 } as PersistedSession],
+        next_cursor: null,
+      };
+    },
+  } as unknown as SidebarHost["api"];
+  const root = document.createElement("aside");
+  const sidebar = new Sidebar(root, { ...host, api });
+  await sidebar.refreshHistory();
+  expect(calls).toBe(1);
+  finishInitial!();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(root.querySelector(".history-row .session-title")!.textContent).toBe("Original title");
+  preview = "Generated title";
+  await sidebar.refreshHistory();
+  expect(calls).toBe(2);
+  expect(root.querySelector(".history-row .session-title")!.textContent).toBe("Generated title");
 });

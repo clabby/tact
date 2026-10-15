@@ -57,7 +57,7 @@ export type AppState = {
  */
 export type Change =
   | {
-    type: "connection" | "live" | "session" | "status" | "queue" | "draft" | "settings" | "context"
+    type: "connection" | "live" | "history" | "session" | "status" | "queue" | "draft" | "settings" | "context"
       | "subagents";
   }
   /** Files changed in `checkout`, or in the session's workspace when it is null. */
@@ -119,6 +119,8 @@ export function reduce(state: AppState, event: StreamEvent): Change[] {
       state.protocolVersion = event.data.protocol_version;
       state.connection = "open";
       return [{ type: "connection" }];
+    case "history_changed":
+      return [{ type: "history" }];
     case "live": {
       state.live = event.data.sessions;
       state.active = event.data.active;

@@ -32,6 +32,7 @@ mod recent_prompts;
 mod remote;
 mod sessions;
 mod settings;
+mod titles;
 mod web;
 mod worker_events;
 
@@ -113,6 +114,7 @@ struct Inbox {
     web_queries: mpsc::UnboundedReceiver<QueryRequest>,
     auxiliary_requests: mpsc::UnboundedReceiver<AuxiliaryRequest>,
     system_scheme: mpsc::UnboundedReceiver<ColorScheme>,
+    titles: mpsc::UnboundedReceiver<titles::TitleUpdate>,
 }
 
 /// Everything the event loop owns and mutates.
@@ -140,6 +142,7 @@ struct EventLoop {
     web_tasks: JoinSet<WebTaskCompletion>,
     memory: Memory,
     recent_prompts: RecentPrompts,
+    titles: mpsc::UnboundedSender<titles::Rename>,
     handoff: HandoffController,
     /// Messages from other live sessions awaiting the worker's delivery verdict.
     messages: PendingMessages,
@@ -307,6 +310,15 @@ impl EventLoop {
         let (system_scheme_sender, system_scheme_updates) = mpsc::unbounded_channel();
         system_scheme::watch_system_scheme(system_scheme_sender, shutdown.clone());
 
+        let title_config = config.clone();
+        let title_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = title_shutdown.cancelled() => {}
+                () = crate::core::title_backfill::run(title_config) => {}
+            }
+        });
+        let (titles, title_updates) = titles::spawn(config.clone(), shutdown.clone());
         let inbox = Inbox {
             worker: worker_events,
             panes: pane_reports,
@@ -314,6 +326,7 @@ impl EventLoop {
             web_queries,
             auxiliary_requests,
             system_scheme: system_scheme_updates,
+            titles: title_updates,
         };
         let mut event_loop = Self {
             config,
@@ -335,6 +348,7 @@ impl EventLoop {
             web_tasks: JoinSet::new(),
             memory,
             recent_prompts: RecentPrompts::default(),
+            titles,
             handoff: HandoffController::new(),
             messages: PendingMessages::new(),
             writer_error: None,
@@ -363,6 +377,9 @@ impl EventLoop {
                 () = self.shutdown.cancelled(), if running => self.begin_shutdown().await,
                 event = next_input(&mut self.input), if self.input.is_some() && running => {
                     self.on_terminal_event(event).await?;
+                }
+                Some(update) = inbox.titles.recv(), if running => {
+                    self.on_title_update(update);
                 }
                 Some(scheme) = inbox.system_scheme.recv(), if running => {
                     self.show(AppEvent::SystemThemeChanged(scheme));

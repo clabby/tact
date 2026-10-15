@@ -103,6 +103,31 @@ impl SessionPicker {
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
+    pub(super) fn update_title(&mut self, id: &str, title: &str) -> bool {
+        let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.session_id == id)
+        else {
+            return false;
+        };
+        if session.preview == title {
+            return false;
+        }
+        title.clone_into(&mut session.preview);
+        let previous_row = self.selected;
+        let selected_session = self.matches.get(previous_row).copied();
+        self.refresh_matches();
+        self.selected = selected_session
+            .and_then(|index| {
+                self.matches
+                    .iter()
+                    .position(|candidate| *candidate == index)
+            })
+            .unwrap_or_else(|| previous_row.min(self.matches.len().saturating_sub(1)));
+        true
+    }
+
     fn update_key(
         &mut self,
         key: crossterm::event::KeyEvent,
@@ -376,6 +401,35 @@ mod tests {
             picker.matches.is_empty(),
             "matches for \"lex\" do not answer \"lexe\""
         );
+    }
+
+    #[test]
+    fn title_updates_refresh_search_and_preserve_the_selected_session() {
+        let mut picker = SessionPicker::new(
+            vec![summary("one", "fix parser"), summary("two", "write docs")],
+            SessionPickerMode::Resume,
+        );
+        picker.update(key(KeyCode::Down));
+        assert!(picker.update_title("one", "new parser title"));
+        assert_eq!(
+            picker.select().effects,
+            [SessionPickerEffect::Resume("two".to_owned())]
+        );
+        assert!(!picker.update_title("one", "new parser title"));
+        assert!(!picker.update_title("missing", "unused"));
+
+        picker.update(SessionPickerEvent::Terminal(Event::Paste(
+            "updated".to_owned(),
+        )));
+        assert!(picker.matches.is_empty());
+        assert!(picker.update_title("two", "updated docs"));
+        assert_eq!(
+            picker.select().effects,
+            [SessionPickerEffect::Resume("two".to_owned())]
+        );
+        assert!(picker.update_title("two", "renamed docs"));
+        assert!(picker.matches.is_empty());
+        assert_eq!(picker.selected, 0);
     }
 
     #[test]
