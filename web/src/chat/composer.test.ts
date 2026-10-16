@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { Window, type ICanvasRenderingContext2D } from "happy-dom";
 import type { ApiClient } from "../core/api-client";
-import type { SessionView } from "../core/store";
+import { initialState, reduce, type SessionView } from "../core/store";
 import { ManualTimers, settle } from "../core/test-support";
 import { Composer } from "./composer";
 
@@ -49,12 +49,15 @@ afterEach(async () => {
 });
 
 function session(id: string, rev = 1, text = ""): SessionView {
-  return {
-    id, title: id, model: "sol", effort: "high", reasoningMode: "standard", speed: "standard",
-    status: null, queue: [], draft: { rev, text, images: [], origin: null }, running: false,
-    context: null, subagents: { max_subagents: 0, agents: [] },
-    entries: new Map(), order: [], agents: new Map(),
+  const snapshot = {
+    session: id, title: id, title_pending: false, model: "sol",
+    effort: "high" as const, reasoning_mode: "standard" as const, speed: "standard" as const,
+    status: null, queue: [], draft: { rev, text, images: [] }, running: false,
+    context: null, subagents: { max_subagents: 0, agents: [] }, entries: [],
   };
+  const state = initialState();
+  reduce(state, { type: "snapshot", data: snapshot });
+  return state.session!;
 }
 
 function harness() {
