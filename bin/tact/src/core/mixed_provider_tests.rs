@@ -1,6 +1,7 @@
 use super::{claude, recipe::AgentRecipe};
 use crate::app::{
     config::{Config, ConfigOverrides, Speed},
+    model::available,
     secret::SecretString,
 };
 use axum::{
@@ -150,13 +151,25 @@ impl Service<ResponsesAttempt> for Script {
     }
 }
 
+const GLASSWING_KEY: &str = "sk-ant-api03-glasswing-fixture";
+const GLASSWING_WORKSPACE: &str = "wrkspc_glasswing";
+
 async fn messages(
     State(provider): State<Provider>,
     headers: HeaderMap,
     Json(request): Json<Value>,
 ) -> Response {
-    assert_eq!(headers["x-api-key"], "sk-ant-usr-fixture-token");
-    assert_eq!(headers["anthropic-workspace-id"], "wrkspc_fixture");
+    // Access-gated models authenticate only with the Glasswing credentials, and every other
+    // model only with the ordinary API key and workspace.
+    let (key, workspace) = if request["model"] == ClaudeModel::Mythos51.as_str() {
+        (GLASSWING_KEY, GLASSWING_WORKSPACE)
+    } else {
+        ("sk-ant-usr-fixture-token", "wrkspc_fixture")
+    };
+    assert_eq!(headers["x-api-key"], key);
+    assert_eq!(headers.get_all("x-api-key").iter().count(), 1);
+    assert_eq!(headers["anthropic-workspace-id"], workspace);
+    assert_eq!(headers.get_all("anthropic-workspace-id").iter().count(), 1);
     assert!(!headers.contains_key(header::AUTHORIZATION));
     assert_eq!(
         request["cache_control"],
@@ -252,8 +265,9 @@ fn build_agent(
             .tools(tools)
             .build()
     } else {
-        let client = recipe
-            .claude_client(|| Ok(Some(SecretString::new("sk-ant-usr-fixture-token".into()))))?;
+        let client = recipe.claude_client(model, || {
+            Ok(Some(SecretString::new("sk-ant-usr-fixture-token".into())))
+        })?;
         let clean_recipe = Arc::clone(recipe);
         let spawn: claude::CleanAgentFactory = Arc::new(move |context, fast_mode| {
             build_agent(
@@ -470,7 +484,12 @@ async fn mixed_provider_roundtrip(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let config_path = directory.path().join("config.toml");
-    fs::write(&config_path, format!("[agent]\nweb_search = false\nimage_generation = false\n[claude]\nenabled = true\napi_base_url = {origin:?}\nworkspace_id = \"wrkspc_fixture\"\n[subagents]\nenabled = true\n")).unwrap();
+    fs::write(&config_path, format!("[agent]\nweb_search = false\nimage_generation = false\n[claude]\nenabled = true\napi_base_url = {origin:?}\nworkspace_id = \"wrkspc_fixture\"\nglasswing_api_key = {GLASSWING_KEY:?}\nglasswing_workspace_id = {GLASSWING_WORKSPACE:?}\n[subagents]\nenabled = true\n")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
     let config = Config::load(ConfigOverrides {
         path: Some(config_path),
         auth_file: Some(directory.path().join("unused-auth.json")),
@@ -521,7 +540,7 @@ for (let attempt = 0; attempt < 3; attempt++) {{
         axum::serve(listener, router).await.unwrap();
     });
     let (subagents, mut updates) = Subagents::new(child_count);
-    subagents.set_claude_enabled(config.claude().enabled());
+    subagents.set_models(&available(config.claude()));
     let recipe = Arc::new(AgentRecipe {
         config: config.clone(),
         workspace: directory.path().to_owned(),

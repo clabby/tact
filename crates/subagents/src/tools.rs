@@ -110,6 +110,16 @@ fn json_output(value: &impl Serialize) -> ToolResult {
     Ok(ToolOutput::from_json(serde_json::to_value(value)?, true))
 }
 
+/// Joins names as prose: `a`, `a or b`, or `a, b, or c`.
+fn name_list(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        [first, second] => format!("{first} or {second}"),
+        [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
+    }
+}
+
 struct SpawnAgent {
     registry: Weak<Registry>,
 }
@@ -117,40 +127,27 @@ struct SpawnAgent {
 #[async_trait]
 impl Tool for SpawnAgent {
     fn definition(&self) -> ToolDefinition {
-        let claude_enabled = self
+        let roster = self
             .registry
             .upgrade()
-            .is_some_and(|registry| registry.claude_enabled());
-        let (models, model_description) = if claude_enabled {
-            (
-                vec![
-                    "luna",
-                    "sol",
-                    "astra",
-                    "haiku-5.5",
-                    "sonnet-5.5",
-                    "opus-5.5",
-                    "fable-5.1",
-                    "mythos-5.1",
-                ],
-                concat!(
-                    "Name luna, sol, astra, haiku-5.5, sonnet-5.5, opus-5.5, fable-5.1, or mythos-5.1 explicitly. ",
-                    "Choose model and effort independently for expected quality, total cost, and completion time, including rework. ",
-                    "Codex children cannot exceed a Codex parent's tier: luna < sol < astra. ",
-                    "Cross-provider selection and delegation between Claude models are supported, subject to effort caps.",
-                ),
-            )
+            .map(|registry| registry.models())
+            .unwrap_or_default();
+        let models: Vec<&str> = roster
+            .iter()
+            .filter_map(|&model| crate::models::alias(model))
+            .collect();
+        let provider_policy = if roster.iter().any(|model| matches!(model, Model::Claude(_))) {
+            "Codex children cannot exceed a Codex parent's tier: luna < sol < astra. \
+             Cross-provider selection and delegation between Claude models are supported, subject to effort caps."
         } else {
-            (
-                vec!["luna", "sol", "astra"],
-                concat!(
-                    "Name luna, sol, or astra explicitly. ",
-                    "Choose model and effort independently for expected quality, total cost, and completion time, including rework. ",
-                    "Only Codex is enabled. Choose at or below the spawning parent's tier: luna < sol < astra, ",
-                    "subject to effort caps.",
-                ),
-            )
+            "Only Codex is enabled. Choose at or below the spawning parent's tier: luna < sol < astra, \
+             subject to effort caps."
         };
+        let model_description = format!(
+            "Name {} explicitly. Choose model and effort independently for expected quality, total cost, \
+             and completion time, including rework. {provider_policy}",
+            name_list(&models),
+        );
         ToolDefinition::function(
             SPAWN_AGENT_TOOL,
             "Starts a reusable clean-room subagent without inherited conversation history and immediately returns its ID.",
@@ -699,48 +696,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claude_opt_in_controls_schema_and_runtime_admission() {
-        let (runtime, _updates) = crate::Subagents::new(1);
-        let (captured, mut arguments) = mpsc::unbounded_channel();
-        runtime
-            .set_agent_factory(
-                Thinking::Max,
-                ReasoningMode::Standard,
-                Speed::Standard,
-                move |context: AgentContext, speed| {
-                    captured
-                        .send((context.model, context.thinking, speed))
-                        .unwrap();
-                    Err(NanocodexError::InvalidRequest(
-                        "stop after capture".to_owned(),
-                    ))
-                },
-            )
-            .unwrap();
-        let tool = SpawnAgent {
-            registry: runtime.downgrade().registry,
-        };
-        for enabled in [false, true, false] {
-            runtime.set_claude_enabled(enabled);
+    async fn roster_controls_schema_description_and_runtime_admission() {
+        let codex_only = &crate::SUPPORTED_MODELS[..3];
+        let without_gated: Vec<Model> = crate::SUPPORTED_MODELS
+            .into_iter()
+            .filter(|model| !crate::is_access_gated(*model))
+            .collect();
+        for roster in [codex_only, &without_gated, &crate::SUPPORTED_MODELS] {
+            let (runtime, _updates) = crate::Subagents::new(1);
+            runtime.set_models(roster);
+            let (captured, mut arguments) = mpsc::unbounded_channel();
+            runtime
+                .set_agent_factory(
+                    Thinking::Max,
+                    ReasoningMode::Standard,
+                    Speed::Standard,
+                    move |context: AgentContext, _| {
+                        captured.send(context.model).unwrap();
+                        Err(NanocodexError::InvalidRequest(
+                            "stop after capture".to_owned(),
+                        ))
+                    },
+                )
+                .unwrap();
+            let tool = SpawnAgent {
+                registry: runtime.downgrade().registry,
+            };
             let definition = tool.definition();
-            let validator =
-                jsonschema::validator_for(definition.parameters().unwrap().as_value()).unwrap();
-            for model in [
-                "haiku-5.5",
-                "sonnet-5.5",
-                "opus-5.5",
-                "fable-5.1",
-                "mythos-5.1",
-            ] {
-                let input = json!({"role": "review", "task": "Review", "model": model,
+            let parameters = definition.parameters().unwrap().as_value();
+            let description = parameters["properties"]["model"]["description"]
+                .as_str()
+                .unwrap();
+            let validator = jsonschema::validator_for(parameters).unwrap();
+            for model in crate::SUPPORTED_MODELS {
+                let name = crate::models::alias(model).unwrap();
+                let offered = roster.contains(&model);
+                assert_eq!(description.contains(name), offered, "{name}");
+                let input = json!({"role": "review", "task": "Review", "model": name,
                     "thinking": "medium", "output_schema": {"type": "object"}});
-                assert_eq!(validator.is_valid(&input), enabled);
+                assert_eq!(validator.is_valid(&input), offered, "{name}");
                 // Execute directly to exercise admission independently of schema validation.
                 let error = tool
                     .execute(
                         ToolInput::Function(to_raw_value(&input).unwrap()),
                         ToolContext::new(
-                            Model::Codex(CodexModel::Luna).as_str(),
+                            Model::Codex(CodexModel::Astra).as_str(),
                             "root",
                             "spawn",
                             &[],
@@ -750,20 +750,21 @@ mod tests {
                     .await
                     .err()
                     .unwrap();
-                if enabled {
+                if offered {
                     assert!(matches!(subagent_error(&error), SubagentError::Agent(_)));
-                    assert_eq!(
-                        arguments.try_recv().unwrap().0,
-                        crate::parse_model(model).unwrap()
-                    );
+                    assert_eq!(arguments.try_recv().unwrap(), model);
                 } else {
                     assert!(matches!(
                         subagent_error(&error),
-                        SubagentError::Spawn(SpawnError::ClaudeDisabled)
+                        SubagentError::Spawn(SpawnError::ModelNotOffered(rejected)) if *rejected == model
                     ));
                     assert!(arguments.try_recv().is_err());
                 }
             }
+            assert_eq!(
+                description.contains("Only Codex is enabled"),
+                roster == codex_only
+            );
         }
     }
 
@@ -923,7 +924,7 @@ mod tests {
     impl ModeHarness {
         fn new(max_reasoning_mode: ReasoningMode) -> Self {
             let (runtime, updates) = crate::Subagents::new(8);
-            runtime.set_claude_enabled(true);
+            runtime.set_models(&crate::SUPPORTED_MODELS);
             let (built_sender, built) = mpsc::unbounded_channel();
             let (prompt_sender, prompts) = mpsc::unbounded_channel();
             runtime

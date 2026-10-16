@@ -358,7 +358,8 @@ Esc to cancel.
 | `mythos-5.1` | `claude-mythos-5-1` | high |
 
 Claude models need Claude enabled (see below). Mythos 5.1 is only served to accounts in Anthropic's
-Project Glasswing. It's the same model as Fable 5.1, so pick Fable if you don't have that access. Every
+Project Glasswing and needs its own key, so Tact only offers it once `claude.glasswing_api_key` is set.
+It's the same model as Fable 5.1, so pick Fable if you don't have that access. Every
 model supports effort from `low` through `max`, and a configured `agent.thinking` overrides the
 defaults. Resumed sessions keep the model they started with. Sessions on retired model IDs can't be resumed.
 
@@ -417,11 +418,21 @@ not a validity check). Keys never go into prompts, session checkpoints, or shell
 environments. Codex can still use a ChatGPT subscription in the same task tree via
 `tact auth --provider codex login`.
 
-The `[claude]` section accepts `enabled`, `api_key`, `api_base_url` (Tact appends `/messages`), and
-`workspace_id`. Any other field is an error, including the retired `auth` and `subscription_store`
-settings, so remove those if you're upgrading. If your key isn't scoped to a workspace, set
-`workspace_id` to the ID from [Console workspace settings](https://platform.claude.com/settings/workspaces),
+The `[claude]` section accepts `enabled`, `api_key`, `api_base_url` (Tact appends `/messages`),
+`workspace_id`, `glasswing_api_key`, and `glasswing_workspace_id`. Any other field is an error,
+including the retired `auth` and `subscription_store` settings, so remove those if you're upgrading.
+If your key isn't scoped to a workspace, set `workspace_id` to the ID from [Console workspace settings](https://platform.claude.com/settings/workspaces),
 and Tact sends it as `anthropic-workspace-id`. Start a new session after changing it.
+
+Mythos 5.1 doesn't use `api_key`. Anthropic gives Project Glasswing members separate keys that expire
+quickly, so Tact keeps that key in its own `glasswing_api_key` field, with an optional
+`glasswing_workspace_id` for the workspace it belongs to. Mythos requests from root sessions and
+subagents only ever send the Glasswing key and workspace, and every other Claude request only ever
+sends `api_key` and `workspace_id`. Without a Glasswing key Tact hides Mythos from the model picker,
+the web UI, and subagents, and picking it anyway fails with an error that names `glasswing_api_key`.
+When the key expires, put the new one in your config and reload it. Running Mythos sessions pick it up
+on their next request, so there's no need to restart them. The Glasswing key follows the same rules as
+`api_key`, which means a private config file and the same key format check.
 
 Claude sessions use the same code mode runtime as Codex, with nested tools, memory, MCP, and
 mixed-provider subagents. Web search and image generation still use your OpenAI credentials, as do

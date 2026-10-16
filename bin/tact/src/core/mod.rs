@@ -35,6 +35,7 @@ use crate::{
     app::{
         config::{Config, ReasoningEffort, ReasoningMode, Speed},
         error::{ConfigError, Result, RuntimeError},
+        model::available,
     },
     core::{
         extensions::{Skill, mcp_provider},
@@ -110,7 +111,7 @@ impl ConfiguredAgent {
         let memory = configured_memory_store(config, config.memory_workspace())?;
         let memory_enabled = memory.is_some();
         let (subagent_control, subagent_updates) = Subagents::new(agent_config.max_subagents());
-        subagent_control.set_claude_enabled(config.claude().enabled());
+        subagent_control.set_models(&available(config.claude()));
         let recipe = Arc::new(AgentRecipe {
             config: config.clone(),
             workspace: workspace.clone(),

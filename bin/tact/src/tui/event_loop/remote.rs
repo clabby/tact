@@ -4,7 +4,11 @@
 
 use super::recent_prompts::merge_recent_prompts;
 use crate::{
-    app::{config::Config, error::ConfigEditError, model::ModelCatalog},
+    app::{
+        config::Config,
+        error::ConfigEditError,
+        model::{ModelCatalog, available},
+    },
     core::{
         extensions::SkillMatches,
         protocol::{CommandError, ListedMemory, Query, QueryReply, Reply},
@@ -57,9 +61,9 @@ pub(super) fn answer(query: Query, state: &QueryState<'_>) -> Answer<QueryReply>
 
 fn prepare(query: Query, state: &QueryState<'_>) -> Result<Answer<QueryReply>, CommandError> {
     Ok(match query {
-        Query::Models => Answer::Ready(Ok(QueryReply::Models(ModelCatalog::new(
-            state.config.claude().enabled(),
-        )))),
+        Query::Models => Answer::Ready(Ok(QueryReply::Models(ModelCatalog::new(&available(
+            state.config.claude(),
+        ))))),
         Query::History { query, cursor } => {
             let store = SessionStore::new(state.config.path());
             let workspace = state.workspace.to_path_buf();
@@ -216,7 +220,7 @@ mod tests {
     use crate::{
         app::{
             config::{Config, ConfigOverrides, ReasoningEffort, ReasoningMode, Speed},
-            model::ModelCatalog,
+            model::{ModelCatalog, available},
             theme::Theme,
         },
         core::{
@@ -284,7 +288,7 @@ mod tests {
         let Ok(QueryReply::Models(catalog)) = query(Query::Models).await else {
             panic!("models");
         };
-        assert_eq!(catalog, ModelCatalog::new(config.claude().enabled()));
+        assert_eq!(catalog, ModelCatalog::new(&available(config.claude())));
 
         let Ok(QueryReply::Files(files)) = query(Query::Files {
             query: "lib".to_owned(),

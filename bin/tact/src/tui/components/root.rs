@@ -42,7 +42,7 @@ use super::{
 };
 use crate::{
     app::{
-        config::{ReasoningEffort, ReasoningMode, Speed, TuiConfig},
+        config::{ClaudeConfig, ReasoningEffort, ReasoningMode, Speed, TuiConfig},
         model,
         theme::{Theme, ThemeMode},
     },
@@ -398,7 +398,8 @@ pub(crate) struct RootNode {
     fork_available: bool,
     skills: Arc<[Skill]>,
     memory_enabled: bool,
-    claude_enabled: bool,
+    /// The models a new session may run, which the model picker offers.
+    models: Arc<[Model]>,
     /// An interrupt was requested and the worker has not yet reported the turns cancelled.
     interrupt_in_flight: bool,
     interactive: bool,
@@ -442,7 +443,7 @@ impl RootNode {
             fork_available: true,
             skills: Arc::from([]),
             memory_enabled: false,
-            claude_enabled: false,
+            models: model::available(&ClaudeConfig::default()).into(),
             interrupt_in_flight: false,
             interactive: true,
             theme_mode: ThemeMode::Auto,
@@ -487,7 +488,7 @@ impl RootNode {
         root.fork_available = false;
         root.set_skills(Arc::clone(&self.skills));
         root.memory_enabled = self.memory_enabled;
-        root.claude_enabled = self.claude_enabled;
+        root.models = Arc::clone(&self.models);
         root.theme_mode = self.theme_mode;
         root.tui = self.tui;
         root.context_diagnostics = self.context_diagnostics.clone();
@@ -514,7 +515,7 @@ impl RootNode {
     fn sibling_with_effort(&self, workspace: &Path, thinking: ReasoningEffort) -> Self {
         let mut root = Self::new(workspace, thinking);
         root.memory_enabled = self.memory_enabled;
-        root.claude_enabled = self.claude_enabled;
+        root.models = Arc::clone(&self.models);
         root.theme_mode = self.theme_mode;
         root.tui = self.tui;
         root.set_max_subagents(self.subagents.max_subagents());
@@ -553,8 +554,8 @@ impl RootNode {
         }
     }
 
-    pub(crate) fn set_claude_enabled(&mut self, enabled: bool) {
-        self.claude_enabled = enabled;
+    pub(crate) fn set_models(&mut self, models: Arc<[Model]>) {
+        self.models = models;
         if matches!(self.overlay, Some(Overlay::Model(_))) {
             self.open_model();
         }
@@ -1656,7 +1657,7 @@ impl RootNode {
         }
         self.overlay = Some(Overlay::Model(ModelSelector::new(
             self.composer.model(),
-            self.claude_enabled,
+            Arc::clone(&self.models),
         )));
         ComponentUpdate::render(RenderRequest::Immediate)
     }

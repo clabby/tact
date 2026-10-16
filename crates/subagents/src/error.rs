@@ -215,12 +215,9 @@ pub(crate) enum SpawnError {
     /// The calling root session runs a model outside the supported roster.
     #[error(transparent)]
     CallerModel(#[from] crate::UnsupportedModel),
-    /// The requested model is outside the supported roster.
-    #[error("unsupported subagent model")]
-    ModelNotOffered,
-    /// Claude children are disabled for this runtime.
-    #[error("Claude subagents are disabled")]
-    ClaudeDisabled,
+    /// The requested model is outside this runtime's roster.
+    #[error("subagent model {0} is not offered in this session")]
+    ModelNotOffered(Model),
     /// The model does not accept the requested effort.
     #[error("model {model} does not support thinking {thinking}")]
     UnsupportedThinking {

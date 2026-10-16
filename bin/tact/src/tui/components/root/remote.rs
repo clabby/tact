@@ -187,9 +187,7 @@ impl RootNode {
                     "the model can only change before the first prompt".to_owned(),
                 ));
             }
-            PaneCommand::SetModel(model)
-                if !model::available(self.claude_enabled).contains(model) =>
-            {
+            PaneCommand::SetModel(model) if !self.models.contains(model) => {
                 return Err(CommandError::Invalid(format!("{model} is not available")));
             }
             PaneCommand::SetReasoningMode(_) if self.thread != ThreadState::New => {

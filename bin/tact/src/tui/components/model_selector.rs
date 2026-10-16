@@ -13,10 +13,7 @@ use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
-use crate::app::{
-    model::{available, name},
-    theme::Theme,
-};
+use crate::app::{model::name, theme::Theme};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use nanocodex::HarnessModel as Model;
 use ratatui::{
@@ -26,6 +23,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{List, ListItem, ListState, Paragraph},
 };
+use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 
 const KEY_BINDINGS: [(&str, &str); 3] = [("↑↓", "move"), ("enter", "apply"), ("esc", "cancel")];
@@ -41,7 +39,7 @@ pub(super) enum ModelSelectorEffect {
 }
 
 pub(super) struct ModelSelector {
-    models: &'static [Model],
+    models: Arc<[Model]>,
     current: Model,
     query: String,
     matches: Vec<usize>,
@@ -49,18 +47,17 @@ pub(super) struct ModelSelector {
 }
 
 impl ModelSelector {
-    pub(super) fn new(initial: Model, claude_enabled: bool) -> Self {
-        let models = available(claude_enabled);
+    pub(super) fn new(initial: Model, models: Arc<[Model]>) -> Self {
         let selected = models
             .iter()
             .position(|model| *model == initial)
             .unwrap_or(1);
         Self {
-            models,
             current: initial,
             query: String::new(),
             matches: (0..models.len()).collect(),
             selected,
+            models,
         }
     }
 
@@ -250,6 +247,13 @@ mod tests {
     const LUNA: Model = Model::Codex(CodexModel::Luna);
     const FABLE: Model = Model::Claude(ClaudeModel::Fable51);
 
+    fn roster(claude_enabled: bool) -> Arc<[Model]> {
+        tact_subagents::SUPPORTED_MODELS
+            .into_iter()
+            .filter(|model| claude_enabled || matches!(model, Model::Codex(_)))
+            .collect()
+    }
+
     fn key(selector: &mut ModelSelector, code: KeyCode) -> ComponentUpdate<ModelSelectorEffect> {
         selector.update(ModelSelectorEvent::Terminal(Event::Key(KeyEvent::new(
             code,
@@ -287,7 +291,7 @@ mod tests {
 
     #[test]
     fn navigation_and_apply_respect_the_enabled_roster() {
-        let mut selector = ModelSelector::new(SOL, false);
+        let mut selector = ModelSelector::new(SOL, roster(false));
         key(&mut selector, KeyCode::Up);
         key(&mut selector, KeyCode::Up);
         assert_eq!(
@@ -303,7 +307,7 @@ mod tests {
         );
         paste(&mut selector, "claude");
         assert!(key(&mut selector, KeyCode::Enter).effects.is_empty());
-        let mut enabled = ModelSelector::new(FABLE, true);
+        let mut enabled = ModelSelector::new(FABLE, roster(true));
         assert_eq!(
             key(&mut enabled, KeyCode::Enter).effects,
             [ModelSelectorEffect::Apply(FABLE)]
@@ -322,12 +326,12 @@ mod tests {
             ("haiku", vec![Model::Claude(ClaudeModel::Haiku55)]),
             ("gpt-6.1-sol", vec![SOL]),
             ("claude-fable-5-1", vec![FABLE]),
-            ("OpenAI", available(false).to_vec()),
-            ("codex", available(false).to_vec()),
-            ("Anthropic", available(true)[3..].to_vec()),
-            ("claude", available(true)[3..].to_vec()),
+            ("OpenAI", roster(false).to_vec()),
+            ("codex", roster(false).to_vec()),
+            ("Anthropic", roster(true)[3..].to_vec()),
+            ("claude", roster(true)[3..].to_vec()),
         ] {
-            let mut selector = ModelSelector::new(FABLE, true);
+            let mut selector = ModelSelector::new(FABLE, roster(true));
             paste(&mut selector, query);
             assert_eq!(
                 selector
@@ -347,7 +351,7 @@ mod tests {
 
     #[test]
     fn typing_paste_and_backspace_handle_graphemes_and_no_results() {
-        let mut selector = ModelSelector::new(SOL, true);
+        let mut selector = ModelSelector::new(SOL, roster(true));
         key(&mut selector, KeyCode::Char('é'));
         assert!(selector.matches.is_empty());
         assert!(key(&mut selector, KeyCode::Enter).effects.is_empty());
@@ -380,8 +384,8 @@ mod tests {
     #[test]
     fn vertical_rows_use_configured_colors_and_distinguish_current_from_selection() {
         let theme: Theme = toml::from_str("model_sol = '#123456'\nmodel_mythos = 'red'\n").unwrap();
-        let mut selector = ModelSelector::new(SOL, true);
-        for _ in 0..available(true).len() {
+        let mut selector = ModelSelector::new(SOL, roster(true));
+        for _ in 0..roster(true).len() {
             key(&mut selector, KeyCode::Down);
         }
         let terminal = render(&mut selector, 68, 12, &theme);
@@ -415,7 +419,7 @@ mod tests {
     fn narrow_and_tiny_frames_keep_selection_visible_and_preserve_chrome() {
         let theme = Theme::default();
         for (width, height) in [(30, 7), (22, 6), (12, 4), (6, 3), (1, 1), (0, 0)] {
-            let mut selector = ModelSelector::new(FABLE, true);
+            let mut selector = ModelSelector::new(FABLE, roster(true));
             let terminal = render(&mut selector, width, height, &theme);
             if width >= 12 && height >= 4 {
                 let text = rows(&terminal).join("\n");
@@ -425,7 +429,7 @@ mod tests {
                 assert_eq!(buffer[(width - 1, height - 1)].symbol(), "╯");
             }
         }
-        let mut selector = ModelSelector::new(SOL, true);
+        let mut selector = ModelSelector::new(SOL, roster(true));
         paste(&mut selector, &"界e\u{301}".repeat(40));
         let terminal = render(&mut selector, 30, 8, &theme);
         let buffer = terminal.backend().buffer();

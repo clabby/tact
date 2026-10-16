@@ -70,9 +70,11 @@ tokio::spawn(async move {
 ## Models and effort
 
 Each spawn names its model and reasoning effort with Nanocodex's `HarnessModel` and `Thinking`
-types. A Codex child cannot run a higher tier than a Codex parent (Luna < Sol < Astra). Claude models
-(Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.1, and Mythos 5.1) are rejected until `Subagents::set_claude_enabled(true)`;
-once enabled, any model may delegate to them and they may delegate to any model. Every spawn is
+types. A Codex child cannot run a higher tier than a Codex parent (Luna < Sol < Astra). A runtime
+offers only Codex models until the host passes a roster to `Subagents::set_models`; `spawn_agent`
+lists exactly that roster and admission rejects every other model. `is_access_gated` marks models
+such as Mythos 5.1 that Anthropic serves only to granted accounts, so hosts can leave them out of
+the roster. Any offered model may delegate to any other offered model. Every spawn is
 bounded by the runtime's live effort cap, and a registered child cannot spawn above its own
 effort.
 

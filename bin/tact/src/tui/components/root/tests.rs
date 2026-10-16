@@ -41,7 +41,9 @@ use std::{
     time::{Duration, Instant},
 };
 use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
-use tact_subagents::{AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate};
+use tact_subagents::{
+    AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate, SUPPORTED_MODELS,
+};
 
 fn key(code: KeyCode, modifiers: KeyModifiers) -> super::RootEvent {
     super::RootEvent::Terminal(Event::Key(KeyEvent::new(code, modifiers)))
@@ -3123,8 +3125,11 @@ fn control_d_selects_a_model_only_before_the_first_prompt() {
 fn claude_availability_survives_reset_and_fork() {
     let workspace = Path::new("/work");
     let mut root = RootNode::new(workspace, ReasoningEffort::Medium);
-    root.set_claude_enabled(true);
-    assert!(root.fork(workspace, ReasoningEffort::Medium).claude_enabled);
+    root.set_models(Arc::from(SUPPORTED_MODELS));
+    assert_eq!(
+        *root.fork(workspace, ReasoningEffort::Medium).models,
+        SUPPORTED_MODELS
+    );
     root.reset_session(
         workspace,
         ReasoningEffort::Medium,
@@ -3134,7 +3139,7 @@ fn claude_availability_survives_reset_and_fork() {
     );
     root.set_model(Model::Codex(CodexModel::Astra));
     root.open_model();
-    root.set_claude_enabled(false);
+    root.set_models(Arc::from(&SUPPORTED_MODELS[..3]));
     root.update(key(KeyCode::Right, KeyModifiers::NONE));
     let result = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
     assert!(result.effects.is_empty());

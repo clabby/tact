@@ -33,10 +33,7 @@ use policy::{reasoning_mode_exceeds, thinking_rank};
 use serde_json::Value;
 pub(crate) use state::{AgentDirectoryEntry, AgentSummary};
 use state::{AgentReservation, ChildSession, RegistryState, TurnSteer, complete_session};
-use std::sync::{
-    Arc, Mutex, OnceLock, Weak,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot, watch},
@@ -51,7 +48,8 @@ pub(crate) struct Registry {
     capacity: Capacity,
     message_lock: tokio::sync::Mutex<()>,
     agent_factory: OnceLock<AgentFactory>,
-    claude_enabled: AtomicBool,
+    /// The models children may run. Codex models only until the host sets a roster.
+    models: Mutex<Arc<[Model]>>,
 }
 
 /// Owns the clean-agent recipe, fixed mode ceiling, and live spawn settings.
@@ -105,7 +103,12 @@ impl Registry {
             capacity: Capacity::new(max_concurrency),
             message_lock: tokio::sync::Mutex::new(()),
             agent_factory: OnceLock::new(),
-            claude_enabled: AtomicBool::new(false),
+            models: Mutex::new(
+                crate::SUPPORTED_MODELS
+                    .into_iter()
+                    .filter(|model| matches!(model, Model::Codex(_)))
+                    .collect(),
+            ),
         }
     }
 
@@ -145,11 +148,8 @@ impl Registry {
         thinking: Thinking,
         reasoning_mode: ReasoningMode,
     ) -> Result<(Nanocodex, AgentEvents, AgentContext), SubagentError> {
-        if !crate::SUPPORTED_MODELS.contains(&model) {
-            return Err(SpawnError::ModelNotOffered.into());
-        }
-        if matches!(model, Model::Claude(_)) && !self.claude_enabled() {
-            return Err(SpawnError::ClaudeDisabled.into());
+        if !self.models().contains(&model) {
+            return Err(SpawnError::ModelNotOffered(model).into());
         }
         if !model.supports_thinking(thinking) {
             return Err(SpawnError::UnsupportedThinking { model, thinking }.into());
@@ -178,8 +178,13 @@ impl Registry {
         Ok((agent, events, context))
     }
 
-    pub(super) fn claude_enabled(&self) -> bool {
-        self.claude_enabled.load(Ordering::Relaxed)
+    pub(super) fn models(&self) -> Arc<[Model]> {
+        Arc::clone(
+            &self
+                .models
+                .lock()
+                .expect("subagent roster lock should not be poisoned"),
+        )
     }
 
     fn set_agent_max_thinking(&self, max_thinking: Thinking) {
@@ -511,12 +516,15 @@ pub struct WeakSubagents {
 }
 
 impl Subagents {
-    /// Enables Claude choices for every root and descendant sharing this registry.
-    /// Runtime admission checks the current policy even when a caller retained an older schema.
-    pub fn set_claude_enabled(&self, enabled: bool) {
-        self.registry
-            .claude_enabled
-            .store(enabled, Ordering::Relaxed);
+    /// Sets the models every root and descendant sharing this registry may delegate to, a subset
+    /// of [`crate::SUPPORTED_MODELS`] in picker order. Runtime admission checks the current roster
+    /// even when a caller retained an older schema.
+    pub fn set_models(&self, models: &[Model]) {
+        *self
+            .registry
+            .models
+            .lock()
+            .expect("subagent roster lock should not be poisoned") = models.into();
     }
 
     /// Creates an isolated runtime and its typed update stream.

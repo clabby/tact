@@ -3,6 +3,7 @@
 //! Values that may hold credentials never appear in these errors: parser errors drop their
 //! retained input, and rejected URLs are reported by kind only.
 
+use nanocodex::HarnessModel as Model;
 use std::{io, path::PathBuf};
 use thiserror::Error;
 
@@ -12,6 +13,10 @@ pub(crate) enum ConfigError {
     WebExposureConflict,
     #[error("Claude models require [claude] enabled = true in the configuration")]
     ClaudeDisabled,
+    #[error(
+        "{0} requires [claude] glasswing_api_key, the short-lived key Anthropic issues to Project Glasswing accounts"
+    )]
+    GlasswingApiKeyMissing(Model),
     #[error("could not determine the config directory; set TACT_HOME or pass --config")]
     ConfigHomeUnavailable,
     #[error("could not determine the credential directory; set CODEX_HOME or pass --auth-file")]

@@ -5,11 +5,20 @@ use crate::app::{
     error::{AuthError, AuthResult, SecretError},
     secret::SecretString,
 };
-use nanocodex::oai::auth::{
-    ChatGptAuthStatus, ChatGptLogin, OpenAiAuth, load_chatgpt_auth, logout_chatgpt,
-    resolve_chatgpt_auth_status,
+use nanocodex::{
+    claude::{ClaudeAuthFuture, ClaudeAuthProvider, ClaudeAuthUnavailable},
+    oai::auth::{
+        ChatGptAuthStatus, ChatGptLogin, OpenAiAuth, load_chatgpt_auth, logout_chatgpt,
+        resolve_chatgpt_auth_status,
+    },
 };
-use std::{path::Path, result::Result as StdResult, sync::Arc};
+use reqwest::header::{HeaderMap, HeaderValue};
+use std::{
+    fmt,
+    path::Path,
+    result::Result as StdResult,
+    sync::{Arc, RwLock},
+};
 
 const OPENAI_API_KEY: &str = "OPENAI_API_KEY";
 
@@ -21,6 +30,67 @@ pub(crate) fn validate_claude_api_key(key: &SecretString) -> AuthResult<()> {
         return Err(AuthError::InvalidClaudeApiKey);
     }
     Ok(())
+}
+
+/// The Glasswing key and workspace that Mythos requests authenticate with.
+///
+/// Anthropic issues Glasswing keys separately from ordinary API keys and makes them short-lived,
+/// so Mythos clients read these credentials before every request instead of capturing them.
+/// Configurations loaded together share one instance, and an accepted reload stores the reloaded
+/// credentials in it, so a rotated key reaches running sessions on their next request.
+#[derive(Default)]
+pub(crate) struct GlasswingCredentials(RwLock<Option<Glasswing>>);
+
+struct Glasswing {
+    key: Arc<SecretString>,
+    workspace_id: Option<String>,
+}
+
+impl GlasswingCredentials {
+    pub(crate) fn replace(&self, key: Option<Arc<SecretString>>, workspace_id: Option<&str>) {
+        *self
+            .0
+            .write()
+            .expect("Glasswing credential lock should not be poisoned") =
+            key.map(|key| Glasswing {
+                key,
+                workspace_id: workspace_id.map(str::to_owned),
+            });
+    }
+
+    /// The request headers for the current credentials. The HTTP client owns a non-zeroizing
+    /// copy of the key once these headers cross into it.
+    fn headers(&self) -> StdResult<HeaderMap, ClaudeAuthUnavailable> {
+        let current = self
+            .0
+            .read()
+            .expect("Glasswing credential lock should not be poisoned");
+        let Glasswing { key, workspace_id } = current.as_ref().ok_or(ClaudeAuthUnavailable)?;
+        validate_claude_api_key(key).map_err(|_| ClaudeAuthUnavailable)?;
+        let mut value =
+            HeaderValue::from_str(key.expose_secret()).map_err(|_| ClaudeAuthUnavailable)?;
+        value.set_sensitive(true);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", value);
+        if let Some(workspace_id) = workspace_id {
+            let value = HeaderValue::from_str(workspace_id).map_err(|_| ClaudeAuthUnavailable)?;
+            headers.insert("anthropic-workspace-id", value);
+        }
+        Ok(headers)
+    }
+}
+
+impl ClaudeAuthProvider for GlasswingCredentials {
+    fn headers(&self) -> ClaudeAuthFuture<'_, StdResult<HeaderMap, ClaudeAuthUnavailable>> {
+        let headers = Self::headers(self);
+        Box::pin(async move { headers })
+    }
+}
+
+impl fmt::Debug for GlasswingCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GlasswingCredentials([REDACTED])")
+    }
 }
 
 enum SelectedAuth {

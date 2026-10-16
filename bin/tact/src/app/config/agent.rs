@@ -196,7 +196,7 @@ mod tests {
             ("mythos-5.1", ReasoningEffort::High),
         ] {
             let config = load_config(&format!(
-                "[claude]\nenabled = true\n[agent]\nmodel = \"{model}\"\n"
+                "[claude]\nenabled = true\nglasswing_api_key = 'sk-ant-api03-glasswing'\n[agent]\nmodel = \"{model}\"\n"
             ))
             .unwrap();
             assert_eq!(config.agent().thinking(), expected, "model {model}");

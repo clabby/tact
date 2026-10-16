@@ -61,6 +61,7 @@ use crate::{
         config::Config,
         error::{Result, RuntimeError},
         herdr,
+        model::available,
         theme::ColorScheme,
     },
     core::{
@@ -250,7 +251,7 @@ impl EventLoop {
 
         let mut root = RootNode::new(&initial_workspace, initial_effort);
         root.set_tui_config(*config.tui());
-        root.set_claude_enabled(config.claude().enabled());
+        root.set_models(available(config.claude()).into());
         root.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);
         root.set_speed(initial_speed);
         root.set_max_subagents(config.agent().max_subagents());

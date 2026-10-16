@@ -249,6 +249,7 @@ impl Config {
         let memory = MemoryConfig::new(file.memory, &config_dir).map_err(ConfigError::from)?;
         let agent = AgentConfig::resolve(&overrides, file.agent, workspace.clone());
         file.claude.ensure_model_enabled(agent.model())?;
+        file.claude.publish_glasswing();
         let decisions = DecisionsConfig::new(
             file.decisions.enabled.unwrap_or(false),
             file.openai.decisions_api_key.as_ref().map(Arc::clone),
@@ -283,6 +284,9 @@ impl Config {
     }
 
     /// Reloads the original source while preserving settings that cannot change safely in-process.
+    /// The reloaded configuration shares the live Glasswing credentials of this one. Its own
+    /// Glasswing key reaches running sessions only once the caller accepts it and calls
+    /// [`ClaudeConfig::publish_glasswing`].
     pub(crate) fn reload(&self) -> Result<ConfigReload> {
         let mut config = Self::load_with(
             self.reload.overrides.clone(),
@@ -292,6 +296,7 @@ impl Config {
         let workspace_changed = config.agent.workspace != self.agent.workspace;
         config.agent.workspace.clone_from(&self.agent.workspace);
         config.memory_workspace.clone_from(&self.memory_workspace);
+        config.claude.share_glasswing(&self.claude);
         Ok(ConfigReload {
             config,
             workspace_changed,
@@ -486,10 +491,22 @@ mod tests {
         assert_eq!(rendered["openai"]["decisions_api_key"].as_str(), Some(""));
         assert_table_fields(
             &rendered["claude"],
-            &["enabled", "api_key", "api_base_url", "workspace_id"],
+            &[
+                "enabled",
+                "api_key",
+                "api_base_url",
+                "workspace_id",
+                "glasswing_api_key",
+                "glasswing_workspace_id",
+            ],
         );
         assert_eq!(rendered["claude"]["enabled"].as_bool(), Some(false));
         assert_eq!(rendered["claude"]["api_key"].as_str(), Some(""));
+        assert_eq!(rendered["claude"]["glasswing_api_key"].as_str(), Some(""));
+        assert_eq!(
+            rendered["claude"]["glasswing_workspace_id"].as_str(),
+            Some("")
+        );
         assert!(config.claude().api_key().is_none());
         assert_table_fields(
             &rendered["agent"],

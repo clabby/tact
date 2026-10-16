@@ -1041,9 +1041,9 @@ impl AppNode {
         }
     }
 
-    pub(crate) fn set_claude_enabled(&mut self, enabled: bool) {
+    pub(crate) fn set_models(&mut self, models: Arc<[Model]>) {
         for root in self.roots_mut() {
-            root.set_claude_enabled(enabled);
+            root.set_models(Arc::clone(&models));
         }
     }
 

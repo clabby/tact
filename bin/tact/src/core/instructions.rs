@@ -30,7 +30,7 @@ use super::{
     extensions::{Skill, SkillCatalog},
 };
 use crate::app::config::Config;
-use nanocodex::{HarnessModel as Model, oai::tower::ResponsesServiceConfig};
+use nanocodex::{ClaudeModel, HarnessModel as Model, oai::tower::ResponsesServiceConfig};
 use std::sync::Arc;
 use tact_subagents::SUPPORTED_MODELS;
 
@@ -122,6 +122,22 @@ FrontierCode 1.1 Main (native Codex; best scoring effort per model).
 | `sol` | medium | 50.23 | $0.36 |
 | `astra` | max | 53.26 | $4.59 |
 "#;
+
+/// The parts of [`CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS`] that apply only when the configuration
+/// offers Mythos, which needs a Project Glasswing key.
+const MYTHOS_MENTION: &str = "`mythos-5.1`, ";
+const MYTHOS_RANKING: &str = "`mythos-5.1` ranks above `fable-5.1`. Prefer it wherever you would otherwise choose `fable-5.1`.\n\n";
+
+/// The Claude subagent guidance, mentioning Mythos only when it is offered.
+fn claude_subagent_model_instructions(mythos_offered: bool) -> String {
+    if mythos_offered {
+        CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS.to_owned()
+    } else {
+        CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS
+            .replacen(MYTHOS_MENTION, "", 1)
+            .replacen(MYTHOS_RANKING, "", 1)
+    }
+}
 
 const CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS: &str = r#"### Available Claude models
 
@@ -381,10 +397,16 @@ impl SessionInstructions {
         } else {
             text.exclude_live(SUBAGENT_MODEL_INSTRUCTIONS);
         }
+        let mythos_offered = config
+            .claude()
+            .ensure_model_enabled(Model::Claude(ClaudeModel::Mythos51))
+            .is_ok();
+        let claude_guidance = claude_subagent_model_instructions(mythos_offered);
+        text.exclude_live(&claude_subagent_model_instructions(!mythos_offered));
         if subagents_enabled && config.claude().enabled() {
-            text.include_live(CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS);
+            text.include_live(&claude_guidance);
         } else {
-            text.exclude_live(CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS);
+            text.exclude_live(&claude_guidance);
         }
         if config.decisions().enabled() {
             text.include_live(DECIDE_TOOL_INSTRUCTIONS);
@@ -525,7 +547,7 @@ mod tests {
         app::config::{Config, ConfigOverrides, SkillsConfig},
         core::extensions::{Skill, SkillCatalog},
     };
-    use nanocodex::{HarnessModel as Model, Model as CodexModel};
+    use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
     use std::{fs, path::Path, sync::Arc};
     use tact_subagents::SUPPORTED_MODELS;
     use tempfile::{TempDir, tempdir};
@@ -592,6 +614,11 @@ mod tests {
     fn load_config(directory: &Path, contents: &str, overrides: ConfigOverrides) -> Config {
         let path = directory.join("config.toml");
         fs::write(&path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
         Config::load(ConfigOverrides {
             path: Some(path),
             workspace: Some(directory.to_path_buf()),
@@ -894,7 +921,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let config = load_config(
             directory.path(),
-            "[claude]\nenabled = true\n[skills]\nenabled = false\n",
+            "[claude]\nenabled = true\nglasswing_api_key = 'sk-ant-api03-glasswing'\n[skills]\nenabled = false\n",
             ConfigOverrides::default(),
         );
         for model in SUPPORTED_MODELS {
@@ -967,6 +994,43 @@ mod tests {
                 assert_eq!(count(&text, CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS), 0);
             }
         }
+    }
+
+    #[test]
+    fn mythos_guidance_requires_a_glasswing_key() {
+        let directory = tempdir().unwrap();
+        let prompts = |glasswing: &str, restored: Option<&str>| {
+            let config = load_config(
+                directory.path(),
+                &format!(
+                    "[claude]\nenabled = true\nglasswing_api_key = '{glasswing}'\n[skills]\nenabled = false\n"
+                ),
+                ConfigOverrides::default(),
+            );
+            let restored =
+                restored.map(|text| RestoredInstructions::new(text.to_owned(), Some(false)));
+            AgentInstructions::from_config(&config, Model::Codex(CodexModel::Sol), restored, true)
+                .unwrap()
+        };
+        let offered = prompts("sk-ant-api03-glasswing", None);
+        let withheld = prompts("", None);
+        let mythos = Model::Claude(ClaudeModel::Mythos51);
+        for text in [Arc::clone(&offered.session.text), offered.for_model(mythos)] {
+            assert_eq!(count(&text, CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS), 1);
+        }
+        for text in [
+            Arc::clone(&withheld.session.text),
+            withheld.for_model(Model::Codex(CodexModel::Sol)),
+        ] {
+            assert!(!text.contains("mythos"));
+            assert!(text.contains("### Available Claude models"));
+        }
+
+        // A restored prompt carries the guidance of the configuration that resumes it.
+        let resumed = prompts("", Some(&offered.session.text));
+        assert_eq!(resumed.session.text, withheld.session.text);
+        let regranted = prompts("sk-ant-api03-glasswing", Some(&withheld.session.text));
+        assert_eq!(regranted.session.text, offered.session.text);
     }
 
     #[test]

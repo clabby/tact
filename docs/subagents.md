@@ -29,8 +29,10 @@ tool surface or instructions of an existing runtime. A later new or restored ses
 reloaded setting.
 
 Subagents explicitly choose `luna`, `sol`, or `astra` for each task. Setting `[claude] enabled = true`
-also exposes `haiku-5.5`, `sonnet-5.5`, `opus-5.5`, `fable-5.1`, and `mythos-5.1`. Both providers can create children using
-either provider. Claude is rejected at the runtime boundary unless enabled. There is no `selected`
+also exposes `haiku-5.5`, `sonnet-5.5`, `opus-5.5`, and `fable-5.1`, plus `mythos-5.1` once
+`[claude] glasswing_api_key` is set. Both providers can create children using either provider. The
+runtime rejects any model outside the configured roster, and a configuration reload updates the
+roster of existing runtimes. There is no `selected`
 alias. Tact's session instructions include a self-contained model-selection guide for the enabled
 models; the `spawn_agent` schema states availability and delegation limits.
 

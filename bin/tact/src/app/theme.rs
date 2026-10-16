@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn model_defaults_use_terminal_color_slots_in_both_modes() {
         let mut theme = Theme::default();
-        let models = crate::app::model::available(true);
+        let models = tact_subagents::SUPPORTED_MODELS;
         let colors = [
             Color::Reset,
             Color::Yellow,

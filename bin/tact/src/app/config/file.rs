@@ -223,6 +223,7 @@ impl ConfigFile {
             || self.openai.api_key.is_some()
             || self.openai.decisions_api_key.is_some()
             || self.claude.api_key.is_some()
+            || self.claude.glasswing_api_key.is_some()
     }
 
     /// Rejects credentials stored in a file that other users may read. The credentials are
@@ -273,6 +274,7 @@ impl ConfigFile {
         drop(self.openai.api_key.take());
         drop(self.openai.decisions_api_key.take());
         drop(self.claude.api_key.take());
+        drop(self.claude.glasswing_api_key.take());
     }
 }
 
@@ -374,6 +376,7 @@ mod tests {
             ("openai", "api_key"),
             ("openai", "decisions_api_key"),
             ("claude", "api_key"),
+            ("claude", "glasswing_api_key"),
         ] {
             let directory = tempdir().unwrap();
             let config_path = directory.path().join("config.toml");
@@ -417,6 +420,7 @@ mod tests {
             ("openai", "api_key"),
             ("openai", "decisions_api_key"),
             ("claude", "api_key"),
+            ("claude", "glasswing_api_key"),
         ] {
             let secret = "sk-ant-api-permission-fixture";
             let error = load_config(&format!("[{section}]\n{key} = '{secret}'\n")).unwrap_err();

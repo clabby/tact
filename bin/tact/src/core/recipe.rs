@@ -26,14 +26,16 @@ use nanocodex::{
     AgentEvents, HarnessModel as Model, Model as CodexModel, Nanocodex, NanocodexError, OpenAi,
     Tools,
     agent::session::SessionId,
-    claude::ClaudeClient,
+    claude::{ANTHROPIC_MESSAGES_URL, ClaudeClient},
     oai::{OpenAiError, session::SessionIdError},
     tools::ToolsBuildError,
 };
 use reqwest::header::{HeaderMap, HeaderValue, InvalidHeaderValue};
 use std::{num::NonZeroU32, path::PathBuf, sync::Arc};
 use tact_memory::{MemoryTool, MutationAuthorizer, SelectedMemoryStore};
-use tact_subagents::{AgentContext, AuthorityError, RootAgentAuthority, WeakSubagents};
+use tact_subagents::{
+    AgentContext, AuthorityError, RootAgentAuthority, WeakSubagents, is_access_gated,
+};
 use thiserror::Error;
 
 const RESPONSE_MAX_ATTEMPTS: NonZeroU32 = NonZeroU32::new(2_000).unwrap();
@@ -148,7 +150,9 @@ impl AgentRecipe {
         self: &Arc<Self>,
         spec: AgentSpec<'_>,
     ) -> nanocodex::agent::Result<(Nanocodex, AgentEvents)> {
-        let client = self.claude_client(|| SecretString::from_environment("ANTHROPIC_API_KEY"))?;
+        let client = self.claude_client(spec.context.model, || {
+            SecretString::from_environment("ANTHROPIC_API_KEY")
+        })?;
         let runtime =
             claude::tool_runtime(&self.config, &self.workspace, &self.tools_factory()()?)?;
         let recipe = Arc::clone(self);
@@ -211,17 +215,28 @@ impl AgentRecipe {
         }
     }
 
+    /// Builds the client a Claude agent running `model` sends its requests through.
+    /// Access-gated models authenticate only with the live Glasswing credentials, and every other
+    /// model uses the resolved API key and workspace.
     pub(super) fn claude_client(
         &self,
+        model: Model,
         read_key: impl FnOnce() -> Result<Option<SecretString>, SecretError>,
     ) -> Result<ClaudeClient, AgentBuildError> {
         let config = self.config.claude();
-        if !config.enabled() {
-            return Err(ConfigError::ClaudeDisabled.into());
-        }
+        config.ensure_model_enabled(model)?;
         let endpoint = config
             .api_base_url()
             .map(|base| format!("{}/messages", base.trim_end_matches('/')));
+        if is_access_gated(model) {
+            let http = http_client(HeaderMap::new())?;
+            let endpoint = endpoint.unwrap_or_else(|| ANTHROPIC_MESSAGES_URL.to_owned());
+            return Ok(ClaudeClient::with_auth_provider(
+                http,
+                endpoint,
+                config.glasswing_credentials(),
+            ));
+        }
         let key = config
             .resolve_api_key(read_key)?
             .ok_or(AuthError::ClaudeApiKeyUnavailable)?;
@@ -231,17 +246,23 @@ impl AgentRecipe {
                 HeaderValue::from_str(workspace_id).map_err(AgentBuildError::ClaudeWorkspaceId)?;
             headers.insert("anthropic-workspace-id", value);
         }
-        let http = reqwest::Client::builder()
-            .default_headers(headers)
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .build()?;
+        let http = http_client(headers)?;
         // The native client owns a non-zeroizing copy after this boundary.
         Ok(match endpoint {
             Some(endpoint) => ClaudeClient::new(http, endpoint, key.key().expose_secret()),
             None => ClaudeClient::official(http, key.key().expose_secret()),
         })
     }
+}
+
+/// An HTTP client that never follows redirects or retries, so credentials reach only the
+/// configured endpoint and the agent's own retry policy applies.
+fn http_client(headers: HeaderMap) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .build()
 }
 
 /// Restricts memory mutations to the root agent of the session tree.
@@ -265,10 +286,22 @@ mod tests {
         error::{AuthError, ConfigError},
         secret::SecretString,
     };
-    use nanocodex::{HarnessModel as Model, Model as CodexModel, Tools};
+    use axum::{
+        Router,
+        http::{HeaderMap, StatusCode},
+        routing::post,
+    };
+    use nanocodex::{
+        ClaudeModel, HarnessModel as Model, Model as CodexModel, Tools,
+        claude::{ClaudeClient, Message, MessagesRequest, Role},
+    };
     use std::{cell::Cell, fs, path::Path};
     use tact_subagents::Subagents;
     use tempfile::tempdir;
+    use tokio::sync::mpsc;
+
+    const OPUS: Model = Model::Claude(ClaudeModel::Opus55);
+    const MYTHOS: Model = Model::Claude(ClaudeModel::Mythos51);
 
     fn recipe(config_path: &Path, contents: &str) -> AgentRecipe {
         fs::write(config_path, contents).unwrap();
@@ -305,7 +338,7 @@ mod tests {
 
         let disabled = recipe(&config_path, "[claude]\nenabled = false\n");
         let reads = Cell::new(0);
-        let result = disabled.claude_client(|| {
+        let result = disabled.claude_client(OPUS, || {
             reads.set(reads.get() + 1);
             Ok(None)
         });
@@ -317,12 +350,12 @@ mod tests {
 
         let enabled = recipe(&config_path, "[claude]\nenabled = true\n");
         assert!(matches!(
-            enabled.claude_client(|| Ok(None)),
+            enabled.claude_client(OPUS, || Ok(None)),
             Err(AgentBuildError::Auth(AuthError::ClaudeApiKeyUnavailable))
         ));
         let token = "sk-ant-oat01-subscription-sentinel";
         let rejected = enabled
-            .claude_client(|| Ok(Some(SecretString::new(token.into()))))
+            .claude_client(OPUS, || Ok(Some(SecretString::new(token.into()))))
             .err()
             .expect("subscription credentials must be rejected before constructing a client");
         assert!(matches!(
@@ -332,7 +365,7 @@ mod tests {
         assert!(!rejected.to_string().contains(token));
         assert!(
             enabled
-                .claude_client(|| Ok(Some(SecretString::new(
+                .claude_client(OPUS, || Ok(Some(SecretString::new(
                     "sk-ant-api03-synthetic-api-key".into()
                 ))))
                 .is_ok()
@@ -344,7 +377,113 @@ mod tests {
                 &config_path,
                 "[claude]\nenabled = true\napi_key = 'sk-ant-api03-configured-sentinel'\n",
             );
-            assert!(configured.claude_client(|| Ok(None)).is_ok());
+            assert!(configured.claude_client(OPUS, || Ok(None)).is_ok());
         }
+    }
+
+    #[test]
+    fn mythos_requires_a_glasswing_key() {
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let recipe = recipe(
+            &config_path,
+            "[claude]\nenabled = true\napi_key = 'sk-ant-api03-ordinary-fixture'\n",
+        );
+        assert!(matches!(
+            recipe.claude_client(MYTHOS, || Ok(None)),
+            Err(AgentBuildError::Config(ConfigError::GlasswingApiKeyMissing(model))) if model == MYTHOS
+        ));
+    }
+
+    /// Sends one request through `client` and returns the headers the server received.
+    async fn request_headers(
+        client: &ClaudeClient,
+        model: Model,
+        received: &mut mpsc::UnboundedReceiver<HeaderMap>,
+    ) -> HeaderMap {
+        let request = MessagesRequest {
+            model: model.as_str().to_owned(),
+            max_tokens: 16,
+            cache_control: None,
+            output_config: None,
+            speed: None,
+            tool_choice: None,
+            thinking: None,
+            context_management: None,
+            diagnostics: None,
+            system: None,
+            messages: vec![Message::text(Role::User, "hello")],
+            container: None,
+            tools: Vec::new(),
+        };
+        client.create(&request).await.unwrap_err();
+        received.recv().await.unwrap()
+    }
+
+    fn assert_credentials(headers: &HeaderMap, key: &str, workspace: &str) {
+        assert_eq!(headers["x-api-key"], key);
+        assert_eq!(headers["anthropic-workspace-id"], workspace);
+        assert_eq!(headers.get_all("x-api-key").iter().count(), 1);
+        assert_eq!(headers.get_all("anthropic-workspace-id").iter().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn mythos_authenticates_only_with_the_live_glasswing_credentials() {
+        crate::install_tls_provider();
+        let (seen, mut received) = mpsc::unbounded_channel();
+        let router = Router::new().route(
+            "/v1/messages",
+            post(move |headers: HeaderMap| {
+                let seen = seen.clone();
+                async move {
+                    drop(seen.send(headers));
+                    StatusCode::BAD_REQUEST
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let directory = tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let contents = |glasswing: &str| {
+            format!(
+                "[claude]\nenabled = true\napi_base_url = '{origin}'\napi_key = 'sk-ant-api03-ordinary'\nworkspace_id = 'wrkspc_ordinary'\nglasswing_api_key = 'sk-ant-api03-{glasswing}'\nglasswing_workspace_id = 'wrkspc_{glasswing}'\n"
+            )
+        };
+        let recipe = recipe(&config_path, &contents("glasswing-first"));
+        let mythos = recipe.claude_client(MYTHOS, || Ok(None)).unwrap();
+        let opus = recipe.claude_client(OPUS, || Ok(None)).unwrap();
+
+        let headers = request_headers(&mythos, MYTHOS, &mut received).await;
+        assert_credentials(
+            &headers,
+            "sk-ant-api03-glasswing-first",
+            "wrkspc_glasswing-first",
+        );
+        let headers = request_headers(&opus, OPUS, &mut received).await;
+        assert_credentials(&headers, "sk-ant-api03-ordinary", "wrkspc_ordinary");
+
+        // A rotated key reaches the running client once the reload is accepted.
+        fs::write(&config_path, contents("glasswing-second")).unwrap();
+        let reloaded = recipe.config.reload().unwrap().into_parts().0;
+        let headers = request_headers(&mythos, MYTHOS, &mut received).await;
+        assert_credentials(
+            &headers,
+            "sk-ant-api03-glasswing-first",
+            "wrkspc_glasswing-first",
+        );
+        reloaded.claude().publish_glasswing();
+        let headers = request_headers(&mythos, MYTHOS, &mut received).await;
+        assert_credentials(
+            &headers,
+            "sk-ant-api03-glasswing-second",
+            "wrkspc_glasswing-second",
+        );
+        let headers = request_headers(&opus, OPUS, &mut received).await;
+        assert_credentials(&headers, "sk-ant-api03-ordinary", "wrkspc_ordinary");
+        server.abort();
     }
 }

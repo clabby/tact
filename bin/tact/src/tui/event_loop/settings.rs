@@ -12,6 +12,7 @@ use crate::{
     app::{
         config::{Config, ReasoningEffort, ReasoningMode, Setting, Speed},
         error::Result,
+        model::available,
     },
     core::{
         pane::PaneId,
@@ -205,10 +206,11 @@ impl EventLoop {
         let memory_enabled = config.memory().enabled();
         self.memory.replace_store(memory_store);
         self.app.set_max_subagents(config.agent().max_subagents());
-        self.app.set_claude_enabled(config.claude().enabled());
+        self.app.set_models(available(config.claude()).into());
         for runtime in self.panes.runtimes() {
             apply_subagent_config(&runtime.subagent_control, &config);
         }
+        config.claude().publish_glasswing();
         self.config = config;
         let message = if workspace_changed {
             "Reloaded config · theme, UI, memory browser, and subagent limits applied · agent/auth/tool settings apply to new sessions · workspace requires restart"
@@ -241,7 +243,7 @@ impl EventLoop {
 
 /// Applies the reloadable subagent settings to a session's subagent registry.
 fn apply_subagent_config(subagents: &Subagents, config: &Config) {
-    subagents.set_claude_enabled(config.claude().enabled());
+    subagents.set_models(&available(config.claude()));
     subagents.set_max_concurrency(config.agent().max_subagents());
     subagents.set_max_thinking(config.agent().thinking().into());
 }
@@ -277,7 +279,7 @@ mod tests {
         })
         .unwrap();
         let (subagents, _updates) = tact_subagents::Subagents::new(1);
-        subagents.set_claude_enabled(true);
+        subagents.set_models(&tact_subagents::SUPPORTED_MODELS);
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = calls.clone();
         subagents
