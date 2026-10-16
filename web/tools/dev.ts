@@ -4,7 +4,7 @@
 
 import { watch } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { buildApp } from "./build-config";
 import { overviewFixtures, reviewBootstrap, reviewFixtures } from "./dev-fixture";
 import { MockRefusal, MockTact, mockCheckoutPage } from "./dev-mock";
@@ -125,6 +125,7 @@ async function api(request: Request, url: URL): Promise<Response> {
         { headers: { "content-type": "image/svg+xml" } },
       );
     }
+    if (path === "document") return localDocument(url.searchParams);
     const image = path.match(/^sessions\/[^/]+\/entries\/\d+\/images\/(\d+)$/);
     if (image) {
       const hue = 200 + Number(image[1]) * 70;
@@ -241,6 +242,34 @@ async function question(body: QuestionRequest, review: CheckoutReview) {
   thread.messages.push({ role: "agent", body: answer });
   thread.status = "idle";
   return Response.json({ generation: body.generation, selected_range: body.range, answer });
+}
+
+/**
+ * Stands in for local files the viewer opens. Any Markdown path gets a sample report that links to
+ * a source file and to a missing one, so each viewer state is one click away.
+ */
+function localDocument(parameters: URLSearchParams) {
+  const path = resolve(tact.instance().workspace, parameters.get("path") ?? "");
+  if (path.includes("missing")) return failure("not_found", "No file exists at this path.", 404);
+  if (!/\.md$/i.test(path)) return Response.json({ path, text: "fn main() {\n    println!(\"hello\");\n}\n" });
+  const text = [
+    "# Report",
+    "",
+    "The loop change is in [main.rs](src/main.rs:2). The [missing notes](missing.md) show the error state.",
+    "",
+    "| Check | Result |",
+    "| :-- | :-- |",
+    "| tests | pass |",
+    "",
+    "```rust\nfn main() {}\n```",
+    "",
+    "Jump to [the summary](#summary).",
+    "",
+    "## Summary",
+    "",
+    "Euler: $e^{i\\pi} + 1 = 0$.",
+  ].join("\n");
+  return Response.json({ path, text });
 }
 
 /** The review as chat markdown; a checkout other than the session's workspace is named. */

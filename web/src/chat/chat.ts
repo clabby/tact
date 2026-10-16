@@ -5,6 +5,7 @@ import { glyph } from "../ui/glyphs";
 import { toast } from "../ui/toast";
 import { openLightbox, type LightboxImage } from "./lightbox";
 import { headings, markdownImages, renderMarkdown, type Heading } from "../core/markdown";
+import { imageSource as localImageSource, viewerUrl, type FileBase } from "../core/local-files";
 import type { TranscriptData } from "../core/store";
 import type { Theme } from "../core/theme";
 import { promptParts } from "./user-prompt";
@@ -825,6 +826,7 @@ export class Transcript {
     const openFile = this.options.openFile;
     void renderMarkdown(container, text, this.theme() === "dark" ? "pierre-dark" : "pierre-light", {
       imageSource: this.imageSource,
+      fileLink: this.fileLink,
       highlight: !streaming,
       placeholder: streaming ? "" : " ",
       openFile: openFile && ((path, line) => {
@@ -836,14 +838,18 @@ export class Transcript {
     });
   }
 
-  /** Local images resolve against the viewed session workspace; a subagent key is session/agent. */
-  private imageSource = (destination: string) =>
-    localImageSource(destination, this.source?.key.split("/")[0]);
+  /** Local files resolve against the viewed session's workspace. A subagent key is session/agent. */
+  private fileBase = (): FileBase => ({ session: this.source?.key.split("/")[0] });
+
+  private imageSource = (destination: string) => localImageSource(destination, this.fileBase());
+
+  private fileLink = (destination: string) => viewerUrl(destination, this.fileBase());
 
   /** Renders settled Markdown at once, highlighted, as assistant text is. */
   private markdown = (container: HTMLElement, text: string) => {
     void renderMarkdown(container, text, this.theme() === "dark" ? "pierre-dark" : "pierre-light", {
       imageSource: this.imageSource,
+      fileLink: this.fileLink,
       placeholder: " ",
     });
   };
@@ -1363,22 +1369,6 @@ async function copy(text: string, done: string) {
   } catch {
     toast("Could not copy to the clipboard.", "warning");
   }
-}
-
-/**
- * Local image destinations (absolute, file://, or workspace-relative) are served by the instance;
- * remote ones are never loaded by the page.
- */
-function localImageSource(destination: string, session?: string) {
-  if (!destination || /^([a-z][a-z0-9+.-]*:(?!\/\/\/)|\/\/)/i.test(destination)) return null;
-  let path = destination;
-  try {
-    path = decodeURIComponent(destination);
-  } catch {
-    // A destination that is not percent-encoded is used as written.
-  }
-  const query = session ? `&session=${encodeURIComponent(session)}` : "";
-  return `./api/file?path=${encodeURIComponent(path)}${query}`;
 }
 
 function child<K extends keyof HTMLElementTagNameMap>(parent: HTMLElement, tag: K, className: string) {

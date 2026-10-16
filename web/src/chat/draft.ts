@@ -40,7 +40,8 @@ export class DraftSync {
   private serverText: string;
   private timer: unknown = null;
   private inflight = false;
-  private failed = false;
+  private retryNeeded = false;
+  private rebases = 0;
   private composing = false;
   /** Texts this tab wrote whose echo has not arrived yet, oldest first. */
   private unechoed: string[] = [];
@@ -60,7 +61,7 @@ export class DraftSync {
 
   /** Whether local text has not yet been acknowledged by the server. */
   get dirty() {
-    return this.timer !== null || this.inflight || this.failed || this.unechoed.length > 0;
+    return this.timer !== null || this.inflight || this.retryNeeded || this.unechoed.length > 0;
   }
 
   get isComposing() {
@@ -79,15 +80,30 @@ export class DraftSync {
   compositionEnd(text: string) {
     this.composing = false;
     if (text !== this.text) this.edit(text);
+    if (this.retryNeeded) void this.flush();
     this.releaseHeld();
   }
 
   /** Applies a draft event (or a snapshot's draft, with a null origin). */
   receive(draft: { rev: number; text: string; origin: DraftOrigin | null }) {
+    // Reopening a session resets its pane's revision counter. Keep local text and the active
+    // write chain, but discard acknowledgements from the previous counter.
+    if (draft.origin === null && draft.rev < this.serverRev) {
+      this.serverRev = draft.rev;
+      this.serverText = draft.text;
+      this.unechoed = [];
+      this.held = null;
+      this.retryNeeded = this.text !== draft.text;
+      this.rebases++;
+      this.drainEchoWaiters();
+      if (!this.composing) void this.flush();
+      return;
+    }
     if (draft.rev <= this.serverRev) return;
     this.serverRev = draft.rev;
     this.serverText = draft.text;
-    if (draft.origin === this.options.origin) {
+    if (draft.origin === this.options.origin || draft.origin === null) {
+      if (draft.text === this.text) this.retryNeeded = false;
       const echoed = this.unechoed.indexOf(draft.text);
       if (echoed >= 0) {
         this.unechoed.splice(0, echoed + 1);
@@ -105,36 +121,38 @@ export class DraftSync {
 
   /** Sends any pending edit now and resolves once every write has been acknowledged. */
   async flush() {
+    while (this.inflight) await new Promise<void>((resolve) => this.idleWaiters.push(resolve));
     if (this.timer !== null) {
       this.timers.clear(this.timer);
       this.timer = null;
     }
-    if (!this.inflight && (this.failed || this.text !== this.lastWritten())) await this.send();
-    while (this.inflight) await new Promise<void>((resolve) => this.idleWaiters.push(resolve));
+    if (this.retryNeeded || this.text !== this.lastWritten()) await this.send();
   }
 
-  /**
-   * The server revision that holds exactly the composer's text, for `submit`. Waits (bounded) for
-   * the echo of this tab's last write; a stale answer only makes the server refuse with
-   * `draft_changed`, never submit other text.
-   */
+  /** Waits for the visible draft's revision, restarting when a snapshot resets the counter. */
   async settledRev(): Promise<number> {
-    await this.flush();
-    if (this.unechoed.length > 0) {
-      await new Promise<void>((resolve) => {
-        const timeout = this.timers.set(resolve, ECHO_TIMEOUT_MS);
-        this.echoWaiters.push(() => {
-          this.timers.clear(timeout);
-          resolve();
+    for (;;) {
+      const rebase = this.rebases;
+      await this.flush();
+      if (rebase !== this.rebases) continue;
+      if (this.unechoed.length > 0) {
+        await new Promise<void>((resolve) => {
+          const timeout = this.timers.set(resolve, ECHO_TIMEOUT_MS);
+          this.echoWaiters.push(() => {
+            this.timers.clear(timeout);
+            resolve();
+          });
         });
-      });
+      }
+      if (rebase !== this.rebases) continue;
+      if (this.serverText !== this.text) throw new Error("The draft has not been saved yet. Try sending again.");
+      return this.serverRev;
     }
-    return this.serverRev;
   }
 
   /** Retries a failed write, e.g. after the stream reconnects. */
   retry() {
-    if (this.failed && !this.inflight) void this.send();
+    if (this.retryNeeded && !this.inflight) void this.send();
   }
 
   dispose() {
@@ -153,26 +171,26 @@ export class DraftSync {
     if (this.inflight) return;
     const text = this.text;
     this.inflight = true;
-    this.failed = false;
+    this.retryNeeded = false;
     this.unechoed.push(text);
     try {
       await this.options.write(text);
     } catch (error) {
-      this.failed = true;
+      this.retryNeeded = true;
       const index = this.unechoed.lastIndexOf(text);
       if (index >= 0) this.unechoed.splice(index, 1);
       this.options.onError?.(error);
     } finally {
       this.inflight = false;
     }
-    if (!this.failed && this.text !== text && this.timer === null) {
+    if (!this.retryNeeded && this.text !== text && this.timer === null) {
       await this.send();
       return;
     }
     const idle = this.idleWaiters;
     this.idleWaiters = [];
     for (const waiter of idle) waiter();
-    if (this.failed) this.drainEchoWaiters();
+    if (this.retryNeeded) this.drainEchoWaiters();
     this.releaseHeld();
   }
 

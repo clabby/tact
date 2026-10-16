@@ -1,0 +1,31 @@
+/* The file viewer: one local file in its own tab, opened from a link in a transcript. */
+
+.file-viewer { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; }
+.file-viewer-header {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.file-viewer-title { flex: 1; min-width: 0; }
+.file-viewer-title h1 { margin: 0; font-size: var(--text-base); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-viewer-title p { margin: 0; color: var(--faint); font: var(--text-sm)/1.4 var(--font-mono); overflow-wrap: anywhere; }
+.file-viewer-body { overflow: auto; }
+.file-viewer-loading { padding: var(--space-6); color: var(--faint); }
+.file-viewer-document { max-width: 860px; margin: 0 auto; padding: var(--space-6) var(--space-5) var(--space-8); }
+.file-viewer-document h1, .file-viewer-document h2, .file-viewer-document h3, .file-viewer-document h4 { scroll-margin-top: var(--space-4); }
+
+.file-viewer-source {
+  position: relative; margin: 0; width: max-content; min-width: 100%;
+  padding: var(--space-3) var(--space-5) var(--space-3) calc(var(--space-5) + (var(--digits) + 2) * 1ch);
+  font: var(--text-md)/1.55 var(--font-mono); white-space: pre; tab-size: 4;
+}
+.file-viewer-source::before {
+  content: attr(data-numbers); position: absolute; left: var(--space-5);
+  width: calc(var(--digits) * 1ch); color: var(--faint); text-align: right; user-select: none;
+}
+.file-viewer-target { display: inline-block; min-width: 1ch; min-height: 1lh; vertical-align: top; background: var(--accent-soft); }
+.file-viewer-pages {
+  position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between;
+  gap: var(--space-3); padding: var(--space-3) var(--space-5); background: var(--surface); border-bottom: 1px solid var(--line);
+}

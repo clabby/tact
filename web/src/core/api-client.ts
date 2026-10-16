@@ -3,12 +3,14 @@ import type {
   CommandReplies,
   Commands,
   Instance,
+  LocalDocument,
   Queries,
   QueryName,
   SiblingInstance,
   ToolDetail,
   WireEntry,
 } from "./wire";
+import { fileQuery } from "./local-files";
 
 type ArgsOf<Args> = [Args] extends [undefined] ? [] : [Args];
 
@@ -110,6 +112,11 @@ export class ApiClient {
 
   agentEntries(session: string, agent: number, options?: RequestOptions) {
     return this.get<{ entries: WireEntry[] }>(`${sessionPath(session, agent)}/entries`, options);
+  }
+
+  /** Relative paths resolve against the session's workspace. */
+  document(path: string, session?: string, options?: RequestOptions) {
+    return this.get<LocalDocument>(`document?${fileQuery(path, session)}`, options);
   }
 
   private async request<T>(path: string, init: RequestInit): Promise<T> {

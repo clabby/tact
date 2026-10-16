@@ -456,7 +456,7 @@ export class Composer {
       await this.host.api.command("submit", { session: session.id, rev, queue });
       this.hideMessage();
     } catch (error) {
-      this.showMessage(describeError(error), "warning");
+      if (this.sync === sync) this.showMessage(describeError(error), "warning");
     } finally {
       this.submitting = false;
       this.updateSendState();

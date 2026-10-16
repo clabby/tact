@@ -10,14 +10,17 @@ import { openLightbox } from "../chat/lightbox";
 import type { SyntaxTheme } from "../review/review-settings";
 import { glyph } from "../ui/glyphs";
 import { toast } from "../ui/toast";
+import { decodeDestination, fileReference } from "./local-files";
 
 const renderer = new Renderer();
 renderer.html = ({ text }) => escapeHtml(text);
 renderer.link = function ({ href, title, tokens }) {
   const label = this.parser.parseInline(tokens);
-  const safeHref = safeLink(href);
   const titleAttribute = title ? ` title="${escapeHtml(title)}"` : "";
-  return `<a href="${escapeHtml(safeHref)}"${titleAttribute} target="_blank" rel="noreferrer">${label}</a>`;
+
+  // A fragment moves within the rendering. Other links open a new tab so the page keeps its place.
+  const target = href.startsWith("#") ? "" : ' target="_blank" rel="noreferrer"';
+  return `<a href="${escapeHtml(safeLink(href))}"${titleAttribute}${target}>${label}</a>`;
 };
 
 /** A heading of a parsed document. */
@@ -36,12 +39,16 @@ renderer.image = ({ href, title, text }) => {
 
 renderer.heading = function ({ tokens, depth }) {
   const text = this.parser.parseInline(tokens, this.parser.textRenderer);
-  const base = text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "") || "section";
+  const base = slugify(text) || "section";
   let slug = base;
   for (let suffix = 2; parsedHeadings.some((heading) => heading.slug === slug); suffix++) slug = `${base}-${suffix}`;
   parsedHeadings.push({ depth, text, slug });
   return `<h${depth} data-heading="${slug}">${this.parser.parseInline(tokens)}</h${depth}>\n`;
 };
+
+function slugify(text: string) {
+  return text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "");
+}
 
 // Math is parsed here but typeset after sanitizing: the parser emits the TeX source as escaped text in
 // a `code.language-math` element, which the sanitizer keeps, and `renderMath` replaces it with
@@ -105,8 +112,9 @@ const CALLOUT = /^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*/i;
 const FILE_REFERENCE = /^((?:\.{0,2}\/)?(?:[\w.@+-]+\/)*[\w@+-][\w.@+-]*\.[A-Za-z0-9]{1,10})(?::(\d+)(?::\d+)?)?$/;
 
 /**
- * Markdown to HTML with raw HTML escaped and links restricted to http(s) and mailto. The DOM pass
- * in `renderMarkdown` additionally strips any element or attribute outside a small allowlist.
+ * Markdown to HTML with raw HTML escaped and links restricted to http(s), mailto, fragments, and
+ * local files. The DOM pass in `renderMarkdown` additionally strips any element or attribute
+ * outside a small allowlist and routes local file links through `fileLink`.
  */
 export function markdownHtml(source: string) {
   parsedHeadings = [];
@@ -131,6 +139,8 @@ export type MarkdownOptions = {
   placeholder?: string;
   /** Maps an image destination to a URL the page may load, or null to show only its alt text. */
   imageSource?: (destination: string) => string | null;
+  /** Maps a link to a local file to the page that shows it. Without it, such links are inert. */
+  fileLink?: (destination: string) => string | null;
   /** Opens a workspace file a code span names. Without it, file references stay plain code. */
   openFile?: (path: string, line: number | null) => void;
   /** Gives each heading a link control, called with the heading's slug. */
@@ -147,20 +157,24 @@ export async function renderMarkdown(
   themeName: Exclude<SyntaxTheme, "system">,
   options: MarkdownOptions = {},
 ) {
-  const { highlight = true, placeholder = "*Nothing to preview yet.*", imageSource } = options;
+  const { highlight = true, placeholder = "*Nothing to preview yet.*" } = options;
   const template = document.createElement("template");
   template.innerHTML = markdownHtml(source || placeholder);
-  sanitize(template.content, imageSource);
+  sanitize(template.content, options);
   renderMath(template.content);
   enhance(template.content, options);
   container.replaceChildren(template.content);
-  // Footnote links and back links jump within this rendering only.
-  for (const reference of container.querySelectorAll<HTMLAnchorElement>('a[href^="#footnote-"]')) {
-    reference.addEventListener("click", (event) => {
+
+  // Fragments stay within this rendering, including footnote links and back links.
+  for (const link of container.querySelectorAll<HTMLAnchorElement>('a[href^="#"]')) {
+    link.addEventListener("click", (event) => {
       event.preventDefault();
-      const id = reference.getAttribute("href")!.slice(1);
-      const target = container.querySelector<HTMLElement>(`[data-footnote="${CSS.escape(id)}"]`);
-      if (!target) return;
+      const fragment = link.getAttribute("href")!.slice(1);
+      const target = container.querySelector<HTMLElement>(`[data-footnote="${CSS.escape(fragment)}"]`);
+      if (!target) {
+        scrollToHeading(container, decodeDestination(fragment));
+        return;
+      }
       target.scrollIntoView({ block: "center", behavior: "smooth" });
       target.classList.remove("footnote-flash");
       void target.offsetWidth;
@@ -209,7 +223,16 @@ export async function renderMarkdown(
   }));
 }
 
-function sanitize(fragment: DocumentFragment, imageSource?: (destination: string) => string | null) {
+/** Matches an already decoded fragment against this renderer's heading slugs. */
+export function scrollToHeading(container: HTMLElement, fragment: string) {
+  const slug = slugify(fragment);
+  if (!slug) return;
+  const heading = [...container.querySelectorAll<HTMLElement>("[data-heading]")]
+    .find((candidate) => candidate.dataset.heading === slug);
+  heading?.scrollIntoView({ block: "start" });
+}
+
+function sanitize(fragment: DocumentFragment, { imageSource, fileLink }: MarkdownOptions) {
   const allowed = new Set([
     "A", "BLOCKQUOTE", "BR", "CODE", "DEL", "EM", "H1", "H2", "H3", "H4", "H5", "H6", "HR", "LI",
     "OL", "P", "PRE", "SECTION", "STRONG", "SUP", "TABLE", "TBODY", "TD", "TH", "THEAD", "TR", "UL",
@@ -245,6 +268,14 @@ function sanitize(fragment: DocumentFragment, imageSource?: (destination: string
     }
     // Footnote ids would collide between messages on one page, so they become scoped data.
     const footnote = element.getAttribute("id")?.startsWith("footnote-") ? element.getAttribute("id")! : null;
+
+    // A local path would resolve against this page and miss, so it opens the file viewer instead.
+    const href = element.tagName === "A" ? element.getAttribute("href") : null;
+    if (href && fileReference(href)) {
+      const page = fileLink?.(href);
+      if (page) element.setAttribute("href", page);
+      else for (const name of ["href", "target", "rel"]) element.removeAttribute(name);
+    }
     for (const attribute of [...element.attributes]) {
       const keepLinkAttribute = element.tagName === "A"
         && ["href", "title", "target", "rel"].includes(attribute.name);
@@ -437,7 +468,9 @@ function openDiagram(diagram: HTMLElement) {
   openLightbox([{ source, alt: "Diagram" }]);
 }
 
+/** Fragments and local files stay as written, for the DOM pass to route. */
 function safeLink(value: string) {
+  if (fileReference(value)) return value;
   try {
     const url = new URL(value, globalThis.location?.href ?? "http://localhost/");
     if (["http:", "https:", "mailto:"].includes(url.protocol)) return value;

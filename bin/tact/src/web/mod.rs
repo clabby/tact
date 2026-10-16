@@ -7,6 +7,7 @@
 mod api;
 mod assets;
 pub(crate) mod bridge;
+mod files;
 mod hub;
 mod outcome;
 mod registry;

@@ -7,6 +7,8 @@ import { FindBar } from "./chat/find-bar";
 import { agentNote } from "./chat/agent-links";
 import { entryLink, hashWithoutToken, parseHashLink, type HashLink } from "./core/permalink";
 import { Composer } from "./chat/composer";
+import { viewerTarget } from "./core/local-files";
+import { showFileViewer } from "./viewer/file-viewer";
 import { setAttentionBadge } from "./shell/favicon";
 import { effortColor, modelColor } from "./core/format";
 import { glyph } from "./ui/glyphs";
@@ -843,6 +845,10 @@ async function main() {
     if (error instanceof ApiError && error.status === 401) return showLocked();
     return showUnreachable(error, () => void main());
   }
+
+  // A link to a local file opens this page with the file in its query, in place of the application.
+  const file = viewerTarget(location.search, location.hash);
+  if (file) return void showFileViewer(root, api, file);
   new App(api).start();
 }
 
