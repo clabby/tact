@@ -27,7 +27,7 @@ use tact_subagents::{
 };
 
 /// Version of the browser protocol. Bundles declare the range they speak in their manifest.
-pub(super) const PROTOCOL_VERSION: u32 = 9;
+pub(super) const PROTOCOL_VERSION: u32 = 10;
 /// Longest string sent to a browser in an entry or a tool detail.
 const MAX_STRING_BYTES: usize = 256 * 1024;
 const MAX_SUMMARY_CHARS: usize = 200;
@@ -85,6 +85,7 @@ pub(super) struct SessionSnapshot {
     pub(super) subagents: SubagentRoster,
 }
 
+/// The complete editable draft. Clients match its text against pending writes.
 #[derive(Serialize)]
 pub(super) struct WireDraft {
     pub(super) rev: u64,

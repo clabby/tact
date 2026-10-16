@@ -110,7 +110,6 @@ function showSource(body: HTMLElement, text: string, line: number | null) {
     // One text layout and one generated gutter avoid a DOM row for every line.
     source.dataset.numbers = page.map((_, index) => start + index + 1).join("\n");
     const content = page.join("\n");
-    source.textContent = content;
     if (pages) {
       pages.querySelector("span")!.textContent = `Lines ${start + 1}–${start + page.length} of ${lines.length}`;
       const [previous, next] = pages.querySelectorAll<HTMLButtonElement>("button");
@@ -120,7 +119,10 @@ function showSource(body: HTMLElement, text: string, line: number | null) {
       next!.onclick = () => show(start + pageSize);
     }
     body.scrollTop = 0;
-    if (line === null || line <= start || line > start + page.length) return;
+    if (line === null || line <= start || line > start + page.length) {
+      source.textContent = content;
+      return;
+    }
 
     const index = line - start - 1;
     const offset = page.slice(0, index).reduce((sum, value) => sum + value.length + 1, 0);

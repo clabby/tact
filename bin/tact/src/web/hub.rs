@@ -457,7 +457,7 @@ impl Live {
             queue: self.queue.iter().map(WireQueued::from).collect(),
             draft: WireDraft {
                 rev: self.draft.rev,
-                text: super::wire::cap(&self.draft.text),
+                text: self.draft.text.clone(),
                 images: self.draft.images.iter().map(WireImage::from).collect(),
             },
             running: self.running(),
@@ -885,7 +885,7 @@ fn diff_active(live: &mut Live, previous: &ActiveSent, frames: &mut Vec<Frame>) 
     struct DraftEvent<'a> {
         session: &'a str,
         rev: u64,
-        text: String,
+        text: &'a str,
         images: Vec<WireImage>,
         origin: String,
     }
@@ -910,7 +910,7 @@ fn diff_active(live: &mut Live, previous: &ActiveSent, frames: &mut Vec<Frame>) 
             &DraftEvent {
                 session,
                 rev: live.draft.rev,
-                text: super::wire::cap(&live.draft.text),
+                text: &live.draft.text,
                 images: live.draft.images.iter().map(WireImage::from).collect(),
                 origin: origin_label(live.draft_origin),
             },
@@ -1145,7 +1145,7 @@ mod tests {
         let events = drain(&mut subscription);
 
         assert_eq!(names(&events), ["hello", "live", "active", "snapshot"]);
-        assert_eq!(events[0].1["protocol_version"], 9);
+        assert_eq!(events[0].1["protocol_version"], 10);
         let live = &events[1].1;
         assert_eq!(live["active"], "s1");
         assert_eq!(live["sessions"][0]["title"], "Fix the flaky test");
@@ -1162,6 +1162,46 @@ mod tests {
         assert_eq!(snapshot["context"], Value::Null);
         assert_eq!(snapshot["subagents"]["agents"], json!([]));
         assert_eq!(snapshot["running"], false);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn large_drafts_are_lossless_in_events_and_reconnect_snapshots() {
+        let fixture = fixture();
+        fixture.open("s1", None);
+        fixture.activate("s1");
+        settle().await;
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        drain(&mut subscription);
+
+        let text = format!("{}🦀", "a".repeat(256 * 1024 - 1));
+        fixture.publish(Publication::Draft {
+            session: "s1".into(),
+            draft: Draft {
+                rev: 1,
+                text: text.clone(),
+                ..Draft::default()
+            },
+            origin: Origin::Web(5),
+        });
+        settle().await;
+
+        let events = drain(&mut subscription);
+        let draft = &events.iter().find(|(name, _)| name == "draft").unwrap().1;
+        drop(subscription);
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        let snapshots = drain(&mut subscription);
+        let snapshot = &snapshots
+            .iter()
+            .find(|(name, _)| name == "snapshot")
+            .unwrap()
+            .1["draft"];
+
+        for received in [draft, snapshot] {
+            assert_eq!(received["rev"], 1);
+            let received = received["text"].as_str().unwrap();
+            assert_eq!(received.len(), text.len());
+            assert!(received == text);
+        }
     }
 
     #[tokio::test(start_paused = true)]

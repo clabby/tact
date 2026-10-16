@@ -11,8 +11,11 @@ test("the mock follows the shared-draft contract: tagged echoes and revision-che
     if (name === "draft") drafts.push(data as (typeof drafts)[number]);
   });
 
-  mock.command("set_draft", { session, text: "hello" }, 7);
+  const receipt = mock.command("set_draft", { session, text: "hello" }, 7);
   const { rev } = drafts.at(-1)!;
+  expect(receipt).toEqual({ rev });
+  expect(mock.command("set_draft", { session, text: "hello" }, 7)).toEqual(receipt);
+  expect(drafts).toHaveLength(1);
   expect(drafts.at(-1)).toMatchObject({ text: "hello", origin: "web:7" });
 
   expect(() => mock.command("submit", { session, rev: rev - 1 }, 7)).toThrow(MockRefusal);

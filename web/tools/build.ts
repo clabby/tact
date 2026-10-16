@@ -74,7 +74,7 @@ const MAX_MANIFEST_BYTES = 1024 * 1024;
 const mebibytes = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
 const manifest = `${JSON.stringify({
     schema_version: 2,
-    web_api: { min: 9, max: 9 },
+    web_api: { min: 10, max: 10 },
     tact: { version: process.env.TACT_VERSION ?? "development" },
     entrypoint: "index.html",
     files,

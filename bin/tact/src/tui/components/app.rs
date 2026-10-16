@@ -1459,6 +1459,15 @@ impl AppNode {
         Ok(self.map_root_update(pane, update))
     }
 
+    pub(crate) fn draft_revision(&self, session: &str) -> Result<u64, CommandError> {
+        let pane = self.live_pane(session)?;
+        let published = self.panes[&pane]
+            .published
+            .as_ref()
+            .expect("live panes have published state");
+        Ok(published.draft.rev)
+    }
+
     fn live_pane(&self, session: &str) -> Result<PaneId, CommandError> {
         self.pane_for_session(session)
             .ok_or(CommandError::UnknownSession)
@@ -2398,6 +2407,88 @@ mod registry_tests {
                 Origin::Web(7)
             )]
         );
+    }
+
+    #[test]
+    fn saved_draft_revision_identifies_canonical_text_and_survives_no_op_writes() {
+        let mut harness = Harness::new();
+        for text in ["browser\r\ntext\r", "browser\ntext\n"] {
+            harness
+                .command(Command::SetDraft {
+                    session: "main".to_owned(),
+                    text: text.to_owned(),
+                })
+                .unwrap();
+            assert_eq!(harness.app.draft_revision("main"), Ok(1));
+            assert_eq!(harness.draft(PaneId::Main), "browser\ntext\n");
+        }
+        assert_eq!(drafts(&harness.publications()).len(), 1);
+        let effects = harness
+            .command(Command::Submit {
+                session: "main".to_owned(),
+                rev: harness.app.draft_revision("main").unwrap(),
+                queue: false,
+            })
+            .unwrap();
+        assert_eq!(submitted(&effects), Some("browser\ntext"));
+    }
+
+    #[test]
+    fn web_draft_receipts_describe_the_shared_draft_after_queue_edit_cancellation() {
+        for displaced in ["", "keep"] {
+            for finished in [false, true] {
+                let mut harness = Harness::new();
+                harness.type_text("work");
+                harness.key(KeyCode::Enter);
+                harness
+                    .command(Command::SetDraft {
+                        session: "main".to_owned(),
+                        text: "original".to_owned(),
+                    })
+                    .unwrap();
+                harness
+                    .command(Command::Submit {
+                        session: "main".to_owned(),
+                        rev: harness.app.draft_revision("main").unwrap(),
+                        queue: true,
+                    })
+                    .unwrap();
+                harness.type_text(displaced);
+                harness.key(KeyCode::Tab);
+                harness.key(KeyCode::Char('e'));
+                assert_eq!(harness.draft(PaneId::Main), "original");
+                harness.app.update(AppEvent::EditorDraft {
+                    pane: PaneId::Main,
+                    draft: "discard".to_owned(),
+                });
+                if finished {
+                    harness.app.update(AppEvent::WorkerTurnFinished {
+                        pane: PaneId::Main,
+                        terminal_expected: false,
+                    });
+                }
+                harness.publications();
+
+                let effects = harness
+                    .command(Command::SetDraft {
+                        session: "main".to_owned(),
+                        text: "browser\r\ntext".to_owned(),
+                    })
+                    .unwrap();
+                let rev = harness.app.draft_revision("main").unwrap();
+                assert_eq!(submitted(&effects), finished.then_some("original"));
+                assert_eq!(harness.draft(PaneId::Main), "browser\ntext");
+                assert_eq!(
+                    drafts(&harness.publications()),
+                    [(
+                        "main".to_owned(),
+                        rev,
+                        "browser\ntext".to_owned(),
+                        Origin::Web(7)
+                    )]
+                );
+            }
+        }
     }
 
     #[test]

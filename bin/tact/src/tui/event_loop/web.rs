@@ -80,6 +80,10 @@ impl EventLoop {
             client,
             reply,
         } = request;
+        let draft_session = match &command {
+            Command::SetDraft { session, .. } => Some(session.clone()),
+            _ => None,
+        };
         let active = self.app.active_pane();
         let result = match command {
             Command::DeleteMemory { key } => {
@@ -109,8 +113,17 @@ impl EventLoop {
                 Err(error) => Err(error),
             },
         };
+
+        // The loop owns the committed revision. The asynchronous hub may still lag publication.
         self.publish_to(client);
-        drop(reply.send(result.map(|()| Reply::Done)));
+        let result = result.and_then(|()| match draft_session {
+            Some(session) => self
+                .app
+                .draft_revision(&session)
+                .map(|rev| Reply::DraftSaved { rev }),
+            None => Ok(Reply::Done),
+        });
+        drop(reply.send(result));
         Ok(())
     }
 

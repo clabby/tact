@@ -248,7 +248,7 @@ export class MockTact {
   /** The events a fresh stream receives: hello, live, active, and the active session's snapshot. */
   greeting(): { name: StreamEventName; data: unknown }[] {
     const events: { name: StreamEventName; data: unknown }[] = [
-      { name: "hello", data: { protocol_version: 9, client_hint: "tact-dev" } },
+      { name: "hello", data: { protocol_version: 10, client_hint: "tact-dev" } },
       { name: "live", data: this.live() },
     ];
     const session = this.active ? this.sessions.get(this.active) : undefined;
@@ -269,7 +269,7 @@ export class MockTact {
   instance() {
     const sessions = [...this.sessions.values()];
     return {
-      protocol_version: 9,
+      protocol_version: 10,
       workspace: "/Users/dev/src/tact",
       repository: "tact",
       live: sessions.length,
@@ -332,8 +332,9 @@ export class MockTact {
     switch (name) {
       case "set_draft": {
         const { session, text } = body as Commands["set_draft"];
-        this.setDraft(this.session(session), text, origin);
-        return {};
+        const current = this.session(session);
+        this.setDraft(current, text, origin);
+        return { rev: current.draft.rev };
       }
       case "submit": {
         const { session: id, rev, queue } = body as Commands["submit"];
@@ -653,6 +654,8 @@ export class MockTact {
   }
 
   private setDraft(session: MockSession, text: string, origin: string) {
+    text = text.replace(/\r\n?/g, "\n");
+    if (text === session.draft.text) return;
     const hadDraft = session.draft.text.trim().length > 0;
     const images = session.draft.images.filter((image) => text.includes(image.marker));
     session.draft = { rev: session.draft.rev + 1, text, images };

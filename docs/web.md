@@ -88,6 +88,9 @@ every 15 s. Entry events are coalesced to the TUI's frame interval. A tab that c
 two coalesced deliveries can receive an `entry` its snapshot already holds; the upsert rule makes
 that harmless.
 
+Draft text in snapshots and `draft` events is sent in full because clients use it to synchronize
+saved edits.
+
 | Event | Data |
 | :-- | :-- |
 | `hello` | `{ protocol_version, client_hint }` |
@@ -197,8 +200,10 @@ Clients must render unknown entry kinds as a muted generic row.
 
 `POST /api/cmd` with `X-Tact: 1` and the body `{ client, cmd: <name>, args: { ...body } }`
 (`client` is a random per-tab integer; commands without a body omit `args`). The body deserializes
-straight into `protocol::Command`; there is no per-command route. Success is 200 `{}`
-(`open_session` returns `{ session }`). The command is acknowledged only after the loop applied it.
+straight into `protocol::Command`. There is no per-command route. Success is 200 `{}`, except
+`open_session` returns `{ session }` and `set_draft` returns `{ rev }`. The command is acknowledged
+only after the loop applied it and published its changes. The draft receipt identifies the saved
+text even when no text changed or its stream echo was missed.
 `open_session` takes its variant as `args`, for example `{ cmd: "open_session", args: { new: {} } }`.
 
 | Command | Body | Keyboard equivalent | Refused |

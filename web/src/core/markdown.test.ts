@@ -50,6 +50,18 @@ test("headings get unique slugs that the outline reports in document order", () 
   expect(markdownHtml(source)).toContain('<h2 data-heading="done-2">Done</h2>');
 });
 
+test("many repeated headings preserve suffix collisions and reset between documents", () => {
+  const titles = ["Same-4", "Same", "Same", "Same-2", "Same", "Same-2", ...Array(2000).fill("Same")];
+  const source = titles.map((title) => `## ${title}`).join("\n\n");
+  const expected = [
+    "same-4", "same", "same-2", "same-2-2", "same-3", "same-2-3",
+    ...Array.from({ length: 2000 }, (_, index) => `same-${index + 5}`),
+  ];
+
+  expect(headings(source).map(({ slug }) => slug)).toEqual(expected);
+  expect(headings("## Same\n\n## Same").map(({ slug }) => slug)).toEqual(["same", "same-2"]);
+});
+
 test("footnotes link to definitions collected after the text", () => {
   const html = markdownHtml("Claim[^a].\n\n[^a]: The *source*.");
   expect(html).toContain('href="#footnote-a"');

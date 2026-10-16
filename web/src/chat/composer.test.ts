@@ -59,12 +59,12 @@ function session(id: string, rev = 1, text = ""): SessionView {
 
 function harness() {
   const commands: { name: string; args: object }[] = [];
-  let save: () => void;
+  let save: (receipt: { rev: number }) => void;
   const api = {
     origin: "web:1",
     command(name: string, args: object) {
       commands.push({ name, args });
-      if (name === "set_draft") return new Promise<void>((resolve) => { save = resolve; });
+      if (name === "set_draft") return new Promise<{ rev: number }>((resolve) => { save = resolve; });
       return Promise.resolve();
     },
   } as unknown as ApiClient;
@@ -77,7 +77,7 @@ function harness() {
   const form = root.querySelector("form")!;
   const textarea = root.querySelector("textarea")!;
   const message = root.querySelector<HTMLElement>(".composer-message")!;
-  return { composer, form, textarea, message, commands, save: () => save() };
+  return { composer, form, textarea, message, commands, save: (rev = 2) => save({ rev }) };
 }
 
 test("an old session's unsaved submit does not warn the newly shown session", async () => {
@@ -90,8 +90,6 @@ test("an old session's unsaved submit does not warn the newly shown session", as
 
   composer.show(session("new", 1, "new session draft"));
   save();
-  await settle();
-  timers.advance(3000);
   await settle();
 
   expect(textarea.value).toBe("new session draft");
@@ -109,7 +107,7 @@ test("a same-session restart snapshot keeps visible text and sends its new revis
   expect(commands).toEqual([{ name: "set_draft", args: { session: "same", text: "send this" } }]);
 
   form.requestSubmit();
-  save();
+  save(1);
   await settle();
   restarted.draft = { rev: 1, text: "send this", images: [], origin: "web:1" };
   composer.draftChanged();
@@ -122,4 +120,23 @@ test("a same-session restart snapshot keeps visible text and sends its new revis
   expect(textarea.value).toBe("send this");
   expect(message.hidden).toBe(true);
   expect(timers.scheduled).toEqual([]);
+});
+
+test("appended review text submits with the server's canonical line endings", async () => {
+  for (const newline of ["\r\n", "\r"]) {
+    const { composer, form, message, commands, save } = harness();
+    const current = session("review");
+    composer.show(current);
+    composer.append(`[P2] First line.${newline}Second line.`);
+    form.requestSubmit();
+
+    const text = "[P2] First line.\nSecond line.";
+    expect(commands).toEqual([{ name: "set_draft", args: { session: "review", text } }]);
+    save();
+    await settle();
+
+    expect(commands.at(-1)).toEqual({ name: "submit", args: { session: "review", rev: 2, queue: false } });
+    expect(message.hidden).toBe(true);
+    expect(timers.scheduled).toEqual([]);
+  }
 });

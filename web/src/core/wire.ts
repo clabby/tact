@@ -245,7 +245,9 @@ export type Commands = {
 export type CommandName = keyof Commands;
 
 export type CommandReplies = {
-  [Name in CommandName]: Name extends "open_session" ? { session: string } : Record<string, never>;
+  [Name in CommandName]: Name extends "open_session" ? { session: string }
+    : Name extends "set_draft" ? { rev: number }
+    : Record<string, never>;
 };
 
 export type ModelInfo = {

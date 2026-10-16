@@ -295,18 +295,25 @@ pub(crate) struct CommandEnvelope {
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum Reply {
     Done,
+    DraftSaved {
+        rev: u64,
+    },
     /// The session that `Command::Open` created or activated.
     Opened {
         session: String,
     },
 }
 
-/// The wire form of a successful command: `{}` or, for `open_session`, `{ "session": id }`.
 impl Serialize for Reply {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap as _;
         match self {
             Self::Done => serializer.serialize_map(Some(0))?.end(),
+            Self::DraftSaved { rev } => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("rev", rev)?;
+                map.end()
+            }
             Self::Opened { session } => {
                 let mut map = serializer.serialize_map(Some(1))?;
                 map.serialize_entry("session", session)?;
@@ -469,7 +476,7 @@ pub(crate) struct AuxiliaryRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, CommandEnvelope, OpenSpec, Query};
+    use super::{Command, CommandEnvelope, OpenSpec, Query, Reply};
     use crate::{
         app::config::{ReasoningMode, Speed},
         core::session::RecentPromptScope,
@@ -480,6 +487,14 @@ mod tests {
     fn command(body: serde_json::Value) -> (u64, Command) {
         let envelope = serde_json::from_value::<CommandEnvelope>(body).unwrap();
         (envelope.client, envelope.command)
+    }
+
+    #[test]
+    fn draft_save_receipts_serialize_the_committed_revision() {
+        assert_eq!(
+            serde_json::to_value(Reply::DraftSaved { rev: 7 }).unwrap(),
+            json!({"rev": 7})
+        );
     }
 
     #[test]

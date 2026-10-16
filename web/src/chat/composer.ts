@@ -276,7 +276,7 @@ export class Composer {
     const id = session.id;
     return new DraftSync(session.draft, {
       origin: this.host.api.origin,
-      write: (text) => this.host.api.command("set_draft", { session: id, text }).then(() => {}),
+      write: (text) => this.host.api.command("set_draft", { session: id, text }),
       onRemote: (text, origin) => {
         const focused = document.activeElement === this.textarea;
         const atEnd = this.textarea.selectionStart === this.textarea.value.length;

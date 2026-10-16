@@ -14,7 +14,7 @@ import {
 
 const firstPage = page(3, { from: 0, to: 2 });
 const session: ReviewSession = {
-  protocol_version: 9,
+  protocol_version: 10,
   turn_running: false,
   generation: 3,
   title: "Review",

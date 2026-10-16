@@ -1,7 +1,7 @@
 import type { Checkout } from "../core/wire";
 import type { ReviewRange, ReviewTarget } from "./range-selection";
 
-export const REVIEW_PROTOCOL_VERSION = 9;
+export const REVIEW_PROTOCOL_VERSION = 10;
 
 export type ReviewComment = {
   id: number;

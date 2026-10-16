@@ -14,24 +14,20 @@ export type DraftSyncOptions = {
   /** This tab's draft origin, `web:<client>`. */
   origin: string;
   /** Writes the session's shared draft (`set_draft`). Calls are serialized. */
-  write(text: string): Promise<void>;
-  /** The shared draft changed under the composer; `text` is now what it must show. */
+  write(text: string): Promise<{ rev: number }>;
+  /** Updates the composer when another writer changes the shared draft. */
   onRemote(text: string, origin: DraftOrigin | null): void;
   onError?(error: unknown): void;
   timers?: Timers;
   delay?: number;
 };
 
-const ECHO_TIMEOUT_MS = 3000;
-
 /**
  * Keeps one composer and one session's shared draft in step.
  *
- * Local edits are written at most once per `delay`, one request at a time so the server sees them
- * in order. Echoes of this tab's own writes are recognised by text and never applied, so typing is
- * never interrupted by its own past. A remote change is applied at once when the composer is
- * quiet, and otherwise held until the IME composition ends and local writes have drained; it is
- * then applied only if nothing newer reached the server meanwhile (last writer wins).
+ * Local edits are serialized. A successful command returns the revision of its saved text,
+ * even when its stream echo is lost. Remote changes wait for local writes and IME composition
+ * to drain, then apply only if their revision is newer than the last local save.
  */
 export class DraftSync {
   /** What the composer shows. */
@@ -43,10 +39,10 @@ export class DraftSync {
   private retryNeeded = false;
   private rebases = 0;
   private composing = false;
-  /** Texts this tab wrote whose echo has not arrived yet, oldest first. */
-  private unechoed: string[] = [];
+
+  // Command replies can overtake snapshots. Only stream observations detect counter resets.
+  private saved: { rev: number; text: string } | null = null;
   private held: { rev: number; text: string; origin: DraftOrigin | null } | null = null;
-  private echoWaiters: (() => void)[] = [];
   private idleWaiters: (() => void)[] = [];
   private readonly timers: Timers;
   private readonly delay: number;
@@ -61,7 +57,7 @@ export class DraftSync {
 
   /** Whether local text has not yet been acknowledged by the server. */
   get dirty() {
-    return this.timer !== null || this.inflight || this.retryNeeded || this.unechoed.length > 0;
+    return this.timer !== null || this.inflight || this.retryNeeded;
   }
 
   get isComposing() {
@@ -69,7 +65,8 @@ export class DraftSync {
   }
 
   edit(text: string) {
-    this.text = text;
+    // Programmatic insertions must match the textarea and server's newline normalization.
+    this.text = text.replace(/\r\n?/g, "\n");
     if (this.timer === null) this.timer = this.timers.set(() => this.send(), this.delay);
   }
 
@@ -91,26 +88,19 @@ export class DraftSync {
     if (draft.origin === null && draft.rev < this.serverRev) {
       this.serverRev = draft.rev;
       this.serverText = draft.text;
-      this.unechoed = [];
+      this.saved = null;
       this.held = null;
       this.retryNeeded = this.text !== draft.text;
       this.rebases++;
-      this.drainEchoWaiters();
       if (!this.composing) void this.flush();
       return;
     }
     if (draft.rev <= this.serverRev) return;
     this.serverRev = draft.rev;
     this.serverText = draft.text;
+    if (this.saved && draft.rev <= this.saved.rev) return;
     if (draft.origin === this.options.origin || draft.origin === null) {
       if (draft.text === this.text) this.retryNeeded = false;
-      const echoed = this.unechoed.indexOf(draft.text);
-      if (echoed >= 0) {
-        this.unechoed.splice(0, echoed + 1);
-        if (this.unechoed.length === 0) this.drainEchoWaiters();
-        this.releaseHeld();
-        return;
-      }
     }
     if (this.composing || this.dirty) {
       this.held = draft;
@@ -122,11 +112,13 @@ export class DraftSync {
   /** Sends any pending edit now and resolves once every write has been acknowledged. */
   async flush() {
     while (this.inflight) await new Promise<void>((resolve) => this.idleWaiters.push(resolve));
+    if (this.composing) return;
     if (this.timer !== null) {
       this.timers.clear(this.timer);
       this.timer = null;
     }
-    if (this.retryNeeded || this.text !== this.lastWritten()) await this.send();
+    if (this.retryNeeded || this.text !== this.latestSaved().text) await this.send();
+    this.releaseHeld();
   }
 
   /** Waits for the visible draft's revision, restarting when a snapshot resets the counter. */
@@ -135,18 +127,11 @@ export class DraftSync {
       const rebase = this.rebases;
       await this.flush();
       if (rebase !== this.rebases) continue;
-      if (this.unechoed.length > 0) {
-        await new Promise<void>((resolve) => {
-          const timeout = this.timers.set(resolve, ECHO_TIMEOUT_MS);
-          this.echoWaiters.push(() => {
-            this.timers.clear(timeout);
-            resolve();
-          });
-        });
-      }
-      if (rebase !== this.rebases) continue;
-      if (this.serverText !== this.text) throw new Error("The draft has not been saved yet. Try sending again.");
-      return this.serverRev;
+      if (this.composing || this.retryNeeded) throw new Error("The draft has not been saved yet. Try sending again.");
+      if (this.dirty) continue;
+      const saved = this.latestSaved();
+      if (saved.text !== this.text) throw new Error("The draft has not been saved yet. Try sending again.");
+      return saved.rev;
     }
   }
 
@@ -158,39 +143,46 @@ export class DraftSync {
   dispose() {
     if (this.timer !== null) this.timers.clear(this.timer);
     this.timer = null;
-    this.drainEchoWaiters();
     for (const waiter of this.idleWaiters.splice(0)) waiter();
   }
 
-  private lastWritten() {
-    return this.unechoed.at(-1) ?? this.serverText;
+  private latestSaved() {
+    return this.saved && this.saved.rev > this.serverRev
+      ? this.saved
+      : { rev: this.serverRev, text: this.serverText };
   }
 
   private async send() {
     this.timer = null;
+    if (this.composing) {
+      this.retryNeeded = true;
+      return;
+    }
     if (this.inflight) return;
     const text = this.text;
     this.inflight = true;
     this.retryNeeded = false;
-    this.unechoed.push(text);
+    const rebase = this.rebases;
     try {
-      await this.options.write(text);
+      const { rev } = await this.options.write(text);
+      if (rebase === this.rebases) this.saved = { rev, text };
     } catch (error) {
-      this.retryNeeded = true;
-      const index = this.unechoed.lastIndexOf(text);
-      if (index >= 0) this.unechoed.splice(index, 1);
+      if (rebase === this.rebases) this.retryNeeded = true;
       this.options.onError?.(error);
     } finally {
       this.inflight = false;
     }
     if (!this.retryNeeded && this.text !== text && this.timer === null) {
-      await this.send();
-      return;
+      if (this.composing) {
+        this.retryNeeded = true;
+      } else {
+        await this.send();
+        return;
+      }
     }
     const idle = this.idleWaiters;
     this.idleWaiters = [];
     for (const waiter of idle) waiter();
-    if (this.retryNeeded) this.drainEchoWaiters();
     this.releaseHeld();
   }
 
@@ -198,18 +190,12 @@ export class DraftSync {
     const held = this.held;
     if (!held || this.composing || this.dirty) return;
     this.held = null;
-    if (held.rev === this.serverRev) this.apply(held);
+    if (held.rev === this.serverRev && (!this.saved || held.rev > this.saved.rev)) this.apply(held);
   }
 
   private apply(draft: { text: string; origin: DraftOrigin | null }) {
     if (draft.text === this.text) return;
     this.text = draft.text;
     this.options.onRemote(draft.text, draft.origin);
-  }
-
-  private drainEchoWaiters() {
-    const waiters = this.echoWaiters;
-    this.echoWaiters = [];
-    for (const waiter of waiters) waiter();
   }
 }

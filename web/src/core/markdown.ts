@@ -31,6 +31,10 @@ export type Heading = { depth: number; text: string; slug: string };
 let parsedHeadings: Heading[] = [];
 let parsedImages: { destination: string; alt: string }[] = [];
 
+// Remember allocated names and the next suffix so repeated headings do not rescan prior collisions.
+const headingSlugs = new Set<string>();
+const headingSuffixes = new Map<string, number>();
+
 renderer.image = ({ href, title, text }) => {
   parsedImages.push({ destination: href, alt: text });
   const titleAttribute = title ? ` title="${escapeHtml(title)}"` : "";
@@ -41,7 +45,10 @@ renderer.heading = function ({ tokens, depth }) {
   const text = this.parser.parseInline(tokens, this.parser.textRenderer);
   const base = slugify(text) || "section";
   let slug = base;
-  for (let suffix = 2; parsedHeadings.some((heading) => heading.slug === slug); suffix++) slug = `${base}-${suffix}`;
+  let suffix = headingSuffixes.get(base) ?? 2;
+  while (headingSlugs.has(slug)) slug = `${base}-${suffix++}`;
+  headingSuffixes.set(base, suffix);
+  headingSlugs.add(slug);
   parsedHeadings.push({ depth, text, slug });
   return `<h${depth} data-heading="${slug}">${this.parser.parseInline(tokens)}</h${depth}>\n`;
 };
@@ -119,6 +126,8 @@ const FILE_REFERENCE = /^((?:\.{0,2}\/)?(?:[\w.@+-]+\/)*[\w@+-][\w.@+-]*\.[A-Za-
 export function markdownHtml(source: string) {
   parsedHeadings = [];
   parsedImages = [];
+  headingSlugs.clear();
+  headingSuffixes.clear();
   return markdown.parse(source, { async: false });
 }
 
@@ -227,8 +236,7 @@ export async function renderMarkdown(
 export function scrollToHeading(container: HTMLElement, fragment: string) {
   const slug = slugify(fragment);
   if (!slug) return;
-  const heading = [...container.querySelectorAll<HTMLElement>("[data-heading]")]
-    .find((candidate) => candidate.dataset.heading === slug);
+  const heading = container.querySelector<HTMLElement>(`[data-heading="${CSS.escape(slug)}"]`);
   heading?.scrollIntoView({ block: "start" });
 }
 
