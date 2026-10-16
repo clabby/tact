@@ -289,6 +289,7 @@ async fn claude_root_runs_codex_child_through_code_mode() {
         ClaudeModel::Sonnet55,
         ClaudeModel::Opus55,
         ClaudeModel::Fable51,
+        ClaudeModel::Mythos51,
     ] {
         mixed_provider_roundtrip(
             HarnessModel::Claude(model),
@@ -307,6 +308,7 @@ async fn codex_root_runs_claude_child_through_code_mode() {
         ClaudeModel::Sonnet55,
         ClaudeModel::Opus55,
         ClaudeModel::Fable51,
+        ClaudeModel::Mythos51,
     ] {
         mixed_provider_roundtrip(
             HarnessModel::Codex(CodexModel::Luna),

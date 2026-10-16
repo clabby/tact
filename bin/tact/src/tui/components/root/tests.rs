@@ -3010,6 +3010,7 @@ fn unsupported_models_preserve_speed_preference_for_forks_and_later_models() {
         ClaudeModel::Haiku55,
         ClaudeModel::Sonnet55,
         ClaudeModel::Fable51,
+        ClaudeModel::Mythos51,
     ] {
         root.set_model(Model::Claude(model));
         assert_eq!(root.composer().speed(), Speed::Ultrafast);

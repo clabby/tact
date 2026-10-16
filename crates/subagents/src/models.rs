@@ -3,7 +3,7 @@ use serde::{Deserialize, Deserializer, de};
 use thiserror::Error;
 
 /// Models enabled by Tact's provider policy, in picker order.
-pub const SUPPORTED_MODELS: [HarnessModel; 7] = [
+pub const SUPPORTED_MODELS: [HarnessModel; 8] = [
     HarnessModel::Codex(Model::Luna),
     HarnessModel::Codex(Model::Sol),
     HarnessModel::Codex(Model::Astra),
@@ -11,6 +11,7 @@ pub const SUPPORTED_MODELS: [HarnessModel; 7] = [
     HarnessModel::Claude(ClaudeModel::Sonnet55),
     HarnessModel::Claude(ClaudeModel::Opus55),
     HarnessModel::Claude(ClaudeModel::Fable51),
+    HarnessModel::Claude(ClaudeModel::Mythos51),
 ];
 
 /// A model name outside [`SUPPORTED_MODELS`].
@@ -29,6 +30,7 @@ pub fn parse_model(value: &str) -> Result<HarnessModel, UnsupportedModel> {
         "sonnet-5.5" => ClaudeModel::Sonnet55.as_str(),
         "opus-5.5" => ClaudeModel::Opus55.as_str(),
         "fable-5.1" => ClaudeModel::Fable51.as_str(),
+        "mythos-5.1" => ClaudeModel::Mythos51.as_str(),
         value => value,
     };
     value
@@ -58,6 +60,7 @@ mod tests {
             "sonnet-5.5",
             "opus-5.5",
             "fable-5.1",
+            "mythos-5.1",
         ]
         .into_iter()
         .zip(SUPPORTED_MODELS)

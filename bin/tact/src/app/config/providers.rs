@@ -260,6 +260,7 @@ mod tests {
             ("haiku-5.5", ReasoningEffort::Medium),
             ("opus-5.5", ReasoningEffort::Medium),
             ("fable-5.1", ReasoningEffort::High),
+            ("mythos-5.1", ReasoningEffort::High),
         ] {
             let agent = format!("[agent]\nmodel = '{model}'\n");
             assert!(matches!(

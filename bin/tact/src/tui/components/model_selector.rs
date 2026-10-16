@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn vertical_rows_use_configured_colors_and_distinguish_current_from_selection() {
-        let theme: Theme = toml::from_str("model_sol = '#123456'\nmodel_fable = 'red'\n").unwrap();
+        let theme: Theme = toml::from_str("model_sol = '#123456'\nmodel_mythos = 'red'\n").unwrap();
         let mut selector = ModelSelector::new(SOL, true);
         for _ in 0..available(true).len() {
             key(&mut selector, KeyCode::Down);
@@ -390,9 +390,9 @@ mod tests {
             text.iter()
                 .any(|row| row.contains("Sol") && row.contains('✓') && !row.contains('▸'))
         );
-        assert!(text.iter().any(|row| row.contains("▸ Fable 5.1")
+        assert!(text.iter().any(|row| row.contains("▸ Mythos 5.1")
             && row.contains("Anthropic")
-            && row.contains("claude-fable-5-1")));
+            && row.contains("claude-mythos-5-1")));
         let buffer = terminal.backend().buffer();
         let sol_row = text.iter().position(|row| row.contains("Sol")).unwrap() as u16;
         let sol_x = text[usize::from(sol_row)]

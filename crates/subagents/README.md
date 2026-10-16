@@ -71,7 +71,7 @@ tokio::spawn(async move {
 
 Each spawn names its model and reasoning effort with Nanocodex's `HarnessModel` and `Thinking`
 types. A Codex child cannot run a higher tier than a Codex parent (Luna < Sol < Astra). Claude models
-(Haiku 5.5, Sonnet 5.5, Opus 5.5, and Fable 5.1) are rejected until `Subagents::set_claude_enabled(true)`;
+(Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable 5.1, and Mythos 5.1) are rejected until `Subagents::set_claude_enabled(true)`;
 once enabled, any model may delegate to them and they may delegate to any model. Every spawn is
 bounded by the runtime's live effort cap, and a registered child cannot spawn above its own
 effort.

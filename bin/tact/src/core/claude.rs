@@ -799,6 +799,7 @@ mod tests {
             ClaudeModel::Sonnet55,
             ClaudeModel::Opus55,
             ClaudeModel::Fable51,
+            ClaudeModel::Mythos51,
         ] {
             let mut server = server((0..5).map(|_| final_text()).collect()).await;
             let workspace = tempfile::tempdir().unwrap();
@@ -972,6 +973,7 @@ mod tests {
             nanocodex::ClaudeModel::Sonnet55,
             nanocodex::ClaudeModel::Opus55,
             nanocodex::ClaudeModel::Fable51,
+            nanocodex::ClaudeModel::Mythos51,
         ] {
             let selected = tools().build().unwrap();
             let (agent, _) = build_client(

@@ -1214,6 +1214,7 @@ mod tests {
             Model::Claude(ClaudeModel::Sonnet55),
             Model::Claude(ClaudeModel::Opus55),
             Model::Claude(ClaudeModel::Fable51),
+            Model::Claude(ClaudeModel::Mythos51),
         ] {
             let record = TranscriptRecord::from_local(
                 1,

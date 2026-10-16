@@ -555,6 +555,7 @@ mod tests {
             "model_sonnet",
             "model_opus",
             "model_fable",
+            "model_mythos",
         ];
         assert_table_fields(&rendered["theme"]["light"], &palette_fields);
         assert_table_fields(&rendered["theme"]["dark"], &palette_fields);

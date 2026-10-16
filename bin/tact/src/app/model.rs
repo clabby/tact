@@ -127,6 +127,7 @@ pub(crate) const fn name(model: Model) -> &'static str {
         Model::Claude(ClaudeModel::Sonnet55) => "Sonnet 5.5",
         Model::Claude(ClaudeModel::Opus55) => "Opus 5.5",
         Model::Claude(ClaudeModel::Fable51) => "Fable 5.1",
+        Model::Claude(ClaudeModel::Mythos51) => "Mythos 5.1",
         _ => model.as_str(),
     }
 }
@@ -207,6 +208,8 @@ mod tests {
             ("claude-opus-5-5", Model::Claude(ClaudeModel::Opus55)),
             ("fable-5.1", Model::Claude(ClaudeModel::Fable51)),
             ("claude-fable-5-1", Model::Claude(ClaudeModel::Fable51)),
+            ("mythos-5.1", Model::Claude(ClaudeModel::Mythos51)),
+            ("claude-mythos-5-1", Model::Claude(ClaudeModel::Mythos51)),
         ] {
             assert_eq!(parse(value), Ok(expected));
         }

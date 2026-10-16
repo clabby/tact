@@ -131,9 +131,10 @@ impl Tool for SpawnAgent {
                     "sonnet-5.5",
                     "opus-5.5",
                     "fable-5.1",
+                    "mythos-5.1",
                 ],
                 concat!(
-                    "Name luna, sol, astra, haiku-5.5, sonnet-5.5, opus-5.5, or fable-5.1 explicitly. ",
+                    "Name luna, sol, astra, haiku-5.5, sonnet-5.5, opus-5.5, fable-5.1, or mythos-5.1 explicitly. ",
                     "Choose model and effort independently for expected quality, total cost, and completion time, including rework. ",
                     "Codex children cannot exceed a Codex parent's tier: luna < sol < astra. ",
                     "Cross-provider selection and delegation between Claude models are supported, subject to effort caps.",
@@ -724,7 +725,13 @@ mod tests {
             let definition = tool.definition();
             let validator =
                 jsonschema::validator_for(definition.parameters().unwrap().as_value()).unwrap();
-            for model in ["haiku-5.5", "sonnet-5.5", "opus-5.5", "fable-5.1"] {
+            for model in [
+                "haiku-5.5",
+                "sonnet-5.5",
+                "opus-5.5",
+                "fable-5.1",
+                "mythos-5.1",
+            ] {
                 let input = json!({"role": "review", "task": "Review", "model": model,
                     "thinking": "medium", "output_schema": {"type": "object"}});
                 assert_eq!(validator.is_valid(&input), enabled);

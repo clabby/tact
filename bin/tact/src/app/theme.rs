@@ -54,6 +54,7 @@ struct ThemePalette {
     model_sonnet: ThemeColor,
     model_opus: ThemeColor,
     model_fable: ThemeColor,
+    model_mythos: ThemeColor,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,6 +91,7 @@ struct PaletteFields {
     model_sonnet: Option<ThemeColor>,
     model_opus: Option<ThemeColor>,
     model_fable: Option<ThemeColor>,
+    model_mythos: Option<ThemeColor>,
 }
 
 #[derive(Deserialize)]
@@ -203,6 +205,7 @@ impl Theme {
             Model::Claude(ClaudeModel::Sonnet55) => self.palette().model_sonnet.0,
             Model::Claude(ClaudeModel::Opus55) => self.palette().model_opus.0,
             Model::Claude(ClaudeModel::Fable51) => self.palette().model_fable.0,
+            Model::Claude(ClaudeModel::Mythos51) => self.palette().model_mythos.0,
             _ => self.text(),
         }
     }
@@ -252,6 +255,7 @@ impl ThemePalette {
             model_sonnet: ThemeColor(Color::Green),
             model_opus: ThemeColor(Color::Red),
             model_fable: ThemeColor(Color::Cyan),
+            model_mythos: ThemeColor(Color::LightMagenta),
         }
     }
 
@@ -275,6 +279,7 @@ impl ThemePalette {
             model_sonnet: ThemeColor(Color::Green),
             model_opus: ThemeColor(Color::Red),
             model_fable: ThemeColor(Color::Cyan),
+            model_mythos: ThemeColor(Color::LightMagenta),
         }
     }
 
@@ -297,6 +302,7 @@ impl ThemePalette {
         self.model_sonnet = fields.model_sonnet.unwrap_or(self.model_sonnet);
         self.model_opus = fields.model_opus.unwrap_or(self.model_opus);
         self.model_fable = fields.model_fable.unwrap_or(self.model_fable);
+        self.model_mythos = fields.model_mythos.unwrap_or(self.model_mythos);
     }
 }
 
@@ -402,6 +408,7 @@ mod tests {
             Color::Green,
             Color::Red,
             Color::Cyan,
+            Color::LightMagenta,
         ];
         assert_eq!(models.len(), colors.len());
         for mode in [ThemeMode::Dark, ThemeMode::Light] {

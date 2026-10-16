@@ -88,6 +88,7 @@
   --model-sonnet: #2f8a3e;
   --model-opus: #c4372f;
   --model-fable: #0b7f93;
+  --model-mythos: #7048d8;
 }
 
 :root[data-theme="dark"] {
@@ -138,6 +139,7 @@
   --model-sonnet: #6fcf7f;
   --model-opus: #f2837a;
   --model-fable: #5ccfd6;
+  --model-mythos: #b49cff;
 }
 
 @media (pointer: coarse) {

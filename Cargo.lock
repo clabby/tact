@@ -2817,7 +2817,7 @@ dependencies = [
 [[package]]
 name = "nanocodex"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocodex?rev=97c658abafb46faef0bf52307a3738dbbdaaed40#97c658abafb46faef0bf52307a3738dbbdaaed40"
+source = "git+https://github.com/clabby/nanocodex?rev=7de6f676e1fa5229d348692e8851dbbbcccc0cc4#7de6f676e1fa5229d348692e8851dbbbcccc0cc4"
 dependencies = [
  "nanocodex-agent",
  "nanocodex-claude",
@@ -2830,7 +2830,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-agent"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocodex?rev=97c658abafb46faef0bf52307a3738dbbdaaed40#97c658abafb46faef0bf52307a3738dbbdaaed40"
+source = "git+https://github.com/clabby/nanocodex?rev=7de6f676e1fa5229d348692e8851dbbbcccc0cc4#7de6f676e1fa5229d348692e8851dbbbcccc0cc4"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2852,7 +2852,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-claude"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocodex?rev=97c658abafb46faef0bf52307a3738dbbdaaed40#97c658abafb46faef0bf52307a3738dbbdaaed40"
+source = "git+https://github.com/clabby/nanocodex?rev=7de6f676e1fa5229d348692e8851dbbbcccc0cc4#7de6f676e1fa5229d348692e8851dbbbcccc0cc4"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -2880,7 +2880,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-decisions"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocodex?rev=97c658abafb46faef0bf52307a3738dbbdaaed40#97c658abafb46faef0bf52307a3738dbbdaaed40"
+source = "git+https://github.com/clabby/nanocodex?rev=7de6f676e1fa5229d348692e8851dbbbcccc0cc4#7de6f676e1fa5229d348692e8851dbbbcccc0cc4"
 dependencies = [
  "async-trait",
  "nanocodex-oai-tools",
@@ -2894,7 +2894,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-durability"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocodex?rev=97c658abafb46faef0bf52307a3738dbbdaaed40#97c658abafb46faef0bf52307a3738dbbdaaed40"
+source = "git+https://github.com/clabby/nanocodex?rev=7de6f676e1fa5229d348692e8851dbbbcccc0cc4#7de6f676e1fa5229d348692e8851dbbbcccc0cc4"
 dependencies = [
  "nanocodex-agent",
  "nanocodex-claude",
@@ -2910,7 +2910,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-managed"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocodex?rev=97c658abafb46faef0bf52307a3738dbbdaaed40#97c658abafb46faef0bf52307a3738dbbdaaed40"
+source = "git+https://github.com/clabby/nanocodex?rev=7de6f676e1fa5229d348692e8851dbbbcccc0cc4#7de6f676e1fa5229d348692e8851dbbbcccc0cc4"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2942,7 +2942,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-oai-api"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocodex?rev=97c658abafb46faef0bf52307a3738dbbdaaed40#97c658abafb46faef0bf52307a3738dbbdaaed40"
+source = "git+https://github.com/clabby/nanocodex?rev=7de6f676e1fa5229d348692e8851dbbbcccc0cc4#7de6f676e1fa5229d348692e8851dbbbcccc0cc4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2974,7 +2974,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-oai-tools"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocodex?rev=97c658abafb46faef0bf52307a3738dbbdaaed40#97c658abafb46faef0bf52307a3738dbbdaaed40"
+source = "git+https://github.com/clabby/nanocodex?rev=7de6f676e1fa5229d348692e8851dbbbcccc0cc4#7de6f676e1fa5229d348692e8851dbbbcccc0cc4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3011,7 +3011,7 @@ dependencies = [
 [[package]]
 name = "nanocodex-oai-tools-macros"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocodex?rev=97c658abafb46faef0bf52307a3738dbbdaaed40#97c658abafb46faef0bf52307a3738dbbdaaed40"
+source = "git+https://github.com/clabby/nanocodex?rev=7de6f676e1fa5229d348692e8851dbbbcccc0cc4#7de6f676e1fa5229d348692e8851dbbbcccc0cc4"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

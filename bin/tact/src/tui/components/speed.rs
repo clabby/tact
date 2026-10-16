@@ -249,6 +249,7 @@ mod tests {
             ),
             (Model::Claude(ClaudeModel::Sonnet55), &[Speed::Standard][..]),
             (Model::Claude(ClaudeModel::Fable51), &[Speed::Standard][..]),
+            (Model::Claude(ClaudeModel::Mythos51), &[Speed::Standard][..]),
             (Model::Claude(ClaudeModel::Haiku55), &[Speed::Standard][..]),
         ] {
             let selector = SpeedSelector::new(Speed::Standard, model);

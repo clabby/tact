@@ -355,10 +355,12 @@ Esc to cancel.
 | `sonnet-5.5` | `claude-sonnet-5-5` | high |
 | `opus-5.5` | `claude-opus-5-5` | medium |
 | `fable-5.1` | `claude-fable-5-1` | high |
+| `mythos-5.1` | `claude-mythos-5-1` | high |
 
-Claude models need Claude enabled (see below). Every model supports effort from `low` through `max`,
-and a configured `agent.thinking` overrides the defaults. Resumed sessions keep the model they started
-with. Sessions on retired model IDs can't be resumed.
+Claude models need Claude enabled (see below). Mythos 5.1 is only served to accounts in Anthropic's
+Project Glasswing. It's the same model as Fable 5.1, so pick Fable if you don't have that access. Every
+model supports effort from `low` through `max`, and a configured `agent.thinking` overrides the
+defaults. Resumed sessions keep the model they started with. Sessions on retired model IDs can't be resumed.
 
 Astra, Sol, and Luna also support **Pro** mode, independent of effort. Open `/effort`, press `p` to toggle
 Pro, and press Enter to save. Pro applies to new sessions.
@@ -373,7 +375,7 @@ when you change models. Ultrafast picks the fastest tier each model supports.
 | --- | --- |
 | Astra, Sol | Ultrafast |
 | Luna, Opus 5.5 | Fast |
-| Haiku 5.5, Sonnet 5.5, Fable 5.1 | Standard |
+| Haiku 5.5, Sonnet 5.5, Fable 5.1, Mythos 5.1 | Standard |
 
 Astra and Sol send `service_tier = "ultrafast"`, and access and pricing depend on your account. See
 [OpenAI ultrafast mode](https://developers.openai.com/api/docs/guides/ultrafast-mode) for details.
@@ -644,6 +646,7 @@ model_haiku = "blue"
 model_sonnet = "green"
 model_opus = "red"
 model_fable = "cyan"
+model_mythos = "light-magenta"
 
 [theme.dark]
 text = "reset"
@@ -664,6 +667,7 @@ model_haiku = "blue"
 model_sonnet = "green"
 model_opus = "red"
 model_fable = "cyan"
+model_mythos = "light-magenta"
 ```
 
 </details>

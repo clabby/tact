@@ -86,6 +86,11 @@ mod tests {
                 Speed::Standard,
                 Speed::Standard,
             ),
+            (
+                Model::Claude(ClaudeModel::Mythos51),
+                Speed::Standard,
+                Speed::Standard,
+            ),
         ] {
             assert_eq!(Speed::Standard.for_model(model), Speed::Standard);
             assert_eq!(Speed::Fast.for_model(model), fast);

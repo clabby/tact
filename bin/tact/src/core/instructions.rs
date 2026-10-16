@@ -126,12 +126,14 @@ FrontierCode 1.1 Main (native Codex; best scoring effort per model).
 const CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS: &str = r#"### Available Claude models
 
 Use `opus-5.5` or `sonnet-5.5` as the normal starting choices for implementation, analysis, and
-document, system, or protocol review. Bring in `astra`, `fable-5.1`, or another eligible model
-for especially deep reviews, unresolved premises, or independent challenges. Prefer model diversity
+document, system, or protocol review. Bring in `astra`, `mythos-5.1`, `fable-5.1`, or another eligible
+model for especially deep reviews, unresolved premises, or independent challenges. Prefer model diversity
 for second opinions: use an eligible Codex model alongside Claude. Both providers may delegate to
 either provider within the applicable model, effort, and reasoning mode caps.
 
 Use `haiku-5.5` for narrow, well-specified work when lower cost matters; start at `medium`.
+
+`mythos-5.1` ranks above `fable-5.1`. Prefer it wherever you would otherwise choose `fable-5.1`.
 
 DeepSWE 1.1 (Artificial Analysis, native Claude Code). Cost/time are averages across AA's coding suite.
 

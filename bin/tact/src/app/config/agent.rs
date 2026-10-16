@@ -193,6 +193,7 @@ mod tests {
             ("sonnet-5.5", ReasoningEffort::High),
             ("opus-5.5", ReasoningEffort::Medium),
             ("fable-5.1", ReasoningEffort::High),
+            ("mythos-5.1", ReasoningEffort::High),
         ] {
             let config = load_config(&format!(
                 "[claude]\nenabled = true\n[agent]\nmodel = \"{model}\"\n"
