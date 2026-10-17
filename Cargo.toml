@@ -40,9 +40,9 @@ jsonschema = { version = "0.48.5", default-features = false }
 libc = "0.2.189"
 miette = { version = "7.6.0", features = ["fancy"] }
 minisign-verify = "0.2.5"
-nanocode = { git = "https://github.com/gakonst/nanocode", rev = "6aefed8e0918a15c8a0ffd2ceceb5cd87fa9efcc" }
-nanocode-backend-codex = { git = "https://github.com/gakonst/nanocode", rev = "6aefed8e0918a15c8a0ffd2ceceb5cd87fa9efcc" }
-nanocode-agent = { git = "https://github.com/gakonst/nanocode", rev = "6aefed8e0918a15c8a0ffd2ceceb5cd87fa9efcc" }
+nanocode = { git = "https://github.com/gakonst/nanocode", rev = "0e70432fada624136b59684dab4d9dff7ec762a1" }
+nanocode-backend-codex = { git = "https://github.com/gakonst/nanocode", rev = "0e70432fada624136b59684dab4d9dff7ec762a1" }
+nanocode-agent = { git = "https://github.com/gakonst/nanocode", rev = "0e70432fada624136b59684dab4d9dff7ec762a1" }
 png = "0.18.1"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30.2"
