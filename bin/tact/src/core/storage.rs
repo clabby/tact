@@ -14,6 +14,7 @@ use crate::{
     },
 };
 pub(crate) use conversation_search::{ConversationMatch, search_terms};
+use durable::EventPosition;
 use nanocode::agent::events::AgentEventKind;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, ffi::ErrorCode, params,
@@ -70,6 +71,10 @@ pub(crate) enum StorageError {
     Encode(#[from] serde_json::Error),
     #[error("the session event sequence exceeds the largest storable sequence")]
     SequenceOverflow,
+    #[error("a host batch for session {state_id} is already staged for its writer's next commit")]
+    HostBatchPending { state_id: String },
+    #[error("failed to start the session store thread: {0}")]
+    Thread(#[source] std::io::Error),
     #[error("failed to compress session data: {0}")]
     Compress(#[source] std::io::Error),
     #[error("failed to decode session data: {0}")]
@@ -241,10 +246,7 @@ impl SessionStorage {
         if records.is_empty() && resume_state.is_none() {
             return Ok(());
         }
-        let compressed_state = resume_state
-            .map(|state| zstd::encode_all(state, STATE_COMPRESSION_LEVEL))
-            .transpose()
-            .map_err(StorageError::Compress)?;
+        let compressed_state = resume_state.map(compress_resume_state).transpose()?;
         let path = self.path.clone();
         let transaction = self
             .connection
@@ -253,18 +255,16 @@ impl SessionStorage {
         let mut active_turn = self.active_turns.get(session_id).copied();
         let mut encoded = Vec::new();
         for record in records {
-            if record.local_kind() == Some(LocalKind::WorkerTurnAccepted) {
-                active_turn = Some(record.decode_payload::<WorkerTurnAccepted>()?.id);
-            }
             encoded.clear();
             serde_json::to_writer(&mut encoded, record.as_ref())?;
-            append_record(
+            write_record(
                 &transaction,
                 &path,
                 session_id,
-                active_turn,
+                &mut active_turn,
                 record,
                 &encoded,
+                None,
             )?;
         }
         if let Some(compressed) = compressed_state {
@@ -426,8 +426,7 @@ impl SessionStorage {
         session_id: &str,
         encoded: &[u8],
     ) -> Result<(), StorageError> {
-        let compressed =
-            zstd::encode_all(encoded, STATE_COMPRESSION_LEVEL).map_err(StorageError::Compress)?;
+        let compressed = compress_resume_state(encoded)?;
         write_resume_state(&self.connection, &self.path, session_id, &compressed)
     }
 
@@ -829,6 +828,10 @@ impl SessionStorage {
     }
 }
 
+fn compress_resume_state(state: &[u8]) -> Result<Vec<u8>, StorageError> {
+    zstd::encode_all(state, STATE_COMPRESSION_LEVEL).map_err(StorageError::Compress)
+}
+
 fn write_resume_state(
     connection: &Connection,
     path: &Path,
@@ -961,6 +964,31 @@ fn database_version(connection: &Connection, path: &Path) -> Result<i32, Storage
         .map_err(|source| query(path, source))
 }
 
+/// Appends one record and returns its event id, tracking the turn whose assistant stream the
+/// following records belong to.
+fn write_record(
+    transaction: &Transaction<'_>,
+    path: &Path,
+    session_id: &str,
+    active_turn: &mut Option<TurnId>,
+    record: &TranscriptRecord,
+    encoded: &[u8],
+    position: Option<EventPosition>,
+) -> Result<i64, StorageError> {
+    if record.local_kind() == Some(LocalKind::WorkerTurnAccepted) {
+        *active_turn = Some(record.decode_payload::<WorkerTurnAccepted>()?.id);
+    }
+    append_record(
+        transaction,
+        path,
+        session_id,
+        *active_turn,
+        record,
+        encoded,
+        position,
+    )
+}
+
 fn append_record(
     transaction: &Transaction<'_>,
     path: &Path,
@@ -968,7 +996,8 @@ fn append_record(
     active_turn: Option<TurnId>,
     record: &TranscriptRecord,
     encoded: &[u8],
-) -> Result<(), StorageError> {
+    position: Option<EventPosition>,
+) -> Result<i64, StorageError> {
     if record.local_kind() == Some(LocalKind::SessionStarted) {
         let started = record.decode_payload::<SessionStarted>()?;
         upsert_session(transaction, path, record, &started)?;
@@ -978,9 +1007,10 @@ fn append_record(
     if record.agent_kind() == Some(AgentEventKind::AssistantMessage)
         && let Some(stream) = &assistant_stream
     {
+        // Sequenced rows are immutable contract events; a final message replaces only drafts.
         transaction
             .execute(
-                "DELETE FROM events WHERE session_id = ?1 AND assistant_stream = ?2",
+                "DELETE FROM events WHERE session_id = ?1 AND assistant_stream = ?2 AND seq IS NULL",
                 params![session_id, stream],
             )
             .map_err(|source| query(path, source))?;
@@ -988,8 +1018,9 @@ fn append_record(
     transaction
         .execute(
             "INSERT INTO events(\n\
-                 session_id, record_json, prompt_text, prompt_recorded_at_ms, assistant_stream\n\
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                 session_id, record_json, prompt_text, prompt_recorded_at_ms, assistant_stream,\n\
+                 seq, revision\n\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 session_id,
                 encoded,
@@ -999,10 +1030,13 @@ fn append_record(
                     .map(|_| to_sql_u64(record.recorded_at_unix_ms())),
                 (record.agent_kind() == Some(AgentEventKind::AssistantDelta))
                     .then_some(assistant_stream)
-                    .flatten()
+                    .flatten(),
+                position.map(|position| position.seq),
+                position.map(|position| position.revision)
             ],
         )
         .map_err(|source| query(path, source))?;
+    let event_id = transaction.last_insert_rowid();
     transaction
         .execute(
             "UPDATE sessions SET updated_at_ms = ?2 WHERE session_id = ?1",
@@ -1021,7 +1055,8 @@ fn append_record(
                 .map_err(|source| query(path, source))?;
         }
     }
-    update_settings(transaction, path, session_id, record)
+    update_settings(transaction, path, session_id, record)?;
+    Ok(event_id)
 }
 
 fn upsert_session(

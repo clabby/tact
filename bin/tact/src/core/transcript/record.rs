@@ -487,6 +487,24 @@ impl TranscriptRecord {
         })
     }
 
+    /// The text of a prompt, steer, or completed assistant reply, which is all of a record that
+    /// conversation search and the durability contract match against. The rule mirrors the
+    /// conversation index, which stores the same text for the same records.
+    pub(crate) fn conversation_text(&self) -> Result<Option<String>, serde_json::Error> {
+        if let Some(prompt) = self.prompt_text()? {
+            return Ok(Some(prompt));
+        }
+        if self.agent_kind() != Some(AgentEventKind::AssistantMessage) {
+            return Ok(None);
+        }
+        let payload = self.decode_payload::<serde_json::Value>()?;
+        Ok(payload
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned))
+    }
+
     pub(crate) const fn schema_version(&self) -> u32 {
         self.schema_version
     }

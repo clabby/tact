@@ -12,12 +12,35 @@
 
 #![cfg_attr(
     not(test),
-    allow(dead_code, reason = "sequences are adopted by the state store")
+    allow(
+        dead_code,
+        reason = "the transcript journal does not commit through the store yet"
+    )
 )]
 
-use super::{StorageError, conversation_search::conversation_text, query};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use std::path::Path;
+mod reader;
+mod store;
+
+use super::{
+    SessionStorage, StorageError, compress_resume_state, conversation_search::conversation_text,
+    decode_record, from_sql_u64, query, write_record, write_resume_state,
+};
+use crate::core::transcript::{LocalKind, TranscriptRecord};
+use nanocode::{
+    agent::events::AgentEventKind,
+    durability::{
+        Committed, EventCursor, EventHit, EventHits, EventOrder, EventPage, EventQuery, EventRange,
+        IndexedState, OwnedState, OwnerId, OwnerToken, StateCommit, StateCursor, StatePage,
+        StateQuery, StateSummary, StoreError, StoreEvent, StoreRecord, StoreUpdate, StoredEvent,
+        StoredState, SummaryUpdate,
+    },
+};
+use rusqlite::{
+    Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params, params_from_iter,
+    types::Value,
+};
+use std::{collections::HashMap, fmt::Display, io, path::Path, thread, time::Duration};
+use store::{HostBatch, HostRow};
 
 /// Creates the durability tables and the event sequence columns once per database. The checks
 /// repeat inside an immediate transaction so concurrent first opens add each column once.
@@ -194,6 +217,521 @@ fn last_event_id(
         .map_err(|source| query(path, source))
 }
 
+/// A contract event's place in its session's sequence.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct EventPosition {
+    pub(super) seq: i64,
+    pub(super) revision: i64,
+}
+
+/// How long a writer waits before retrying a transaction that another connection's write lock
+/// blocked beyond the busy timeout.
+const LOCK_RETRY_DELAY: Duration = Duration::from_millis(50);
+
+/// The contract event of a transcript record. `body` is the record's JSON encoding, which is
+/// stored verbatim; the other fields are derived from the record, so storage never duplicates them.
+fn store_event(record: &TranscriptRecord, body: String) -> Result<StoreEvent, serde_json::Error> {
+    Ok(StoreEvent {
+        kind: record.kind().as_str().to_owned(),
+        at_ms: record.recorded_at_unix_ms(),
+        body,
+        text: record.conversation_text()?,
+    })
+}
+
+/// A transcript row of a commit, in the order the host recorded it.
+struct PlannedRow<'a> {
+    record: TranscriptRecord,
+    encoded: &'a [u8],
+    /// `None` for a draft, which is not a contract event; otherwise the event's validated text.
+    event_text: Option<Option<String>>,
+}
+
+/// Decodes and checks a commit's rows before anything is written. Every event must be the
+/// contract event of the transcript record in its body, and never a streamed draft, because a
+/// stream's final message deletes its drafts while contract events are immutable. The host batch,
+/// when present, places those events among its drafts, which must all be streamed drafts, and must
+/// name each event exactly once.
+fn plan_rows<'a>(
+    events: &'a [StoreEvent],
+    host: Option<&'a HostBatch>,
+) -> Result<Vec<PlannedRow<'a>>, StoreError> {
+    let mut planned = events.iter().map(|event| {
+        let record = decode_record(event.body.as_bytes()).map_err(not_committed)?;
+        if is_draft(&record) {
+            return Err(StoreError::NotCommitted(
+                "a streamed assistant draft cannot be a contract event".to_owned(),
+            ));
+        }
+        let text = record.conversation_text().map_err(not_committed)?;
+        if event.kind != record.kind().as_str()
+            || event.at_ms != record.recorded_at_unix_ms()
+            || event.text != text
+        {
+            return Err(StoreError::NotCommitted(format!(
+                "event of kind {} does not describe the transcript record in its body",
+                event.kind
+            )));
+        }
+        Ok(PlannedRow {
+            record,
+            encoded: event.body.as_bytes(),
+            event_text: Some(text),
+        })
+    });
+    let Some(host) = host else {
+        return planned.collect();
+    };
+    let misaligned =
+        || StoreError::NotCommitted("the host batch does not match the committed events".into());
+    let mut rows = Vec::with_capacity(host.rows.len());
+    for row in &host.rows {
+        rows.push(match row {
+            HostRow::Event => planned.next().ok_or_else(misaligned)??,
+            HostRow::Draft(encoded) => {
+                let record = decode_record(encoded).map_err(not_committed)?;
+                if !is_draft(&record) {
+                    return Err(StoreError::NotCommitted(format!(
+                        "a host draft must be a streamed assistant draft, not {}",
+                        record.kind()
+                    )));
+                }
+                PlannedRow {
+                    record,
+                    encoded,
+                    event_text: None,
+                }
+            }
+        });
+    }
+    if planned.next().is_some() {
+        return Err(misaligned());
+    }
+    Ok(rows)
+}
+
+impl SessionStorage {
+    /// Begins a write transaction, waiting out other connections' write locks for as long as they
+    /// last, as the transcript writer always has.
+    fn begin_write(&self) -> Result<Transaction<'_>, StorageError> {
+        loop {
+            match Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate) {
+                Ok(transaction) => return Ok(transaction),
+                Err(source) => {
+                    let error = query(&self.path, source);
+                    if !error.is_lock_contention() {
+                        return Err(error);
+                    }
+                    thread::sleep(LOCK_RETRY_DELAY);
+                }
+            }
+        }
+    }
+
+    fn acquire_state(
+        &self,
+        state_id: &str,
+        owner_id: OwnerId,
+        update: Option<StoreUpdate>,
+    ) -> Result<OwnedState, StoreError> {
+        let path = &self.path;
+        let transaction = self.begin_write().map_err(not_committed)?;
+        let fence = transaction
+            .query_row(
+                "SELECT fence FROM durable_owners WHERE state_id = ?1",
+                [state_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(rejected(path))?
+            .map_or(Some(1), |fence| from_sql_u64(fence).checked_add(1))
+            .filter(|fence| i64::try_from(*fence).is_ok())
+            .ok_or_else(|| StoreError::NotCommitted("owner fence overflow".to_owned()))?;
+        transaction
+            .execute(
+                "INSERT INTO durable_owners(state_id, owner_id, fence) VALUES (?1, ?2, ?3)\n\
+                 ON CONFLICT(state_id) DO UPDATE SET\n\
+                     owner_id = excluded.owner_id, fence = excluded.fence",
+                params![
+                    state_id,
+                    owner_id.as_str(),
+                    sql_integer(fence, "owner fence")?
+                ],
+            )
+            .map_err(rejected(path))?;
+        EventSequence::adopt(&transaction, path, state_id).map_err(not_committed)?;
+        let mut owned = OwnedState {
+            owner: OwnerToken::new(owner_id, fence),
+            state: read_state(&transaction, path, state_id).map_err(not_committed)?,
+        };
+        let replacement = match update.map(|update| update(&owned.state)).transpose() {
+            Ok(replacement) => replacement.flatten(),
+            Err(error) => {
+                return Err(StoreError::NotCommitted(format!(
+                    "state update failed: {error}"
+                )));
+            }
+        };
+        if let Some(replacement) = replacement {
+            let revision = next_revision(owned.state.revision)?;
+            write_records(&transaction, path, state_id, &replacement.records)?;
+            write_state(&transaction, path, state_id, revision, &replacement.payload)?;
+            owned.state = StoredState {
+                revision,
+                payload: Some(replacement.payload),
+            };
+        }
+        transaction.commit().map_err(uncertain(path))?;
+        Ok(owned)
+    }
+
+    /// Commits a fenced state transition, its records and events, the host's drafts and resume
+    /// state, and the summary, all in one transaction.
+    fn commit_state(
+        &mut self,
+        state_id: &str,
+        owner: &OwnerToken,
+        expected_revision: u64,
+        commit: StateCommit<'_>,
+        host: Option<&HostBatch>,
+    ) -> Result<Committed, StoreError> {
+        let rows = plan_rows(commit.events, host)?;
+        let compressed_state = host
+            .and_then(|host| host.resume_state.as_deref())
+            .map(compress_resume_state)
+            .transpose()
+            .map_err(not_committed)?;
+        let path = &self.path;
+        let transaction = self.begin_write().map_err(not_committed)?;
+        check_owner(&transaction, path, state_id, owner)?;
+        let current = read_state(&transaction, path, state_id)
+            .map_err(not_committed)?
+            .revision;
+        if current != expected_revision {
+            return Err(StoreError::Conflict {
+                expected: expected_revision,
+                actual: current,
+            });
+        }
+        let revision = next_revision(current)?;
+        let stored_revision = sql_integer(revision, "state revision")?;
+        let sequence = EventSequence::adopt(&transaction, path, state_id).map_err(not_committed)?;
+        let appended = i64::try_from(commit.events.len())
+            .ok()
+            .and_then(|count| sequence.last_seq.checked_add(count));
+        if appended.is_none() {
+            return Err(StoreError::NotCommitted(
+                "event sequence overflow".to_owned(),
+            ));
+        }
+        write_records(&transaction, path, state_id, commit.records)?;
+        let mut active_turn = self.active_turns.get(state_id).copied();
+        let mut last_seq = sequence.last_seq;
+        for row in &rows {
+            let position = row.event_text.is_some().then(|| {
+                last_seq += 1;
+                EventPosition {
+                    seq: last_seq,
+                    revision: stored_revision,
+                }
+            });
+            let event_id = write_record(
+                &transaction,
+                path,
+                state_id,
+                &mut active_turn,
+                &row.record,
+                row.encoded,
+                position,
+            )
+            .map_err(not_committed)?;
+            if let Some(Some(text)) = &row.event_text {
+                index_conversation_text(&transaction, path, state_id, event_id, text)?;
+            }
+        }
+        if let Some(compressed) = compressed_state {
+            write_resume_state(&transaction, path, state_id, &compressed).map_err(not_committed)?;
+        }
+        EventSequence {
+            last_seq,
+            sequenced_through: last_event_id(
+                &transaction,
+                path,
+                state_id,
+                sequence.sequenced_through,
+            )
+            .map_err(not_committed)?,
+        }
+        .save(&transaction, path, state_id)
+        .map_err(not_committed)?;
+        write_state(&transaction, path, state_id, revision, commit.payload)?;
+        write_summary(&transaction, path, state_id, revision, commit.summary)?;
+        transaction.commit().map_err(uncertain(path))?;
+        if let Some(active_turn) = active_turn {
+            self.active_turns.insert(state_id.to_owned(), active_turn);
+        }
+        Ok(Committed {
+            revision,
+            first_event: (!commit.events.is_empty()).then(|| from_sql_u64(sequence.last_seq) + 1),
+        })
+    }
+
+    fn state_ids(&self, limit: usize) -> Result<Vec<String>, StorageError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT state_id FROM durable_states ORDER BY rowid DESC LIMIT ?1")
+            .map_err(|source| query(&self.path, source))?;
+        statement
+            .query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| row.get(0))
+            .map_err(|source| query(&self.path, source))?
+            .map(|row| row.map_err(|source| query(&self.path, source)))
+            .collect()
+    }
+
+    /// Reads with a connection that may predate the durability tables, in which case no state
+    /// exists yet.
+    fn read_stored_state(&self, state_id: &str) -> Result<StoredState, StorageError> {
+        if !schema_exists(&self.connection, &self.path)? {
+            return Ok(StoredState::default());
+        }
+        read_state(&self.connection, &self.path, state_id)
+    }
+
+    fn read_stored_records(
+        &self,
+        state_id: &str,
+        keys: &[String],
+    ) -> Result<Vec<Option<String>>, StorageError> {
+        if !schema_exists(&self.connection, &self.path)? {
+            return Ok(vec![None; keys.len()]);
+        }
+        let mut statement = self
+            .connection
+            .prepare("SELECT value FROM durable_records WHERE state_id = ?1 AND key = ?2")
+            .map_err(|source| query(&self.path, source))?;
+        keys.iter()
+            .map(|key| {
+                statement
+                    .query_row(params![state_id, key], |row| row.get(0))
+                    .optional()
+                    .map_err(|source| query(&self.path, source))
+            })
+            .collect()
+    }
+}
+
+fn read_state(
+    connection: &Connection,
+    path: &Path,
+    state_id: &str,
+) -> Result<StoredState, StorageError> {
+    Ok(connection
+        .query_row(
+            "SELECT revision, payload FROM durable_states WHERE state_id = ?1",
+            [state_id],
+            |row| {
+                Ok(StoredState {
+                    revision: from_sql_u64(row.get(0)?),
+                    payload: Some(row.get(1)?),
+                })
+            },
+        )
+        .optional()
+        .map_err(|source| query(path, source))?
+        .unwrap_or_default())
+}
+
+fn check_owner(
+    transaction: &Transaction<'_>,
+    path: &Path,
+    state_id: &str,
+    owner: &OwnerToken,
+) -> Result<(), StoreError> {
+    let current = transaction
+        .query_row(
+            "SELECT owner_id, fence FROM durable_owners WHERE state_id = ?1",
+            [state_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(rejected(path))?
+        .is_some_and(|(owner_id, fence)| {
+            owner_id == owner.owner_id().as_str() && u64::try_from(fence) == Ok(owner.fence())
+        });
+    if current {
+        Ok(())
+    } else {
+        Err(StoreError::Fenced)
+    }
+}
+
+/// Converts a contract counter or time to SQLite's integer domain, rejecting rather than clamping
+/// a value that SQLite cannot store.
+fn sql_integer(value: u64, name: &str) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| {
+        StoreError::NotCommitted(format!(
+            "{name} {value} exceeds the largest storable integer"
+        ))
+    })
+}
+
+fn is_draft(record: &TranscriptRecord) -> bool {
+    record.agent_kind() == Some(AgentEventKind::AssistantDelta)
+}
+
+/// Indexes a contract event's validated text. The conversation trigger recognizes only compactly
+/// encoded bodies, so without this a valid body in another encoding would read back without its
+/// text and escape conversation search.
+fn index_conversation_text(
+    transaction: &Transaction<'_>,
+    path: &Path,
+    state_id: &str,
+    event_id: i64,
+    text: &str,
+) -> Result<(), StoreError> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO conversation_messages(event_id, session_id, text)
+             VALUES (?1, ?2, ?3)",
+            params![event_id, state_id, text],
+        )
+        .map_err(rejected(path))?;
+    Ok(())
+}
+
+fn next_revision(revision: u64) -> Result<u64, StoreError> {
+    revision
+        .checked_add(1)
+        .filter(|revision| i64::try_from(*revision).is_ok())
+        .ok_or_else(|| StoreError::NotCommitted("state revision overflow".to_owned()))
+}
+
+/// Inserts records that are absent and rejects, before writing any, a record whose content
+/// differs from the stored or earlier staged value of its key.
+fn write_records(
+    transaction: &Transaction<'_>,
+    path: &Path,
+    state_id: &str,
+    records: &[StoreRecord],
+) -> Result<(), StoreError> {
+    let mut staged = HashMap::new();
+    for record in records {
+        let stored = transaction
+            .query_row(
+                "SELECT value FROM durable_records WHERE state_id = ?1 AND key = ?2",
+                params![state_id, record.key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(rejected(path))?;
+        let retained = stored
+            .as_deref()
+            .or_else(|| staged.get(record.key.as_str()).copied());
+        if retained.is_some_and(|value| value != record.value) {
+            return Err(StoreError::NotCommitted(format!(
+                "durability record {} has conflicting content",
+                record.key
+            )));
+        }
+        staged.insert(record.key.as_str(), record.value.as_str());
+    }
+    for record in records {
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO durable_records(state_id, key, value) VALUES (?1, ?2, ?3)",
+                params![state_id, record.key, record.value],
+            )
+            .map_err(rejected(path))?;
+    }
+    Ok(())
+}
+
+fn write_state(
+    transaction: &Transaction<'_>,
+    path: &Path,
+    state_id: &str,
+    revision: u64,
+    payload: &str,
+) -> Result<(), StoreError> {
+    transaction
+        .execute(
+            "INSERT INTO durable_states(state_id, revision, payload) VALUES (?1, ?2, ?3)\n\
+             ON CONFLICT(state_id) DO UPDATE SET\n\
+                 revision = excluded.revision, payload = excluded.payload",
+            params![state_id, sql_integer(revision, "state revision")?, payload],
+        )
+        .map_err(rejected(path))?;
+    Ok(())
+}
+
+/// Applies a summary only when its revision is newer than the stored one, and keeps a removed
+/// summary as a tombstone so that a delayed older one cannot resurrect the state.
+fn write_summary(
+    transaction: &Transaction<'_>,
+    path: &Path,
+    state_id: &str,
+    revision: u64,
+    summary: &SummaryUpdate,
+) -> Result<(), StoreError> {
+    let (live, summary) = match summary {
+        SummaryUpdate::Unchanged => return Ok(()),
+        SummaryUpdate::Set(summary) => (true, Some(summary)),
+        SummaryUpdate::Remove => (false, None),
+    };
+    let attributes = summary
+        .map(|summary| serde_json::to_string(&summary.attributes))
+        .transpose()
+        .map_err(not_committed)?;
+    transaction
+        .execute(
+            "INSERT INTO durable_summaries(\n\
+                 state_id, revision, live, scope, parent, title, preview, attributes,\n\
+                 updated_at_ms, value\n\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, COALESCE(?8, '{}'), ?9, COALESCE(?10, ''))\n\
+             ON CONFLICT(state_id) DO UPDATE SET\n\
+                 revision = excluded.revision, live = excluded.live, scope = excluded.scope,\n\
+                 parent = excluded.parent, title = excluded.title, preview = excluded.preview,\n\
+                 attributes = excluded.attributes, updated_at_ms = excluded.updated_at_ms,\n\
+                 value = excluded.value\n\
+             WHERE excluded.revision > durable_summaries.revision",
+            params![
+                state_id,
+                sql_integer(revision, "state revision")?,
+                live,
+                summary.and_then(|summary| summary.scope.as_deref()),
+                summary.and_then(|summary| summary.parent.as_deref()),
+                summary.and_then(|summary| summary.title.as_deref()),
+                summary.and_then(|summary| summary.preview.as_deref()),
+                attributes,
+                summary
+                    .map(|summary| sql_integer(summary.updated_at_ms, "summary time"))
+                    .transpose()?
+                    .unwrap_or_default(),
+                summary.map(|summary| summary.value.as_str()),
+            ],
+        )
+        .map_err(rejected(path))?;
+    Ok(())
+}
+
+/// A failure before the transaction commits: SQLite rolls the transaction back, so nothing
+/// changed.
+fn not_committed(error: impl Display) -> StoreError {
+    StoreError::NotCommitted(error.to_string())
+}
+
+fn rejected(path: &Path) -> impl Fn(rusqlite::Error) -> StoreError + '_ {
+    move |source| not_committed(query(path, source))
+}
+
+/// A failed commit may or may not have reached the database.
+fn uncertain(path: &Path) -> impl Fn(rusqlite::Error) -> StoreError + '_ {
+    move |source| StoreError::Backend(query(path, source).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{EventSequence, schema_exists};
@@ -210,7 +748,7 @@ mod tests {
     use std::{fs, path::Path, sync::Arc, thread};
     use tempfile::tempdir;
 
-    fn started(session_id: &str) -> Arc<TranscriptRecord> {
+    pub(super) fn started(session_id: &str) -> Arc<TranscriptRecord> {
         Arc::new(
             TranscriptRecord::from_local(
                 1,
@@ -231,7 +769,7 @@ mod tests {
         )
     }
 
-    fn prompt(sequence: u64, text: &str) -> Arc<TranscriptRecord> {
+    pub(super) fn prompt(sequence: u64, text: &str) -> Arc<TranscriptRecord> {
         Arc::new(
             TranscriptRecord::from_local(
                 sequence,
@@ -245,7 +783,7 @@ mod tests {
         )
     }
 
-    fn assistant(
+    pub(super) fn assistant(
         sequence: u64,
         kind: AgentEventKind,
         model_call_index: u32,
