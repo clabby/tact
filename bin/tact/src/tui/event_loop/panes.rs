@@ -26,8 +26,9 @@ use crate::{
         shell::ShellExecution,
         subagent_updates::{self, ForwardedSubagentUpdate},
         transcript::{
-            LocalEvent, SessionEnded, SessionOutcome, SessionStarted, ShellFinished, ShellId,
-            ShellStarted, TranscriptError, TranscriptJournal, TranscriptRecord, TurnId,
+            DurableTranscripts, LocalEvent, SessionEnded, SessionOutcome, SessionStarted,
+            ShellFinished, ShellId, ShellStarted, TranscriptError, TranscriptJournal,
+            TranscriptRecord, TurnId,
         },
         worker::{self, WorkerCommand},
     },
@@ -205,7 +206,9 @@ pub(super) struct PaneRuntime {
     pub(super) subagent_control: Subagents,
     /// Keeps the session addressable by `message_session` while the pane owns it.
     _live: LiveSessionRegistration,
-    _lock: SessionLock,
+    /// Shared with the task that awaits the journal writer, so the session stays locked until both
+    /// the pane's agent and the writer have stopped.
+    _lock: Arc<SessionLock>,
 }
 
 impl PaneRuntime {
@@ -356,6 +359,7 @@ pub(super) struct PaneReports {
 /// The registry of pane runtimes.
 pub(super) struct Panes {
     runtimes: HashMap<PaneId, PaneRuntime>,
+    transcripts: DurableTranscripts,
     agent_events: mpsc::UnboundedSender<ForwardedAgentEvent>,
     subagent_updates: mpsc::UnboundedSender<ForwardedSubagentUpdate>,
     writer_completions: mpsc::UnboundedSender<WriterCompletion>,
@@ -367,13 +371,14 @@ pub(super) struct Panes {
 }
 
 impl Panes {
-    pub(super) fn new() -> (Self, PaneReports) {
+    pub(super) fn new(transcripts: DurableTranscripts) -> (Self, PaneReports) {
         let (agent_events, agent_event_reports) = mpsc::unbounded_channel();
         let (subagent_updates, subagent_update_reports) = mpsc::unbounded_channel();
         let (writer_completions, writer_completion_reports) = mpsc::unbounded_channel();
         let (live_messages, live_message_reports) = mpsc::unbounded_channel();
         let panes = Self {
             runtimes: HashMap::new(),
+            transcripts,
             agent_events,
             subagent_updates,
             writer_completions,
@@ -431,7 +436,7 @@ impl Panes {
             origin,
         } = session;
         let (mut journal, writer) =
-            TranscriptJournal::open_at(config.path(), session_id, next_sequence)?;
+            TranscriptJournal::open_in(&self.transcripts, session_id, next_sequence)?;
         let writer_path = journal.path().to_path_buf();
         let persisted_transcript = journal.persistence_flag();
         journal.defer_start(SessionStarted {
@@ -448,12 +453,15 @@ impl Panes {
 
         let completions = self.writer_completions.clone();
         let completion_session_id = session_id.to_owned();
+        let lock = Arc::new(lock);
+        let writer_lock = Arc::clone(&lock);
         tokio::spawn(async move {
             let result = writer
                 .into_task()
                 .await
                 .map_err(TranscriptError::WriterTask)
                 .and_then(|result| result);
+            drop(writer_lock);
             drop(completions.send(WriterCompletion {
                 pane,
                 session_id: completion_session_id,

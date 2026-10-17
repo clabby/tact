@@ -10,14 +10,13 @@
 //! The schema is additive and leaves the format version unchanged, so older binaries keep reading
 //! and writing the same database.
 
-#![cfg_attr(
+#[cfg_attr(
     not(test),
-    allow(
+    expect(
         dead_code,
-        reason = "the transcript journal does not commit through the store yet"
+        reason = "Tact reads sessions through its own queries; this serves contract readers"
     )
 )]
-
 mod reader;
 mod store;
 
@@ -35,12 +34,14 @@ use nanocode::{
         StoredState, SummaryUpdate,
     },
 };
+#[cfg(test)]
+pub(crate) use reader::SqliteStateReader;
 use rusqlite::{
     Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params, params_from_iter,
     types::Value,
 };
 use std::{collections::HashMap, fmt::Display, io, path::Path, thread, time::Duration};
-use store::{HostBatch, HostRow};
+pub(crate) use store::{HostBatch, HostRow, SqliteStateStore};
 
 /// Creates the durability tables and the event sequence columns once per database. The checks
 /// repeat inside an immediate transaction so concurrent first opens add each column once.
@@ -227,6 +228,25 @@ pub(super) struct EventPosition {
 /// How long a writer waits before retrying a transaction that another connection's write lock
 /// blocked beyond the busy timeout.
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(50);
+
+/// Splits transcript records into a commit's contract events and the host rows that place them
+/// among streamed assistant drafts, which stay outside the contract.
+pub(crate) fn transcript_commit<'a>(
+    records: impl IntoIterator<Item = &'a TranscriptRecord>,
+) -> Result<(Vec<StoreEvent>, Vec<HostRow>), serde_json::Error> {
+    let mut events = Vec::new();
+    let mut rows = Vec::new();
+    for record in records {
+        let body = serde_json::to_string(record)?;
+        if record.agent_kind() == Some(AgentEventKind::AssistantDelta) {
+            rows.push(HostRow::Draft(body.into_bytes()));
+        } else {
+            events.push(store_event(record, body)?);
+            rows.push(HostRow::Event);
+        }
+    }
+    Ok((events, rows))
+}
 
 /// The contract event of a transcript record. `body` is the record's JSON encoding, which is
 /// stored verbatim; the other fields are derived from the record, so storage never duplicates them.

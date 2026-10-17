@@ -71,7 +71,7 @@ use crate::{
         session::{SessionLock, SessionStore},
         shell::ShellExecution,
         supported_reasoning_mode,
-        transcript::TranscriptError,
+        transcript::{DurableTranscripts, TranscriptError},
         worker::{self, WorkerEvent},
     },
     web::bridge::{self, WebStatus},
@@ -229,7 +229,7 @@ impl EventLoop {
                 worker::MemoryReviewState::fresh(memory_enabled),
             ),
         };
-        let (mut panes, pane_reports) = Panes::new();
+        let (mut panes, pane_reports) = Panes::new(DurableTranscripts::new(config.path())?);
         panes.open(
             PaneId::Main,
             0,

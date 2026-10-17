@@ -15,6 +15,9 @@ use crate::{
 };
 pub(crate) use conversation_search::{ConversationMatch, search_terms};
 use durable::EventPosition;
+#[cfg(test)]
+pub(crate) use durable::SqliteStateReader;
+pub(crate) use durable::{HostBatch, SqliteStateStore, transcript_commit};
 use nanocode::agent::events::AgentEventKind;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, ffi::ErrorCode, params,
@@ -38,6 +41,8 @@ pub(super) const BUSY_TIMEOUT: Duration = if cfg!(test) {
     Duration::from_secs(5)
 };
 const STATE_COMPRESSION_LEVEL: i32 = 3;
+/// Bounds the walk up a fork lineage, so a corrupt parent cycle cannot loop.
+const MAX_LINEAGE_DEPTH: u32 = 10_000;
 
 #[derive(Debug, Error)]
 pub(crate) enum StorageError {
@@ -229,6 +234,8 @@ impl SessionStorage {
             active_turns: HashMap::new(),
         }))
     }
+    /// Writes records outside the durability contract, as binaries that predate it do.
+    #[cfg(test)]
     pub(crate) fn append_records(
         &mut self,
         session_id: &str,
@@ -237,6 +244,7 @@ impl SessionStorage {
         self.append_records_and_resume_state(session_id, records, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn append_records_and_resume_state(
         &mut self,
         session_id: &str,
@@ -635,6 +643,28 @@ impl SessionStorage {
             inherit_title(&self.connection, &self.path, &session, &parent)?;
         }
         Ok(())
+    }
+
+    /// The root of the fork lineage that contains `session_id`, and the session's depth below it.
+    /// A session without a stored row is its own root.
+    pub(crate) fn lineage_root(&self, session_id: &str) -> Result<(String, u32), StorageError> {
+        let root = self
+            .connection
+            .query_row(
+                "WITH RECURSIVE chain(session_id, parent_session_id, depth) AS (
+                     SELECT session_id, parent_session_id, 0 FROM sessions WHERE session_id = ?1
+                     UNION ALL
+                     SELECT s.session_id, s.parent_session_id, c.depth + 1 FROM sessions s
+                     JOIN chain c ON s.session_id = c.parent_session_id
+                     WHERE c.depth < ?2
+                 )
+                 SELECT session_id, depth FROM chain ORDER BY depth DESC LIMIT 1",
+                params![session_id, MAX_LINEAGE_DEPTH],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
+            )
+            .optional()
+            .map_err(|source| query(&self.path, source))?;
+        Ok(root.unwrap_or_else(|| (session_id.to_owned(), 0)))
     }
 
     pub(crate) fn list_sessions(
