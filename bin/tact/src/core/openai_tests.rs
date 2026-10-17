@@ -421,7 +421,6 @@ async fn configured_api_key_and_model_tiers_reach_both_transports() {
 }
 
 #[tokio::test]
-#[ignore = "the pinned Nanocodex offers no model with Pro reasoning"]
 async fn configured_pro_mode_reaches_both_transports() {
     if run_isolated("core::openai_tests::configured_pro_mode_reaches_both_transports").await {
         return;
@@ -464,10 +463,7 @@ try {
         "text(await tools.submit_result({turn_token:1,output:null}));",
     );
     for transport in [Transport::Https, Transport::Websocket] {
-        for mode in [ReasoningMode::Standard, ReasoningMode::Pro]
-            .into_iter()
-            .filter(|mode| Model::Astra.supports_reasoning_mode((*mode).into()))
-        {
+        for mode in [ReasoningMode::Standard, ReasoningMode::Pro] {
             let directory = tempdir().unwrap();
             let config = fixture.config(&directory, Model::Astra, transport, Speed::Ultrafast);
             let text = fs::read_to_string(config.path()).unwrap();

@@ -1049,7 +1049,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "the pinned Nanocodex offers no model with Pro reasoning"]
     async fn root_reasoning_mode_bounds_requests_before_model_fallback() {
         let pro = || Some(json!("pro"));
         let standard = || Some(json!("standard"));
@@ -1083,7 +1082,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "the pinned Nanocodex offers no model with Pro reasoning"]
     async fn registered_parents_delegate_pro_only_from_their_actual_mode() {
         let pro = || Some(json!("pro"));
         let mut harness = ModeHarness::new(ReasoningMode::Pro);

@@ -2920,7 +2920,6 @@ fn effort_action_opens_the_selector_and_applies_the_selection() {
 }
 
 #[test]
-#[ignore = "the pinned Nanocodex offers no model with Pro reasoning"]
 fn pro_preference_does_not_change_the_running_session_mode() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.update(key(KeyCode::Char('/'), KeyModifiers::NONE));

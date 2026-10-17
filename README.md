@@ -337,10 +337,8 @@ It's the same model as Fable 5.1, so pick Fable if you don't have that access. E
 model supports effort from `low` through `max`, and a configured `agent.thinking` overrides the
 defaults. Resumed sessions keep the model they started with. Sessions on retired model IDs can't be resumed.
 
-Tact supports a **Pro** mode, independent of effort, on models whose Nanocodex catalog offers it.
-Open `/effort`, press `p` to toggle Pro, and press Enter to save. Pro applies to new sessions. The
-pinned Nanocodex release offers Pro on no model, so a configured Pro preference runs in standard
-mode.
+Astra, Sol, and Luna also support **Pro** mode, independent of effort. Open `/effort`, press `p` to toggle
+Pro, and press Enter to save. Pro applies to new sessions.
 
 ### Speed
 

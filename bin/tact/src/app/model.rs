@@ -143,7 +143,10 @@ mod tests {
             .iter()
             .find(|model| model.id == Model::Codex(CodexModel::Astra).as_str())
             .unwrap();
-        assert_eq!(astra.reasoning_modes, [ReasoningMode::Standard]);
+        assert_eq!(
+            astra.reasoning_modes,
+            [ReasoningMode::Standard, ReasoningMode::Pro]
+        );
         assert_eq!(astra.effective_speeds, Speed::ALL);
         assert!(!astra.effort_fixed_after_start);
 
