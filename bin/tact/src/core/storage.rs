@@ -1,6 +1,7 @@
 //! SQLite-backed V2 session persistence.
 
 mod conversation_search;
+mod durable;
 
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
@@ -67,6 +68,8 @@ pub(crate) enum StorageError {
     },
     #[error("failed to encode session data: {0}")]
     Encode(#[from] serde_json::Error),
+    #[error("the session event sequence exceeds the largest storable sequence")]
+    SequenceOverflow,
     #[error("failed to compress session data: {0}")]
     Compress(#[source] std::io::Error),
     #[error("failed to decode session data: {0}")]
@@ -178,6 +181,7 @@ impl SessionStorage {
         ensure_discovery_indexes(&connection, &path)?;
         conversation_search::ensure_schema(&connection, &path)?;
         ensure_titles(&connection, &path)?;
+        durable::ensure_schema(&connection, &path)?;
         set_private_file_permissions(&path)?;
         Ok(Self {
             path,
