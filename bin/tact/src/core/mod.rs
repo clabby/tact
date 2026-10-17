@@ -5,7 +5,6 @@
 //! browser (`web`) front-ends depend on it; it depends on neither of them.
 
 pub(crate) mod agent_events;
-pub(crate) mod catalog;
 mod claude;
 mod claude_context;
 pub(crate) mod context;

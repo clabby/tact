@@ -16,17 +16,12 @@ use super::{TranscriptError, TranscriptRecord};
 use crate::{
     app::config::{ReasoningEffort, Speed},
     core::{
-        catalog::{self, CatalogEntry},
         context::outbound_context_snapshot,
-        session::decode_resume_state,
-        storage::{SessionStorage, StorageError, StoredSession, database_path},
-        transcript::{LocalEvent, LocalKind, SessionStarted, UserSubmitted},
+        storage::{SessionStorage, database_path},
+        transcript::{LocalEvent, SessionStarted},
     },
 };
-use nanocode::{
-    Origin,
-    agent::events::{AgentEvent, AgentEventKind},
-};
+use nanocode::agent::events::{AgentEvent, AgentEventKind};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -278,7 +273,6 @@ fn write_journal(
     failure: &OnceLock<String>,
 ) -> Result<(), TranscriptError> {
     let mut storage = None;
-    let mut catalog = CatalogCursor::default();
     let mut batch = Vec::new();
     let mut completions = Vec::new();
     loop {
@@ -298,14 +292,7 @@ fn write_journal(
                 JournalCommand::Flush(completion) => completions.push(completion),
             }
         }
-        match write_batch(
-            &mut storage,
-            &mut catalog,
-            &mut batch,
-            config_path,
-            session_id,
-            persisted,
-        ) {
+        match write_batch(&mut storage, &mut batch, config_path, session_id, persisted) {
             Ok(()) => {
                 for completion in completions.drain(..) {
                     let _ = completion.send(());
@@ -328,77 +315,8 @@ fn write_journal(
     Ok(())
 }
 
-/// What the session catalog needs from records the writer has already committed.
-#[derive(Default)]
-struct CatalogCursor {
-    started: Option<SessionStarted>,
-    prompt: Option<String>,
-    stored: Option<StoredSession>,
-}
-
-impl CatalogCursor {
-    fn observe(&mut self, record: &TranscriptRecord) -> Result<(), TranscriptError> {
-        match record.local_kind() {
-            Some(LocalKind::SessionStarted) => {
-                self.started = Some(record.decode_payload().map_err(StorageError::from)?);
-            }
-            Some(LocalKind::UserSubmitted) => {
-                let submitted: UserSubmitted =
-                    record.decode_payload().map_err(StorageError::from)?;
-                self.prompt = Some(submitted.text);
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Records the resume point in the session catalog.
-    fn commit(
-        &mut self,
-        storage: &SessionStorage,
-        config_path: &Path,
-        session_id: &str,
-        sequence: u64,
-        encoded: &[u8],
-    ) -> Result<(), TranscriptError> {
-        let state = decode_resume_state(session_id, encoded).map_err(Box::new)?;
-        if self.started.is_none() && self.stored.is_none() {
-            self.stored = storage.session(session_id)?;
-        }
-        let entry = match (&self.started, &self.stored) {
-            (Some(started), _) => Some(CatalogEntry {
-                session_id,
-                parent_session_id: started.parent_session_id.as_deref(),
-                origin: Origin::Fork,
-                workspace: &started.workspace,
-                title: self.prompt.as_deref(),
-                created_at_ms: None,
-            }),
-            (None, Some(stored)) => Some(CatalogEntry {
-                session_id,
-                parent_session_id: stored.parent_session_id.as_deref(),
-                origin: Origin::Fork,
-                workspace: &stored.workspace,
-                title: Some(stored.preview.as_str()).filter(|preview| !preview.trim().is_empty()),
-                created_at_ms: Some(stored.started_at_unix_ms),
-            }),
-            (None, None) => None,
-        };
-        catalog::commit(
-            config_path,
-            entry.as_ref(),
-            session_id,
-            &format!("tact-{sequence}"),
-            self.prompt.as_deref(),
-            &state,
-        )?;
-        Ok(())
-    }
-}
-
 fn write_batch(
     storage: &mut Option<SessionStorage>,
-    catalog: &mut CatalogCursor,
     batch: &mut Vec<PendingWrite>,
     config_path: &Path,
     session_id: &str,
@@ -415,21 +333,17 @@ fn write_batch(
         .iter()
         .map(|pending| Arc::clone(&pending.record))
         .collect::<Vec<_>>();
-    storage.append_records(session_id, &records)?;
+    let resume_state = batch
+        .iter()
+        .rev()
+        .find_map(|pending| pending.resume_state.as_deref());
+    if let Some(resume_state) = resume_state {
+        storage.append_records_and_resume_state(session_id, &records, Some(resume_state))?;
+    } else {
+        storage.append_records(session_id, &records)?;
+    }
     persisted.store(true, Ordering::Release);
-    let resume_state = batch.iter().rev().find_map(|pending| {
-        pending
-            .resume_state
-            .clone()
-            .map(|state| (pending.record.sequence(), state))
-    });
-    for record in &records {
-        catalog.observe(record)?;
-    }
     batch.clear();
-    if let Some((sequence, encoded)) = resume_state {
-        catalog.commit(storage, config_path, session_id, sequence, &encoded)?;
-    }
     Ok(())
 }
 
