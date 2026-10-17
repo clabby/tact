@@ -49,7 +49,6 @@ use nanocodex::{
     AgentEvents, HarnessModel as Model, Nanocodex, NanocodexError,
     ReasoningMode as NativeReasoningMode, Tools,
 };
-use nanocodex_decisions::{DecisionTool, openai::OpenAiDecisions};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -190,11 +189,6 @@ fn base_tools(config: &Config) -> Result<Tools> {
     if let Some(mcp) = mcp_provider(config)? {
         tools = tools.provider(mcp);
     }
-    if let Some(key) = config.decisions().resolve_api_key(config.auth())? {
-        // The Decisions client retains a non-zeroizing copy of the key.
-        let decisions = OpenAiDecisions::new(key.key().expose_secret());
-        tools = tools.tool(DecisionTool::new(decisions));
-    }
     Ok(tools.build().map_err(NanocodexError::from)?)
 }
 
@@ -243,7 +237,7 @@ pub(crate) fn configured_memory_store(
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfiguredAgent, base_tools, claude, configured_memory_store};
+    use super::{ConfiguredAgent, configured_memory_store};
     use crate::app::{
         config::{Config, ConfigOverrides},
         error::{Error, RuntimeError},
@@ -254,7 +248,6 @@ mod tests {
             ResponseError,
             tower::{ResponsesAttempt, ResponsesServiceConfig, ResponsesServiceResponse},
         },
-        tools::runtime::ToolRuntime,
     };
     use std::{
         fs,
@@ -376,41 +369,6 @@ mod tests {
             error,
             Error::Runtime(RuntimeError::WorkspaceNotDirectory(path)) if path == file
         ));
-    }
-
-    #[test]
-    fn decisions_tool_reaches_codex_and_claude_agents_only_when_enabled() {
-        let directory = tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
-        for enabled in [false, true] {
-            fs::write(
-                &config_path,
-                format!(
-                    "[openai]\napi_key = 'decisions-fixture-key'\n[agent]\nweb_search = false\nimage_generation = false\n[decisions]\nenabled = {enabled}\n"
-                ),
-            )
-            .unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
-            }
-            let config = Config::load(ConfigOverrides {
-                path: Some(config_path.clone()),
-                auth_file: Some(directory.path().join("auth.json")),
-                workspace: Some(directory.path().to_path_buf()),
-                ..ConfigOverrides::default()
-            })
-            .unwrap();
-
-            let tools = base_tools(&config).unwrap();
-            let codex = ToolRuntime::new_with_tools(directory.path(), None, None, &tools);
-            let claude = claude::tool_runtime(&config, directory.path(), &tools).unwrap();
-            for runtime in [codex, claude] {
-                let specs = serde_json::to_string(&runtime.model_specs("session")).unwrap();
-                assert_eq!(specs.contains("decide"), enabled, "{specs}");
-            }
-        }
     }
 
     #[tokio::test]

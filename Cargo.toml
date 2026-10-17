@@ -41,7 +41,6 @@ miette = { version = "7.6.0", features = ["fancy"] }
 minisign-verify = "0.2.5"
 nanocodex = { git = "https://github.com/clabby/nanocodex", rev = "7de6f676e1fa5229d348692e8851dbbbcccc0cc4", features = ["claude"] }
 nanocodex-agent = { git = "https://github.com/clabby/nanocodex", rev = "7de6f676e1fa5229d348692e8851dbbbcccc0cc4" }
-nanocodex-decisions = { git = "https://github.com/clabby/nanocodex", rev = "7de6f676e1fa5229d348692e8851dbbbcccc0cc4" }
 png = "0.18.1"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30.2"

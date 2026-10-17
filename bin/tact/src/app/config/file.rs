@@ -38,7 +38,6 @@ pub(super) struct ConfigFile {
     pub(super) skills: SkillsConfigFile,
     pub(super) memory: MemoryConfigFile,
     pub(super) subagents: SubagentsConfigFile,
-    pub(super) decisions: DecisionsConfigFile,
     pub(super) web: WebConfigFile,
     pub(super) tui: TuiConfigFile,
     pub(super) theme: Theme,
@@ -164,12 +163,6 @@ pub(super) struct SubagentsConfigFile {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub(super) struct DecisionsConfigFile {
-    pub(super) enabled: Option<bool>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
 pub(super) struct WebConfigFile {
     pub(super) enabled: Option<bool>,
     pub(super) bind: Option<IpAddr>,
@@ -221,7 +214,6 @@ impl ConfigFile {
     pub(super) fn has_credentials(&self) -> bool {
         !self.memory.remote.bearer_token.is_empty()
             || self.openai.api_key.is_some()
-            || self.openai.decisions_api_key.is_some()
             || self.claude.api_key.is_some()
             || self.claude.glasswing_api_key.is_some()
     }
@@ -272,7 +264,6 @@ impl ConfigFile {
     fn discard_credentials(&mut self) {
         self.memory.remote.bearer_token.zeroize();
         drop(self.openai.api_key.take());
-        drop(self.openai.decisions_api_key.take());
         drop(self.claude.api_key.take());
         drop(self.claude.glasswing_api_key.take());
     }
@@ -374,7 +365,6 @@ mod tests {
 
         for (section, key) in [
             ("openai", "api_key"),
-            ("openai", "decisions_api_key"),
             ("claude", "api_key"),
             ("claude", "glasswing_api_key"),
         ] {
@@ -418,7 +408,6 @@ mod tests {
     fn provider_config_keys_require_verifiable_file_privacy() {
         for (section, key) in [
             ("openai", "api_key"),
-            ("openai", "decisions_api_key"),
             ("claude", "api_key"),
             ("claude", "glasswing_api_key"),
         ] {

@@ -2878,20 +2878,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nanocodex-decisions"
-version = "0.6.7"
-source = "git+https://github.com/clabby/nanocodex?rev=7de6f676e1fa5229d348692e8851dbbbcccc0cc4#7de6f676e1fa5229d348692e8851dbbbcccc0cc4"
-dependencies = [
- "async-trait",
- "nanocodex-oai-tools",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
-]
-
-[[package]]
 name = "nanocodex-durability"
 version = "0.6.7"
 source = "git+https://github.com/clabby/nanocodex?rev=7de6f676e1fa5229d348692e8851dbbbcccc0cc4#7de6f676e1fa5229d348692e8851dbbbcccc0cc4"
@@ -5249,7 +5235,6 @@ dependencies = [
  "minisign-verify",
  "nanocodex",
  "nanocodex-agent",
- "nanocodex-decisions",
  "png",
  "pulldown-cmark",
  "qrcode",

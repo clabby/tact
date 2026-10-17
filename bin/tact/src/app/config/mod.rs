@@ -11,7 +11,6 @@
 //! remembers its overrides and environment so it can be reloaded from the same source.
 
 mod agent;
-mod decisions;
 mod edit;
 mod file;
 mod mcp;
@@ -31,7 +30,6 @@ use crate::app::{
     theme::Theme,
 };
 pub(crate) use agent::AgentConfig;
-pub(crate) use decisions::DecisionsConfig;
 pub(crate) use edit::{ConfigDocument, Setting};
 use file::ConfigFile;
 pub(crate) use mcp::McpServerConfig;
@@ -73,7 +71,6 @@ pub(crate) struct Config {
     skills: SkillsConfig,
     memory: MemoryConfig,
     subagents: SubagentsConfig,
-    decisions: DecisionsConfig,
     web: WebConfig,
     tui: TuiConfig,
     theme: Theme,
@@ -250,10 +247,6 @@ impl Config {
         let agent = AgentConfig::resolve(&overrides, file.agent, workspace.clone());
         file.claude.ensure_model_enabled(agent.model())?;
         file.claude.publish_glasswing();
-        let decisions = DecisionsConfig::new(
-            file.decisions.enabled.unwrap_or(false),
-            file.openai.decisions_api_key.as_ref().map(Arc::clone),
-        );
 
         Ok(Self {
             path,
@@ -271,7 +264,6 @@ impl Config {
             skills,
             memory,
             subagents: SubagentsConfig::new(file.subagents),
-            decisions,
             web: WebConfig::new(file.web, overrides.web)?,
             tui: TuiConfig::new(file.tui),
             theme: file.theme,
@@ -363,10 +355,6 @@ impl Config {
 
     pub(crate) const fn subagents(&self) -> &SubagentsConfig {
         &self.subagents
-    }
-
-    pub(crate) const fn decisions(&self) -> &DecisionsConfig {
-        &self.decisions
     }
 
     pub(crate) const fn web(&self) -> &WebConfig {
@@ -479,16 +467,14 @@ mod tests {
                 "skills",
                 "memory",
                 "subagents",
-                "decisions",
                 "web",
                 "tui",
                 "theme",
             ],
         );
         assert_table_fields(&rendered["auth"], &["mode", "file"]);
-        assert_table_fields(&rendered["openai"], &["api_key", "decisions_api_key"]);
+        assert_table_fields(&rendered["openai"], &["api_key"]);
         assert_eq!(rendered["openai"]["api_key"].as_str(), Some(""));
-        assert_eq!(rendered["openai"]["decisions_api_key"].as_str(), Some(""));
         assert_table_fields(
             &rendered["claude"],
             &[
@@ -539,7 +525,6 @@ mod tests {
             &["endpoint", "namespace", "bearer_token", "workspace_roots"],
         );
         assert_table_fields(&rendered["subagents"], &["enabled"]);
-        assert_table_fields(&rendered["decisions"], &["enabled"]);
         assert_table_fields(
             &rendered["web"],
             &[
