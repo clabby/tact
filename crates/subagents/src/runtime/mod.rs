@@ -296,6 +296,7 @@ impl Registry {
                 turn: TurnSlot::default(),
                 output_validator: validator,
                 last_output: None,
+                terminal: None,
             },
         )?;
         self.changed();
@@ -366,7 +367,7 @@ impl Registry {
             };
             session.turn.finish();
             if !matches!(session.status, AgentStatus::Closing | AgentStatus::Closed) {
-                session.status = AgentStatus::Failed { error };
+                session.set_status(AgentStatus::Failed { error });
             }
             session.status.clone()
         };
@@ -392,7 +393,7 @@ impl Registry {
             let Some(submitted_output) = session.turn.finish() else {
                 return;
             };
-            if matches!(session.status, AgentStatus::Closing | AgentStatus::Closed) {
+            let status = if matches!(session.status, AgentStatus::Closing | AgentStatus::Closed) {
                 session.status.clone()
             } else {
                 match result {
@@ -402,8 +403,8 @@ impl Registry {
                         error: error.to_string(),
                     },
                 }
-            }
-            .clone_into(&mut session.status);
+            };
+            session.set_status(status);
             session.status.clone()
         };
         self.send(root_session_id, AgentUpdate::Status { id, status });

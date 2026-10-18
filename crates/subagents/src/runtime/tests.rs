@@ -505,6 +505,7 @@ fn test_session(id: AgentId, session_id: &str, parent: Option<AgentId>) -> Child
         turn: TurnSlot::default(),
         output_validator: test_contract().validator,
         last_output: None,
+        terminal: None,
     }
 }
 
@@ -1424,4 +1425,56 @@ async fn root_sessions_cannot_access_each_others_subagents() {
 
     assert!(registry.summaries("fork", &[main.id]).is_err());
     assert!(registry.reserve("fork", Some(main.id)).is_err());
+}
+
+#[tokio::test]
+async fn wait_returns_a_turn_that_ended_before_a_queued_turn_started() {
+    let (registry, _control, _updates) = super::channel(32);
+    let reservation = registry.reserve("main").await.unwrap();
+    let id = reservation.id;
+    let mut session = test_session(id, "child-session", None);
+    let token = session.turn.start().unwrap();
+    session.status = AgentStatus::Running;
+    registry
+        .state
+        .lock()
+        .await
+        .insert(
+            reservation.root_session_id.clone(),
+            id,
+            session.descriptor.session_id.clone(),
+            session,
+        )
+        .unwrap();
+    registry
+        .submit_result("child-session", token, json!({ "report": "done" }))
+        .await
+        .unwrap();
+
+    let ids = [id];
+    let mut waiting = Box::pin(registry.wait("main", &ids, Duration::from_secs(1)));
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+
+    // A queued turn starts before the waiter observes the preceding terminal status.
+    registry
+        .harness_turn_finished(
+            "main",
+            id,
+            Ok(nanocodex::TurnResult::from_backend(
+                None,
+                String::new(),
+                None,
+            )),
+        )
+        .await;
+    registry.harness_turn_started("main", id).await.unwrap();
+
+    let (summaries, timed_out) = waiting.await.unwrap();
+    assert!(!timed_out, "status: {:?}", summaries[0].status);
+    assert_eq!(
+        summaries[0].status,
+        AgentStatus::Completed {
+            output: json!({ "report": "done" })
+        }
+    );
 }

@@ -27,11 +27,42 @@ pub(crate) struct ChildSession {
     pub(crate) turn: TurnSlot,
     pub(crate) output_validator: Validator,
     pub(crate) last_output: Option<Value>,
+    /// Latest wait-terminal outcome and the number of such outcomes so far.
+    ///
+    /// The live status can move on to `Running` when a queued message starts
+    /// another turn, so waiters compare the count against the one they saw at
+    /// the start to learn that a turn ended in the meantime.
+    pub(crate) terminal: Option<(u64, AgentStatus)>,
 }
 
 impl ChildSession {
     pub(crate) fn summary(&self) -> AgentSummary {
-        let last_output = if matches!(self.status, AgentStatus::Completed { .. }) {
+        self.summary_with_status(self.status.clone())
+    }
+
+    pub(crate) fn terminal_count(&self) -> u64 {
+        self.terminal.as_ref().map_or(0, |(count, _)| *count)
+    }
+
+    /// Summarizes the agent, reporting the latest terminal outcome instead of
+    /// the live status when a turn has ended since `seen` outcomes.
+    pub(crate) fn summary_since(&self, seen: u64) -> AgentSummary {
+        match &self.terminal {
+            Some((count, status)) if *count > seen => self.summary_with_status(status.clone()),
+            _ => self.summary(),
+        }
+    }
+
+    /// Sets the status, recording it when it ends a turn.
+    pub(crate) fn set_status(&mut self, status: AgentStatus) {
+        if status.is_wait_terminal() {
+            self.terminal = Some((self.terminal_count() + 1, status.clone()));
+        }
+        self.status = status;
+    }
+
+    fn summary_with_status(&self, status: AgentStatus) -> AgentSummary {
+        let last_output = if matches!(status, AgentStatus::Completed { .. }) {
             None
         } else {
             self.last_output.clone()
@@ -43,7 +74,7 @@ impl ChildSession {
             role: self.descriptor.role.clone(),
             task: self.descriptor.task.clone(),
             parent_agent_id: self.descriptor.parent,
-            status: self.status.clone(),
+            status,
             last_output,
         }
     }
@@ -313,6 +344,54 @@ impl RegistryState {
             self.authorize(session_id, id)?;
         }
         self.summaries_in_scope(root_session_id, ids)
+    }
+
+    /// Returns each agent's terminal-outcome count, for use with [`Self::summaries_since`].
+    pub(super) fn terminal_counts(
+        &self,
+        session_id: &str,
+        ids: &[AgentId],
+    ) -> Result<Vec<u64>, SubagentError> {
+        let root_session_id = self.root_session_id(session_id);
+        for &id in ids {
+            self.authorize(session_id, id)?;
+        }
+        let scope = self
+            .scopes
+            .get(root_session_id)
+            .ok_or(SubagentError::StateDisappeared(RegistryEntry::Scope))?;
+        ids.iter()
+            .map(|id| {
+                scope
+                    .sessions
+                    .get(id)
+                    .map(ChildSession::terminal_count)
+                    .ok_or(SubagentError::UnknownAgent(*id))
+            })
+            .collect()
+    }
+
+    pub(super) fn summaries_since(
+        &self,
+        session_id: &str,
+        ids: &[AgentId],
+        seen: &[u64],
+    ) -> Result<Vec<AgentSummary>, SubagentError> {
+        let root_session_id = self.root_session_id(session_id);
+        let scope = self
+            .scopes
+            .get(root_session_id)
+            .ok_or(SubagentError::StateDisappeared(RegistryEntry::Scope))?;
+        ids.iter()
+            .zip(seen)
+            .map(|(id, &seen)| {
+                scope
+                    .sessions
+                    .get(id)
+                    .map(|session| session.summary_since(seen))
+                    .ok_or(SubagentError::UnknownAgent(*id))
+            })
+            .collect()
     }
 
     pub(super) fn summaries_in_scope(

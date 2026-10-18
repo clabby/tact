@@ -209,8 +209,9 @@ impl Registry {
         }
         let mut revision = self.revision.subscribe();
         let deadline = Instant::now() + duration;
-        {
-            let summaries = self.state.lock().await.summaries(session_id, ids)?;
+        let seen = {
+            let state = self.state.lock().await;
+            let summaries = state.summaries(session_id, ids)?;
             let terminal = summaries
                 .iter()
                 .filter(|summary| summary.status.is_wait_terminal())
@@ -224,9 +225,14 @@ impl Registry {
                     .collect();
                 return Err(SubagentError::AlreadyTerminal { terminal, active });
             }
-        }
+            state.terminal_counts(session_id, ids)?
+        };
         loop {
-            let summaries = self.state.lock().await.summaries(session_id, ids)?;
+            let summaries = self
+                .state
+                .lock()
+                .await
+                .summaries_since(session_id, ids, &seen)?;
             if summaries
                 .iter()
                 .any(|summary| summary.status.is_wait_terminal())
@@ -234,8 +240,16 @@ impl Registry {
                 return Ok((summaries, false));
             }
             if timeout_at(deadline, revision.changed()).await.is_err() {
-                let summaries = self.state.lock().await.summaries(session_id, ids)?;
-                return Ok((summaries, true));
+                let summaries = self
+                    .state
+                    .lock()
+                    .await
+                    .summaries_since(session_id, ids, &seen)?;
+                // An outcome can land between the deadline and this read.
+                let timed_out = !summaries
+                    .iter()
+                    .any(|summary| summary.status.is_wait_terminal());
+                return Ok((summaries, timed_out));
             }
         }
     }
