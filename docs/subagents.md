@@ -215,7 +215,7 @@ the message until the session is live, and rejects it if the resume fails (locke
 missing, outside the workspace family, or the live session limit). It then turns the message into a worker steer for the
 target's pane and reports the worker's verdict back as `steered` or `started`. Composer steers use low queue IDs and
 these messages count down from the maximum, so the two never share an ID. `find_sessions` reports
-`live` from the session's lock file, which any process holds, and `messageable` from the registry.
+`live` from the session's lock file, which any process holds.
 
 ## Waiting and lifecycle
 

@@ -3,7 +3,6 @@
 use crate::{
     app::config::ReasoningEffort,
     core::{
-        live_sessions,
         session::SessionLock,
         storage::{DecodedStoredRecord, SessionStorage, StorageError, StoredSession},
         transcript::TranscriptRecord,
@@ -72,8 +71,6 @@ struct FoundSession {
     effort: ReasoningEffort,
     /// Whether some Tact process currently has the session open.
     live: bool,
-    /// Whether the session is open in this process, so `message_session` can reach it.
-    messageable: bool,
     preview: String,
 }
 
@@ -290,7 +287,7 @@ impl Tool for FindSessionsTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             "find_sessions",
-            "Finds bounded recent Tact V2 sessions before using read_session. It excludes the caller's current session, reports parent session IDs for lineage checks, each session's model and effort, whether it is live in any Tact process, and whether it is messageable (already open in this process). Optionally scopes to one exact workspace, to live sessions only, and to ASCII-case-insensitive literal patterns matched against stored user prompts. Omit workspace only for cross-workspace discovery. Pass next_cursor back only when another page is needed.",
+            "Finds bounded recent Tact V2 sessions before using read_session. It excludes the caller's current session, reports parent session IDs for lineage checks, each session's model and effort, and whether it is live in any Tact process. Optionally scopes to one exact workspace, to live sessions only, and to ASCII-case-insensitive literal patterns matched against stored user prompts. Omit workspace only for cross-workspace discovery. Pass next_cursor back only when another page is needed.",
             find_input_schema(),
         )
         .with_output_schema(find_output_schema())
@@ -378,7 +375,6 @@ fn found_session(session: StoredSession, config_path: &Path) -> FoundSession {
         preview.push('…');
     }
     let live = SessionLock::is_held(config_path, &session.session_id);
-    let messageable = live_sessions::is_live_here(&session.session_id);
     FoundSession {
         session_id: session.session_id,
         parent_session_id: session.parent_session_id,
@@ -388,7 +384,6 @@ fn found_session(session: StoredSession, config_path: &Path) -> FoundSession {
         model: session.model,
         effort: session.effort,
         live,
-        messageable,
         preview,
     }
 }
@@ -682,13 +677,9 @@ fn find_output_schema() -> Value {
                             "type": "boolean",
                             "description": "Whether some Tact process currently has the session open."
                         },
-                        "messageable": {
-                            "type": "boolean",
-                            "description": "Whether the session is already open in this process. message_session opens a stored session that is not."
-                        },
                         "preview": { "type": "string" }
                     },
-                    "required": ["session_id", "parent_session_id", "workspace", "started_at_ms", "updated_at_ms", "model", "effort", "live", "messageable", "preview"],
+                    "required": ["session_id", "parent_session_id", "workspace", "started_at_ms", "updated_at_ms", "model", "effort", "live", "preview"],
                     "additionalProperties": false
                 }
             },

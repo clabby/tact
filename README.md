@@ -458,8 +458,8 @@ internal prompt.
 ### Messaging other sessions
 
 Every session has the `find_sessions`, `read_session`, and `message_session` tools. `find_sessions` reports
-each session's model and effort, whether it is `live` (open in any Tact process, detected through
-its session lock), and whether it is `messageable` (already open in this process). `live_only` limits a search to
+each session's model and effort, and whether it is `live` (open in any Tact process, detected through
+its session lock). `live_only` limits a search to
 live sessions. A session meant to watch and orchestrate others can combine them: find live
 sessions, read their transcripts, and steer them.
 

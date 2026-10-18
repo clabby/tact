@@ -34,11 +34,6 @@ fn registry() -> MutexGuard<'static, Hosts> {
     LIVE_SESSIONS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Whether the session is open in a pane of this process.
-pub(crate) fn is_live_here(session_id: &str) -> bool {
-    registry().contains_key(session_id)
-}
-
 /// Keeps a session addressable by `message_session` until dropped.
 pub(crate) struct LiveSessionRegistration {
     session_id: String,
@@ -110,7 +105,7 @@ impl Tool for MessageSessionTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             "message_session",
-            "Sends a message to another session by ID. Only sessions open in this Tact process, or stored sessions recorded in this Tact's workspace (or another checkout of its repository), can be messaged; find_sessions and read_session can still look at any workspace. A stored session that is not open is opened first, unless another Tact process has it open (find_sessions reports `live` and `messageable`). Use this tool only when the user explicitly asks you to message or steer another session; never use it on your own initiative. The message always steers: it joins the target's running turn at its next safe boundary, or starts a new turn when the target is idle. Use it to watch and orchestrate other sessions; read their progress with read_session. Delivery is not a reply, and the target is told which session sent the message.",
+            "Sends a message to another session in this workspace by ID, opening it first if needed. Use this tool only when the user explicitly asks you to message or steer another session; never use it on your own initiative. The message steers the target's running turn, or starts a turn when it is idle. Delivery is not a reply; read their progress with read_session.",
             json!({
                 "type": "object",
                 "properties": {
