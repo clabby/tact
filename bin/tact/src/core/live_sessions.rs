@@ -105,7 +105,7 @@ impl Tool for MessageSessionTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             "message_session",
-            "Sends a message to another session in this workspace by ID, opening it first if needed. Use this tool only when the user explicitly asks you to message or steer another session; never use it on your own initiative. The message steers the target's running turn, or starts a turn when it is idle. Delivery is not a reply; read their progress with read_session.",
+            "Sends a message to another session by ID. A session open in this Tact process is always reachable; a stored one is opened first, but only if it was recorded in this workspace (or another checkout of its repository). Use this tool only when the user explicitly asks you to message or steer another session; never use it on your own initiative. The message steers the target's running turn, or starts a turn when it is idle. Delivery is not a reply; read their progress with read_session.",
             json!({
                 "type": "object",
                 "properties": {

@@ -115,7 +115,7 @@ impl EventLoop {
     /// it was recorded in this Tact's workspace (or another checkout of its repository). The
     /// message is delivered when the resumed session is live and rejected if it cannot be.
     fn open_message_target(&mut self, message: LiveSessionMessage) {
-        if let Some(pane) = self.opens.pane_opening_for_message(&message.target) {
+        if let Some(pane) = self.opens.pane_resuming(&message.target) {
             self.opens.await_message(pane, message);
             return;
         }

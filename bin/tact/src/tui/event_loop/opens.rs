@@ -69,6 +69,8 @@ pub(super) enum OpenStart {
 pub(super) struct PendingOpens {
     tasks: JoinSet<OpenTask>,
     replies: HashMap<PaneId, CommandReply>,
+    /// The stored session each pane is resuming, until its open finishes.
+    resuming: HashMap<PaneId, String>,
     messages: HashMap<PaneId, Vec<LiveSessionMessage>>,
 }
 
@@ -162,6 +164,7 @@ impl PendingOpens {
             error => CommandError::Failed(error.to_string()),
         })?;
         let pane = app.begin_open("Resuming session…")?;
+        self.resuming.insert(pane, session.clone());
         let agent = config.agent();
         let (effort, speed) = (agent.thinking(), agent.speed());
         let preferred_reasoning_mode = agent.reasoning_mode();
@@ -189,14 +192,11 @@ impl PendingOpens {
         self.messages.entry(pane).or_default().push(message);
     }
 
-    /// The pane that is opening `session` for waiting messages, if any.
-    pub(super) fn pane_opening_for_message(&self, session: &str) -> Option<PaneId> {
-        self.messages.iter().find_map(|(&pane, messages)| {
-            messages
-                .iter()
-                .any(|message| message.target == session)
-                .then_some(pane)
-        })
+    /// The pane that is resuming `session`, if any.
+    pub(super) fn pane_resuming(&self, session: &str) -> Option<PaneId> {
+        self.resuming
+            .iter()
+            .find_map(|(&pane, resuming)| (resuming == session).then_some(pane))
     }
 
     /// The messages waiting for `pane`'s session, which is now live.
@@ -211,6 +211,7 @@ impl PendingOpens {
 
     /// Answers the web caller waiting for `pane`, if there is one.
     fn reply(&mut self, pane: PaneId, result: std::result::Result<Reply, CommandError>) {
+        self.resuming.remove(&pane);
         if let Err(error) = &result {
             for message in self.take_messages(pane) {
                 drop(
@@ -618,5 +619,29 @@ mod tests {
                 crate::core::session::SessionError::OutsideWorkspace { .. }
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_pending_resume_is_found_by_session_until_it_finishes() {
+        let directory = tempdir().unwrap();
+        let config = workspace_config(directory.path());
+        let mut app = app(&config, directory.path());
+        let mut opens = PendingOpens::default();
+
+        let started = opens.start(
+            OpenSpec::Resume {
+                session: "stored".to_owned(),
+            },
+            &mut app,
+            &config,
+        );
+
+        let Ok(OpenStart::Pending(pane)) = started else {
+            panic!("expected pending session")
+        };
+        assert_eq!(opens.pane_resuming("stored"), Some(pane));
+        assert_eq!(opens.pane_resuming("other"), None);
+        opens.reply(pane, Err(CommandError::Failed("gone".to_owned())));
+        assert_eq!(opens.pane_resuming("stored"), None);
     }
 }
