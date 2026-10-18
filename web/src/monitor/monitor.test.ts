@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { Store } from "../core/store";
 import type { ModelCatalog, MonitorState, SessionActivity, SessionNote, SessionSummary } from "../core/wire";
@@ -8,8 +8,8 @@ let Monitor: typeof MonitorClass;
 let dom: Window;
 let frames: FrameRequestCallback[] = [];
 let monitor: MonitorClass | null = null;
-/** The canvases drawn on since the set was last cleared. */
-const drawn = new Set<HTMLCanvasElement>();
+/** The globals this file replaces, restored afterwards because later test files share the process. */
+let replaced = new Map<string, PropertyDescriptor | undefined>();
 
 /** Stands in for the browser's ResizeObserver, which happy-dom provides without layout. */
 class FakeResizeObserver {
@@ -28,10 +28,8 @@ class FakeResizeObserver {
 beforeAll(async () => {
   dom = new Window();
   // The running marker draws on a canvas, which happy-dom does not implement.
-  dom.HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement) {
-    return { clearRect: () => drawn.add(this), beginPath() {}, arc() {}, fill() {} };
-  } as never;
-  Object.assign(globalThis, {
+  dom.HTMLCanvasElement.prototype.getContext = (() => ({ clearRect() {}, beginPath() {}, arc() {}, fill() {} })) as never;
+  const globals = {
     document: dom.document,
     // The actions menu places itself inside the viewport and closes when the window resizes.
     window: dom,
@@ -44,8 +42,17 @@ beforeAll(async () => {
     matchMedia: (query: string) => dom.matchMedia(query),
     requestAnimationFrame: (callback: FrameRequestCallback) => frames.push(callback),
     ResizeObserver: FakeResizeObserver,
-  });
+  };
+  replaced = new Map(Object.keys(globals).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  Object.assign(globalThis, globals);
   ({ Monitor } = await import("./monitor"));
+});
+
+afterAll(() => {
+  for (const [key, descriptor] of replaced) {
+    if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+    else delete (globalThis as Record<string, unknown>)[key];
+  }
 });
 
 afterEach(() => {
@@ -238,17 +245,17 @@ test("the filter hides the other groups' cards without detaching them, and says 
   expect(titles(root)).toHaveLength(3);
 });
 
-test("a running card filtered away and back keeps its marker spinning", () => {
+test("a running card filtered away stays on the page, hidden, so its marker keeps spinning", () => {
   const { root, card } = mount();
   const choose = (label: string) => [...root.querySelectorAll<HTMLElement>(".monitor-filter .segment")].find((button) => text(button)!.startsWith(label))!.click();
-  const sphere = card("busy").querySelector("canvas")!;
+  const busy = card("busy");
+  const sphere = busy.querySelector("canvas")!;
 
+  // The markers' shared animation clock forgets a canvas once it leaves the page.
   choose("Idle");
-  flush();
+  expect([busy.hidden, sphere.isConnected]).toEqual([true, true]);
   choose("All");
-  drawn.clear();
-  flush();
-  expect(drawn.has(sphere)).toBe(true);
+  expect([busy.hidden, busy.querySelector("canvas") === sphere, sphere.isConnected]).toEqual([false, true, true]);
 });
 
 test("a tile's health gauge fills its band's segments, names the score and its change, and marks a large move", () => {
