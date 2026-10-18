@@ -1,8 +1,9 @@
 //! Cross-session messaging between the live sessions one process runs.
 //!
-//! A pane's session registers here while it is open. The `message_session` tool looks the target
-//! up in this process-wide registry and forwards the message to the front-end event loop, which
-//! owns the pane and decides how the worker delivers it. Every delivery steers: it joins the
+//! A pane's session registers here while it is open. The `message_session` tool forwards the
+//! message to the front-end event loop through the target's registration, or through any
+//! other registration when the target is not open. The event loop owns the panes: it resumes a stored target and
+//! decides how the worker delivers the message. Every delivery steers: it joins the
 //! target's running turn, or starts a turn with the message when the target is idle. Sessions
 //! live in other processes are visible through `SessionLock` but cannot be messaged.
 
@@ -33,7 +34,7 @@ fn registry() -> MutexGuard<'static, Hosts> {
     LIVE_SESSIONS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Whether the session is open in a pane of this process, which makes it messageable.
+/// Whether the session is open in a pane of this process.
 pub(crate) fn is_live_here(session_id: &str) -> bool {
     registry().contains_key(session_id)
 }
@@ -87,7 +88,7 @@ pub(crate) enum Delivery {
 
 #[derive(Debug, Error)]
 pub(crate) enum DeliveryError {
-    #[error("session {0} is not live in this Tact process")]
+    #[error("session {0} cannot be reached because no session host is running")]
     NotLive(String),
     #[error("the message was rejected: {0}")]
     Rejected(String),
@@ -109,13 +110,13 @@ impl Tool for MessageSessionTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             "message_session",
-            "Sends a message to another session that is live in this Tact process (find_sessions reports `messageable`). Use this tool only when the user explicitly asks you to message or steer another session; never use it on your own initiative. The message always steers: it joins the target's running turn at its next safe boundary, or starts a new turn when the target is idle. Use it to watch and orchestrate other sessions; read their progress with read_session. Delivery is not a reply, and the target is told which session sent the message.",
+            "Sends a message to another session by ID. Only sessions open in this Tact process, or stored sessions recorded in this Tact's workspace (or another checkout of its repository), can be messaged; find_sessions and read_session can still look at any workspace. A stored session that is not open is opened first, unless another Tact process has it open (find_sessions reports `live` and `messageable`). Use this tool only when the user explicitly asks you to message or steer another session; never use it on your own initiative. The message always steers: it joins the target's running turn at its next safe boundary, or starts a new turn when the target is idle. Use it to watch and orchestrate other sessions; read their progress with read_session. Delivery is not a reply, and the target is told which session sent the message.",
             json!({
                 "type": "object",
                 "properties": {
                     "session_id": {
                         "type": "string",
-                        "description": "The live target session, from find_sessions."
+                        "description": "The target session, from find_sessions."
                     },
                     "message": {
                         "type": "string",
@@ -149,7 +150,15 @@ impl Tool for MessageSessionTool {
         if target == sender {
             return Err(io::Error::other("a session cannot message itself").into());
         }
-        let host = registry().get(&target).cloned();
+        // Every pane of a process reports to one event loop, so any registration reaches it when
+        // the target is not open. Subagents have no registration of their own.
+        let host = {
+            let hosts = registry();
+            hosts
+                .get(&target)
+                .or_else(|| hosts.values().next())
+                .cloned()
+        };
         let host = host.ok_or_else(|| DeliveryError::NotLive(target.clone()))?;
         let (reply, delivered) = oneshot::channel();
         host.send(LiveSessionMessage {

@@ -290,7 +290,7 @@ impl Tool for FindSessionsTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             "find_sessions",
-            "Finds bounded recent Tact V2 sessions before using read_session. It excludes the caller's current session, reports parent session IDs for lineage checks, each session's model and effort, whether it is live in any Tact process, and whether it is messageable (live in this process). Optionally scopes to one exact workspace, to live sessions only, and to ASCII-case-insensitive literal patterns matched against stored user prompts. Omit workspace only for cross-workspace discovery. Pass next_cursor back only when another page is needed.",
+            "Finds bounded recent Tact V2 sessions before using read_session. It excludes the caller's current session, reports parent session IDs for lineage checks, each session's model and effort, whether it is live in any Tact process, and whether it is messageable (already open in this process). Optionally scopes to one exact workspace, to live sessions only, and to ASCII-case-insensitive literal patterns matched against stored user prompts. Omit workspace only for cross-workspace discovery. Pass next_cursor back only when another page is needed.",
             find_input_schema(),
         )
         .with_output_schema(find_output_schema())
@@ -684,7 +684,7 @@ fn find_output_schema() -> Value {
                         },
                         "messageable": {
                             "type": "boolean",
-                            "description": "Whether the session is live in this process, so message_session can reach it."
+                            "description": "Whether the session is already open in this process. message_session opens a stored session that is not."
                         },
                         "preview": { "type": "string" }
                     },

@@ -433,6 +433,8 @@ impl ResumeState {
 pub(crate) enum SessionError {
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error("session {session_id} was not recorded in the workspace of this Tact")]
+    OutsideWorkspace { session_id: String },
     #[error("no resumable state exists for session {session_id}")]
     MissingCheckpoint { session_id: String },
     #[error("session {session_id} cannot be resumed: {reason}")]
