@@ -975,7 +975,7 @@ mod tests {
         let (status, body) = reply;
 
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["protocol_version"], 10);
+        assert_eq!(body["protocol_version"], 11);
         assert_eq!(body["live"], 3);
         assert_eq!(body["running"], 2);
     }

@@ -31,6 +31,7 @@ test("switching views closes the drawer and starts on the chat", () => {
   const next = layoutReducer(layout({ drawerOpen: true }), { type: "view", view: "review" });
   expect(next).toMatchObject({ view: "review", drawerOpen: false });
   expect(layoutReducer(next, { type: "view", view: "review" })).toBe(next);
+  expect(layoutReducer(layout({ drawerOpen: true }), { type: "view", view: "monitor" })).toMatchObject({ view: "monitor", drawerOpen: false });
 });
 
 test("escape closes only the drawer", () => {

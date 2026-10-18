@@ -11,6 +11,12 @@ use thiserror::Error;
 pub(crate) enum ConfigError {
     #[error("[web] public_url and tailscale are mutually exclusive; set only one of them")]
     WebExposureConflict,
+    #[error("[web.monitor] model: {0}")]
+    MonitorModel(String),
+    #[error("[web.monitor] thinking: unknown reasoning effort `{0}`")]
+    MonitorThinking(String),
+    #[error("[web.monitor] interval_seconds must be at least {minimum}")]
+    MonitorInterval { minimum: u64 },
     #[error("Claude models require [claude] enabled = true in the configuration")]
     ClaudeDisabled,
     #[error(

@@ -8,6 +8,7 @@ pub(crate) mod agent_events;
 mod claude;
 mod claude_context;
 pub(crate) mod context;
+pub(crate) mod direct;
 pub(crate) mod extensions;
 mod headless;
 mod instructions;

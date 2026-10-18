@@ -534,8 +534,15 @@ mod tests {
                 "public_url",
                 "tailscale",
                 "max_live_sessions",
+                "monitor",
             ],
         );
+        assert_table_fields(
+            &rendered["web"]["monitor"],
+            &["enabled", "model", "thinking", "interval_seconds"],
+        );
+        assert_eq!(rendered["web"]["monitor"]["model"].as_str(), Some(""));
+        assert_eq!(rendered["web"]["monitor"]["thinking"].as_str(), Some(""));
         assert_table_fields(&rendered["tui"], &["mouse_scroll_lines"]);
         assert_table_fields(&rendered["theme"], &["mode", "light", "dark"]);
         let palette_fields = [

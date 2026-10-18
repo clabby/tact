@@ -181,12 +181,134 @@ export type SessionSnapshot = {
 
 export type ToolDetail = { arguments: unknown; result: unknown | null; metadata: unknown | null };
 
+/**
+ * What one live session is doing, as the hub derives it from the projection it already holds.
+ * Every live session has one, so the Monitor can watch sessions other than the active one.
+ */
+export type SessionActivity = {
+  session: string;
+  status: TransientStatus | null;
+  /** How long the oldest running turn had run when the server sent this, or null when none runs. */
+  turn_elapsed_ns: number | null;
+  /** The newest visible prompt, at most 600 characters. */
+  prompt: { text: string; at_ms: number | null } | null;
+  /**
+   * The newest complete assistant message. A long one keeps its head and tail joined by "\n…\n",
+   * so a closing question stays visible.
+   */
+  message: { text: string; commentary: boolean; at_ms: number | null } | null;
+  /** The newest top-level tool call; `summary` is the same one-liner tool rows carry. */
+  tool: { name: string; summary: string; state: ToolState; at_ms: number | null; outcome: ToolOutcome | null } | null;
+  /** Top-level tool calls since the newest prompt; `patches` counts applied patches. */
+  turn: { tools: number; failed: number; patches: number };
+  /** The newest plan: completed steps, all steps, and the step in progress. */
+  plan: { done: number; total: number; current: string | null } | null;
+  /** The transient error, else a newest entry that is an error; at most 600 characters. */
+  error: string | null;
+  /** Subagents in the roster: `running` counts pending and running ones. */
+  agents: { running: number; total: number };
+  /** Prompts waiting in the queue. */
+  queued: number;
+  context: ContextBudget | null;
+};
+
+/** The monitor's verdict on one session's open task, from the most to the least urgent. */
+export type Attention = "needs_input" | "stuck" | "off_track" | "ready" | "ok";
+
+export type SessionNote = {
+  session: string;
+  attention: Attention;
+  /** What the agent is trying to accomplish, as a short task phrase; null before it has a task. */
+  goal: string | null;
+  /**
+   * How well the work is going toward its goal, 0 to 100, judged from evidence of progress rather
+   * than activity; null before the session has a task. Independent of `attention`: a session
+   * can be going well and still wait on the user.
+   */
+  health: number | null;
+  /** The session's health in the previous successful check, set by the server; null when it had none. */
+  previous_health: number | null;
+  /** How the monitor model chose to show the session's status, most important first, at most 4. */
+  blocks: StatusBlock[];
+  /** The evidence for any attention other than "ok"; null when it is "ok". */
+  reason: string | null;
+  /** A message the user could send to the agent to steer or unblock it. */
+  suggestion: string | null;
+};
+
+/** The colour a block's text or value carries; neutral is plain text. */
+export type BlockTone = "neutral" | "success" | "warning" | "danger";
+
+/** Where a live block's data comes from: the browser fills it from the session's activity in real time. */
+export type LiveSource = "message" | "plan" | "tool" | "prompt" | "agents" | "error";
+
+/**
+ * One piece of a session's status, composed by the monitor model from a fixed vocabulary. All
+ * text is plain; the browser renders every field as text.
+ */
+export type StatusBlock =
+  /** One or two sentences: a finding, a blocker, a risk, a result. */
+  | { type: "text"; text: string; tone: BlockTone }
+  /** Countable progress toward the goal, e.g. 12 of 40 files migrated. */
+  | { type: "progress"; label: string; done: number; total: number; unit: string | null }
+  /** A measured value, optionally with the previous one, e.g. failing tests 3 -> 0. */
+  | { type: "metric"; label: string; value: string; previous: string | null; tone: BlockTone }
+  /** A planned sequence in planned order, with each item's state. */
+  | { type: "checklist"; title: string | null; items: ChecklistItem[] }
+  /** Recent steps and whether they worked, newest first. */
+  | { type: "history"; items: HistoryItem[] }
+  /** What the agent is asking the developer, with the choices it offered, if any. */
+  | { type: "question"; text: string; options: string[] }
+  /** A short literal: a command, an assertion, an error line, an output; at most 4 lines. */
+  | { type: "code"; label: string | null; text: string }
+  /** Live data the browser fills in real time. */
+  | { type: "live"; source: LiveSource };
+
+export type ChecklistItem = { label: string; state: "done" | "active" | "pending" | "failed" | "skipped" };
+
+/** One step toward a session's goal and whether it worked, as the monitor model judged it. */
+export type HistoryItem = {
+  action: string;
+  outcome: "worked" | "failed" | "running" | "unclear";
+  /** The evidence in a few words, e.g. "3 of 41 failed" or "exit 0". */
+  detail: string | null;
+};
+
+/** The monitor model's last successful check of the live sessions. */
+export type MonitorCheck = {
+  /** When the sessions were read for this check (Unix ms). */
+  as_of_ms: number;
+  /** When the model's reply arrived (Unix ms). */
+  generated_at_ms: number;
+  /** The model id, labelled through the models catalog. */
+  model: string;
+  /** Notes for sessions that are still live, in the check's order. */
+  sessions: SessionNote[];
+};
+
+export type MonitorState = {
+  /** "disabled": turned off in the configuration; "unavailable": no usable credentials for the model. */
+  availability: "ready" | "disabled" | "unavailable";
+  /** Why the monitor model is disabled or unavailable, as a sentence for display. */
+  detail: string | null;
+  /** The model is checking the sessions. */
+  running: boolean;
+  /** The last check's failure, cleared by the next success. */
+  error: string | null;
+  interval_seconds: number;
+  /** The last successful check, or null before the first. */
+  check: MonitorCheck | null;
+};
+
 /** A local text file for the viewer. `path` is canonical, so the file's own links resolve against it. */
 export type LocalDocument = { path: string; text: string };
 
 export type StreamEvents = {
   hello: { protocol_version: number; client_hint: string };
   live: { active: string | null; sessions: SessionSummary[] };
+  /** Every live session's activity, in the order of `live`. */
+  activity: { sessions: SessionActivity[] };
+  monitor: MonitorState;
   history_changed: Record<string, never>;
   active: { session: string };
   snapshot: SessionSnapshot;
@@ -212,7 +334,7 @@ export type StreamEvent = {
 }[StreamEventName];
 
 export const STREAM_EVENTS = [
-  "hello", "live", "active", "snapshot", "entry", "status", "turn_timer", "queue", "draft", "settings", "context",
+  "hello", "live", "activity", "monitor", "active", "snapshot", "entry", "status", "turn_timer", "queue", "draft", "settings", "context",
   "subagents", "subagent_entry", "closed", "workspace", "history_changed",
 ] as const satisfies readonly StreamEventName[];
 

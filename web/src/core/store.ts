@@ -3,8 +3,10 @@ import type {
   DraftImage,
   DraftOrigin,
   Effort,
+  MonitorState,
   QueuedPrompt,
   ReasoningMode,
+  SessionActivity,
   SessionSnapshot,
   SessionSummary,
   Speed,
@@ -47,6 +49,12 @@ export type SessionView = TranscriptData & {
   agents: Map<number, TranscriptData>;
 };
 
+/**
+ * A live session's activity. `turnStartedAt` is when its oldest running turn started, on the
+ * `performance.now()` clock, as for the active session's view.
+ */
+export type ActivityView = SessionActivity & { turnStartedAt: number | null };
+
 export type AppState = {
   connection: Connection;
   protocolVersion: number | null;
@@ -55,6 +63,10 @@ export type AppState = {
   active: string | null;
   session: SessionView | null;
   workspace: string | null;
+  /** What every live session is doing, by session id. */
+  activity: Map<string, ActivityView>;
+  /** The monitor model as last reported by the server, or null before any report. */
+  monitor: MonitorState | null;
 };
 
 /**
@@ -64,7 +76,7 @@ export type AppState = {
 export type Change =
   | {
     type: "connection" | "live" | "history" | "session" | "status" | "queue" | "draft" | "settings" | "context"
-      | "subagents";
+      | "subagents" | "activity" | "monitor";
   }
   /** Files changed in `checkout`, or in the session's workspace when it is null. */
   | { type: "workspace"; checkout: string | null }
@@ -74,7 +86,10 @@ export type Change =
 export type Listener = (changes: readonly Change[], state: AppState) => void;
 
 export function initialState(): AppState {
-  return { connection: "connecting", protocolVersion: null, live: [], active: null, session: null, workspace: null };
+  return {
+    connection: "connecting", protocolVersion: null, live: [], active: null, session: null, workspace: null,
+    activity: new Map(), monitor: null,
+  };
 }
 
 export function transcriptData(entries: readonly WireEntry[]): TranscriptData {
@@ -149,6 +164,15 @@ export function reduce(state: AppState, event: StreamEvent, now = performance.no
     case "active":
       state.active = event.data.session;
       return [{ type: "live" }];
+    case "activity":
+      state.activity = new Map(event.data.sessions.map((activity) => [
+        activity.session,
+        { ...activity, turnStartedAt: turnStartedAt(activity.turn_elapsed_ns, now) },
+      ]));
+      return [{ type: "activity" }];
+    case "monitor":
+      state.monitor = event.data;
+      return [{ type: "monitor" }];
     case "snapshot":
       state.session = sessionView(event.data, now);
       state.active = event.data.session;
@@ -157,6 +181,7 @@ export function reduce(state: AppState, event: StreamEvent, now = performance.no
       state.live = state.live.filter((summary) => summary.id !== event.data.session);
       if (state.active === event.data.session) state.active = null;
       const changes: Change[] = [{ type: "live" }];
+      if (state.activity.delete(event.data.session)) changes.push({ type: "activity" });
       if (state.session?.id === event.data.session) {
         state.session = null;
         changes.push({ type: "session" });

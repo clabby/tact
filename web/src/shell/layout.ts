@@ -2,8 +2,11 @@
 
 export type Viewport = "phone" | "tablet" | "desktop";
 
-/** The two full-width views of the main area: the conversation, and the review of its changes. */
-export type View = "chat" | "review";
+/**
+ * The full-width views of the main area: the active session's conversation, the review of its
+ * changes, and the Monitor over every live session.
+ */
+export type View = "chat" | "review" | "monitor";
 
 export type Layout = {
   viewport: Viewport;

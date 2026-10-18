@@ -16,12 +16,19 @@
 //! have not been sent yet, and then receives those changes again at the next flush. Browsers
 //! upsert entries by id and revision, so the repeated events are harmless.
 //!
+//! Every session's activity (see [`super::activity`]) goes out as one list whenever any of them
+//! changed. A client that connects while the others hold an older list makes the next flush send
+//! the list again, so the newcomer cannot be left with a list that the others never received.
+//!
 //! The projection sits behind one synchronous lock. Every critical section is short and never
 //! awaits; events are serialized inside it so they reflect a single consistent state.
 
-use super::wire::{
-    Frame, PROTOCOL_VERSION, SessionSnapshot, SessionSummary, SummaryState, ToolDetail, WireDraft,
-    WireEntry, WireImage, WireQueued, WireStatus, frame, origin_label,
+use super::{
+    activity::{ActivityCache, ActivitySource, SessionActivity},
+    wire::{
+        Frame, PROTOCOL_VERSION, SessionSnapshot, SessionSummary, SummaryState, ToolDetail,
+        WireDraft, WireEntry, WireImage, WireQueued, WireStatus, frame, origin_label,
+    },
 };
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
@@ -78,6 +85,14 @@ pub(super) struct Subscription {
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct TooManyStreams;
 
+/// One live session as a reader outside the hub sees it.
+pub(super) struct SessionView<'a> {
+    pub(super) summary: SessionSummary,
+    pub(super) model: &'a TranscriptModel,
+    pub(super) queued: usize,
+    pub(super) roster: &'a SubagentRoster,
+}
+
 #[derive(Default)]
 struct State {
     sessions: Vec<Live>,
@@ -107,11 +122,15 @@ struct Live {
     closed: CancellationToken,
     /// The transcript changed shape (an entry vanished or moved) and clients need a new snapshot.
     reshaped: bool,
+    activity: ActivityCache,
 }
 
-/// The state of the active session as clients last saw it.
+/// What every connected client has been told: the summaries, the activity list, and the state of
+/// the active session.
 struct Sent {
     summaries: Vec<SessionSummary>,
+    /// `None` when some client may hold a different list, so the next flush sends it.
+    activity: Option<Vec<SessionActivity>>,
     active: Option<ActiveSent>,
 }
 
@@ -291,7 +310,27 @@ impl Hub {
             .any(|live| live.info.id == session)
     }
 
-    /// Registers a client and queues the connect sequence: `hello`, `live`, `active`, `snapshot`.
+    /// Runs `read` over every live session, in the order of the `live` event, under the hub's
+    /// lock, which also guards the stream. `read` must be quick and must not block.
+    pub(super) fn read_sessions<R>(&self, read: impl FnOnce(&[SessionView<'_>]) -> R) -> R {
+        let mut state = self.state();
+        let summaries: Vec<_> = state.sessions.iter_mut().map(Live::summary).collect();
+        let views: Vec<_> = state
+            .sessions
+            .iter()
+            .zip(summaries)
+            .map(|(live, summary)| SessionView {
+                summary,
+                model: &live.model,
+                queued: live.queue.len(),
+                roster: &live.roster,
+            })
+            .collect();
+        read(&views)
+    }
+
+    /// Registers a client and queues the connect sequence: `hello`, `live`, `activity`,
+    /// `active`, `snapshot`.
     pub(super) fn subscribe(&self) -> Result<Subscription, TooManyStreams> {
         let client = self.shared.next_client.fetch_add(1, Ordering::Relaxed);
         let (sender, frames) = mpsc::channel(CLIENT_BUFFER);
@@ -300,6 +339,7 @@ impl Hub {
         if state.clients.len() >= MAX_STREAMS {
             return Err(TooManyStreams);
         }
+        let activity = state.activity_list();
         let queued = [
             Some(frame(
                 "hello",
@@ -309,6 +349,12 @@ impl Hub {
                 },
             )),
             Some(frame("live", &state.live_event())),
+            Some(frame(
+                "activity",
+                &ActivityEvent {
+                    sessions: &activity,
+                },
+            )),
             state.active_event(),
             state.active_snapshot(),
         ];
@@ -319,6 +365,10 @@ impl Hub {
         }
         if state.clients.is_empty() {
             state.sent = Some(state.baseline());
+        } else if let Some(sent) = &mut state.sent
+            && sent.activity.as_ref() != Some(&activity)
+        {
+            sent.activity = None;
         }
         state.clients.push(sender);
         Ok(Subscription { frames })
@@ -364,6 +414,11 @@ struct Hello {
 struct LiveEvent {
     active: Option<String>,
     sessions: Vec<SessionSummary>,
+}
+
+#[derive(Serialize)]
+struct ActivityEvent<'a> {
+    sessions: &'a [SessionActivity],
 }
 
 #[derive(Serialize)]
@@ -456,6 +511,16 @@ impl Live {
 
     fn visible(&self) -> impl Iterator<Item = &TranscriptEntry> {
         visible(&self.model)
+    }
+
+    fn activity(&mut self) -> &SessionActivity {
+        self.activity.get(&ActivitySource {
+            session: &self.info.id,
+            model: &self.model,
+            roster: &self.roster,
+            queued: self.queue.len(),
+            context: self.context,
+        })
     }
 
     fn snapshot(&mut self) -> SessionSnapshot {
@@ -599,6 +664,7 @@ impl State {
                     agents: HashMap::new(),
                     closed: CancellationToken::new(),
                     reshaped: false,
+                    activity: ActivityCache::default(),
                 };
                 match self.live_mut(&live.info.id) {
                     Some(existing) => {
@@ -618,6 +684,7 @@ impl State {
                 };
                 if let Some(inherited) = inherited {
                     live.model = inherited;
+                    live.activity.reset();
                 }
                 apply_record(live, &record);
             }
@@ -659,6 +726,7 @@ impl State {
             Publication::Queue { session, items } => {
                 if let Some(live) = self.live_mut(&session) {
                     live.queue = items;
+                    live.activity.invalidate();
                 }
             }
             Publication::Settings {
@@ -678,11 +746,13 @@ impl State {
             Publication::Context { session, budget } => {
                 if let Some(live) = self.live_mut(&session) {
                     live.context = Some(budget);
+                    live.activity.invalidate();
                 }
             }
             Publication::Subagents { session, roster } => {
                 if let Some(live) = self.live_mut(&session) {
                     live.roster = roster;
+                    live.activity.invalidate();
                 }
             }
             Publication::SubagentRecord {
@@ -719,6 +789,13 @@ impl State {
         }
     }
 
+    fn activity_list(&mut self) -> Vec<SessionActivity> {
+        self.sessions
+            .iter_mut()
+            .map(|live| live.activity().clone())
+            .collect()
+    }
+
     fn active_event(&self) -> Option<Frame> {
         self.active
             .as_deref()
@@ -734,9 +811,11 @@ impl State {
     /// What a client holds right after the connect sequence.
     fn baseline(&mut self) -> Sent {
         let summaries = self.sessions.iter_mut().map(Live::summary).collect();
+        let activity = Some(self.activity_list());
         let active = self.active.clone();
         Sent {
             summaries,
+            activity,
             active: active.and_then(|active| self.live_mut(&active).map(|live| live.active_sent())),
         }
     }
@@ -778,6 +857,17 @@ impl State {
                 },
             ));
             sent.summaries = summaries;
+        }
+
+        let activity = self.activity_list();
+        if sent.activity.as_ref() != Some(&activity) {
+            self.broadcast(&frame(
+                "activity",
+                &ActivityEvent {
+                    sessions: &activity,
+                },
+            ));
+            sent.activity = Some(activity);
         }
 
         let Some(active) = active else {
@@ -828,8 +918,10 @@ fn apply_message(live: &mut Live, update: AgentMessageUpdate) {
         let change = live
             .model
             .apply_message(MessageSender::Root, update.clone());
+        live.activity.invalidate();
         if change.removed.is_some() {
             live.reshaped = true;
+            live.activity.reset();
         }
     }
     let mut previous = None;
@@ -851,8 +943,10 @@ fn apply_message(live: &mut Live, update: AgentMessageUpdate) {
 fn apply_record(live: &mut Live, record: &Arc<TranscriptRecord>) {
     let change = live.model.apply(record);
     live.last_activity_unix_ms = live.last_activity_unix_ms.max(record.recorded_at_unix_ms());
+    live.activity.invalidate();
     if change.removed.is_some() {
         live.reshaped = true;
+        live.activity.reset();
     }
 }
 
@@ -1116,6 +1210,55 @@ mod tests {
         )
     }
 
+    fn agent_record(sequence: u64, kind: AgentEventKind, payload: Value) -> Arc<TranscriptRecord> {
+        Arc::new(TranscriptRecord::from_agent(
+            sequence,
+            1_000 + sequence,
+            AgentEvent {
+                protocol_version: 1,
+                request_id: Arc::from("request"),
+                seq: sequence,
+                kind,
+                payload: to_raw_value(&payload).unwrap().into(),
+            },
+        ))
+    }
+
+    fn tool_call(sequence: u64, id: &str, tool: &str, arguments: Value) -> Arc<TranscriptRecord> {
+        agent_record(
+            sequence,
+            AgentEventKind::ToolCall,
+            json!({"call_id": id, "tool": tool, "arguments": arguments}),
+        )
+    }
+
+    fn tool_result(sequence: u64, id: &str, tool: &str, result: Value) -> Arc<TranscriptRecord> {
+        agent_record(
+            sequence,
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": id, "tool": tool, "status": "completed", "duration_ns": 1,
+                "result": result, "structured_result": result, "metadata": null,
+            }),
+        )
+    }
+
+    /// The activity of `session` in the last `activity` event.
+    fn activity_of(events: &[(String, Value)], session: &str) -> Value {
+        let (_, data) = events
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "activity")
+            .expect("an activity event");
+        data["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|activity| activity["session"] == session)
+            .expect("the session's activity")
+            .clone()
+    }
+
     #[test]
     fn attached_images_are_served_as_decoded_raster_bytes_only() {
         let mut model = TranscriptModel::default();
@@ -1169,7 +1312,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn connecting_yields_hello_live_active_and_a_snapshot() {
+    async fn connecting_yields_hello_live_activity_active_and_a_snapshot() {
         let fixture = fixture();
         fixture.open("s1", Some("Fix the flaky test\nwith details"));
         fixture.activate("s1");
@@ -1178,13 +1321,28 @@ mod tests {
         let mut subscription = fixture.hub.subscribe().unwrap();
         let events = drain(&mut subscription);
 
-        assert_eq!(names(&events), ["hello", "live", "active", "snapshot"]);
-        assert_eq!(events[0].1["protocol_version"], 10);
+        assert_eq!(
+            names(&events),
+            ["hello", "live", "activity", "active", "snapshot"]
+        );
+        assert_eq!(events[0].1["protocol_version"], 11);
         let live = &events[1].1;
         assert_eq!(live["active"], "s1");
         assert_eq!(live["sessions"][0]["title"], "Fix the flaky test");
         assert_eq!(live["sessions"][0]["state"], "idle");
-        let snapshot = &events[3].1;
+        let activity = &events[2].1["sessions"][0];
+        assert_eq!(activity["session"], "s1");
+        assert_eq!(
+            activity["prompt"],
+            json!({"text": "Fix the flaky test\nwith details", "at_ms": 1_001})
+        );
+        assert_eq!(activity["turn_elapsed_ns"], Value::Null);
+        assert_eq!(
+            activity["turn"],
+            json!({"tools": 0, "failed": 0, "patches": 0})
+        );
+        assert_eq!(activity["agents"], json!({"running": 0, "total": 0}));
+        let snapshot = &events[4].1;
         assert_eq!(snapshot["session"], "s1");
         assert_eq!(snapshot["entries"][0]["kind"], "user");
         assert_eq!(
@@ -1350,9 +1508,16 @@ mod tests {
         settle().await;
 
         let events = drain(&mut subscription);
-        assert_eq!(names(&events), ["closed", "live"]);
+        assert_eq!(names(&events), ["closed", "live", "activity"]);
         assert_eq!(events[0].1, json!({"session": "s2"}));
         assert_eq!(events[1].1["sessions"].as_array().unwrap().len(), 1);
+        let activity = events[2].1["sessions"].as_array().unwrap();
+        assert_eq!(
+            activity.len(),
+            1,
+            "a closed session leaves the activity list"
+        );
+        assert_eq!(activity[0]["session"], "s1");
         assert!(token.is_cancelled());
         assert!(fixture.hub.closed_token("s2").is_none());
     }
@@ -1391,7 +1556,7 @@ mod tests {
 
         let mut reconnected = fixture.hub.subscribe().unwrap();
         let events = drain(&mut reconnected);
-        assert_eq!(events[3].1["draft"]["rev"], CLIENT_BUFFER);
+        assert_eq!(events[4].1["draft"]["rev"], CLIENT_BUFFER);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1420,8 +1585,8 @@ mod tests {
 
         let mut subscription = fixture.hub.subscribe().unwrap();
         let events = drain(&mut subscription);
-        assert_eq!(events[3].1["entries"][0]["text"], "unseen");
-        assert_eq!(events.len(), 4);
+        assert_eq!(events[4].1["entries"][0]["text"], "unseen");
+        assert_eq!(events.len(), 5);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1455,7 +1620,7 @@ mod tests {
 
         let mut subscription = fixture.hub.subscribe().unwrap();
         let events = drain(&mut subscription);
-        let entries = &events[3].1["entries"];
+        let entries = &events[4].1["entries"];
         assert_eq!(entries[0]["text"], "before the fork");
         assert_eq!(entries[1]["kind"], "forked_from");
         assert_eq!(entries[1]["session"], "parent");
@@ -1502,7 +1667,7 @@ mod tests {
 
         let mut subscription = fixture.hub.subscribe().unwrap();
         let events = drain(&mut subscription);
-        let entries = &events[3].1["entries"];
+        let entries = &events[4].1["entries"];
         assert_eq!(entries[1]["kind"], "error");
         assert_eq!(entries[1]["message"], rejection);
     }
@@ -1725,5 +1890,395 @@ mod tests {
                 .unwrap();
             assert_eq!(entries.len(), 1, "agent {agent}");
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tools_in_a_background_session_update_its_activity() {
+        let fixture = fixture();
+        fixture.open("s1", None);
+        fixture.open("s2", Some("Run the tests"));
+        fixture.activate("s1");
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        settle().await;
+        drain(&mut subscription);
+        let publish = |record| {
+            fixture.publish(Publication::Record {
+                session: "s2".into(),
+                record,
+            });
+        };
+
+        publish(tool_call(
+            2,
+            "c1",
+            "exec_command",
+            json!({"cmd": "cargo test"}),
+        ));
+        settle().await;
+        let events = drain(&mut subscription);
+        assert!(
+            events
+                .iter()
+                .all(|(name, _)| name == "live" || name == "activity"),
+            "a background session's transcript is not streamed: {:?}",
+            names(&events)
+        );
+        let running = activity_of(&events, "s2");
+        assert_eq!(running["status"]["kind"], "tool");
+        assert_eq!(running["tool"]["name"], "exec_command");
+        assert_eq!(running["tool"]["summary"], "cargo test");
+        assert_eq!(running["tool"]["state"], "running");
+        assert_eq!(running["tool"]["outcome"], Value::Null);
+        assert_eq!(running["prompt"]["text"], "Run the tests");
+
+        publish(tool_result(
+            3,
+            "c1",
+            "exec_command",
+            json!({"output": "test result: FAILED. 1 passed; 1 failed\n", "exit_code": 101}),
+        ));
+        settle().await;
+        let finished = activity_of(&drain(&mut subscription), "s2");
+        assert_eq!(finished["tool"]["state"], "failed");
+        assert_eq!(finished["tool"]["outcome"]["exit_code"], 101);
+        assert_eq!(finished["tool"]["outcome"]["summary"], "1 passed, 1 failed");
+        assert_eq!(
+            finished["turn"],
+            json!({"tools": 1, "failed": 1, "patches": 0})
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_new_turn_counts_its_own_tools_and_still_shows_the_previous_results() {
+        let fixture = fixture();
+        fixture.open("s1", Some("Plan and patch"));
+        fixture.activate("s1");
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        settle().await;
+        drain(&mut subscription);
+        let plan = json!({"plan": [
+            {"step": "Read", "status": "completed"},
+            {"step": "Patch the parser", "status": "in_progress"},
+            {"step": "Test", "status": "pending"},
+        ]});
+        let records = [
+            tool_call(2, "c1", "update_plan", plan),
+            tool_result(3, "c1", "update_plan", json!("ok")),
+            tool_call(
+                4,
+                "c2",
+                "apply_patch",
+                json!("*** Begin Patch\n*** Add File: a.rs\n+a\n*** End Patch"),
+            ),
+            tool_result(5, "c2", "apply_patch", json!("Done")),
+            agent_record(
+                6,
+                AgentEventKind::AssistantMessage,
+                json!({"model_call_index": 0, "phase": null, "text": "Patched. Should I also update the docs?"}),
+            ),
+        ];
+        for record in records {
+            fixture.publish(Publication::Record {
+                session: "s1".into(),
+                record,
+            });
+        }
+        settle().await;
+        let first = activity_of(&drain(&mut subscription), "s1");
+        assert_eq!(
+            first["turn"],
+            json!({"tools": 2, "failed": 0, "patches": 1})
+        );
+        assert_eq!(
+            first["plan"],
+            json!({"done": 1, "total": 3, "current": "Patch the parser"})
+        );
+
+        fixture.publish(Publication::Record {
+            session: "s1".into(),
+            record: user_record(7, "Yes, update the docs"),
+        });
+        settle().await;
+        let second = activity_of(&drain(&mut subscription), "s1");
+        assert_eq!(second["prompt"]["text"], "Yes, update the docs");
+        assert_eq!(
+            second["turn"],
+            json!({"tools": 0, "failed": 0, "patches": 0})
+        );
+        assert_eq!(second["tool"]["name"], "apply_patch");
+        assert_eq!(second["tool"]["summary"], "a.rs");
+        assert_eq!(second["plan"], first["plan"]);
+        assert_eq!(
+            second["message"]["text"],
+            "Patched. Should I also update the docs?"
+        );
+        assert_eq!(second["message"]["commentary"], false);
+
+        fixture.publish(Publication::Record {
+            session: "s1".into(),
+            record: tool_call(8, "c3", "view_image", json!({"path": "docs.png"})),
+        });
+        settle().await;
+        let third = activity_of(&drain(&mut subscription), "s1");
+        assert_eq!(third["tool"]["name"], "view_image");
+        assert_eq!(third["turn"]["tools"], 1);
+        assert_eq!(third["plan"], first["plan"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn activity_is_sent_only_when_something_it_shows_changes() {
+        let fixture = fixture();
+        fixture.open("s1", None);
+        fixture.activate("s1");
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        settle().await;
+        drain(&mut subscription);
+
+        let started = super::now_unix_ms() - 65_000;
+        fixture.publish(Publication::Record {
+            session: "s1".into(),
+            record: Arc::new(TranscriptRecord::from_agent(
+                1,
+                started,
+                AgentEvent {
+                    protocol_version: 1,
+                    request_id: Arc::from("s1"),
+                    seq: 1,
+                    kind: AgentEventKind::RunStarted,
+                    payload: to_raw_value(&json!({})).unwrap().into(),
+                },
+            )),
+        });
+        settle().await;
+        let running = activity_of(&drain(&mut subscription), "s1");
+        let elapsed = running["turn_elapsed_ns"].as_u64().unwrap();
+        assert_eq!(elapsed / 1_000_000_000, 65);
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        fixture.publish(Publication::Draft {
+            session: "s1".into(),
+            draft: Draft {
+                rev: 1,
+                text: "later".into(),
+                ..Draft::default()
+            },
+            origin: Origin::Terminal,
+        });
+        fixture.publish(Publication::Busy {
+            session: "s1".into(),
+            busy: Busy {
+                turns: 1,
+                shells: 0,
+            },
+        });
+        fixture.publish(Publication::Title {
+            session: "s1".into(),
+            title: Title {
+                text: "Renamed".into(),
+                pending: false,
+            },
+        });
+        settle().await;
+        let events = drain(&mut subscription);
+        assert!(!events.is_empty());
+        assert!(
+            !names(&events).contains(&"activity"),
+            "neither time nor unrelated changes resend activity: {:?}",
+            names(&events)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_client_connecting_between_flushes_gets_the_settled_activity() {
+        let fixture = fixture();
+        fixture.open("s1", None);
+        fixture.activate("s1");
+        let mut first = fixture.hub.subscribe().unwrap();
+        settle().await;
+        drain(&mut first);
+        let queue = |items: Vec<QueuedPrompt>| {
+            fixture.publish(Publication::Queue {
+                session: "s1".into(),
+                items,
+            });
+        };
+
+        queue(vec![QueuedPrompt {
+            id: 1,
+            text: "later".into(),
+            steering: false,
+        }]);
+        // Applied but not yet flushed to the first client.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        let mut second = fixture.hub.subscribe().unwrap();
+        assert_eq!(activity_of(&drain(&mut second), "s1")["queued"], 1);
+        queue(Vec::new());
+        settle().await;
+
+        for subscription in [&mut first, &mut second] {
+            assert_eq!(activity_of(&drain(subscription), "s1")["queued"], 0);
+        }
+    }
+
+    /// Runs a Code Mode cell that yields before its first call, then a prompt, then the cell's
+    /// first call, with the activity computed after each step. With \`run_ends\`, the cell's run
+    /// completes before the prompt and leaves the cell to report its calls afterwards. The cell's
+    /// second call, which the caller publishes, makes the cell visible again and moves both calls
+    /// before the prompt. Returns the next record sequence.
+    async fn a_cell_running_across_a_prompt(
+        fixture: &Fixture,
+        subscription: &mut Subscription,
+        run_ends: bool,
+    ) -> u64 {
+        let publish = |record: Arc<TranscriptRecord>| {
+            fixture.publish(Publication::Record {
+                session: "s1".into(),
+                record,
+            });
+        };
+        let run = |sequence, kind| run_ends.then(|| agent_record(sequence, kind, json!({})));
+        let records = [
+            run(2, AgentEventKind::RunStarted),
+            Some(tool_call(3, "cell", "exec", json!("await later()"))),
+            Some(tool_result(
+                4,
+                "cell",
+                "exec",
+                json!([{"text": "Script running with cell ID 7"}]),
+            )),
+            run(5, AgentEventKind::RunCompleted),
+        ];
+        for record in records.into_iter().flatten() {
+            publish(record);
+        }
+        settle().await;
+        drain(subscription);
+        publish(user_record(6, "Also cover the docs"));
+        settle().await;
+        assert_eq!(
+            activity_of(&drain(subscription), "s1")["tool"]["name"],
+            "exec"
+        );
+        publish(tool_call(
+            7,
+            "cell/code-1",
+            "view_image",
+            json!({"path": "a.png"}),
+        ));
+        settle().await;
+        assert_eq!(
+            activity_of(&drain(subscription), "s1")["tool"]["name"],
+            "view_image",
+            "the cell's only call stands in for it"
+        );
+        8
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cell_that_regroups_its_calls_after_a_prompt_stays_the_newest_tool() {
+        let fixture = fixture();
+        fixture.open("s1", Some("Write the docs"));
+        fixture.activate("s1");
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        settle().await;
+        let next = a_cell_running_across_a_prompt(&fixture, &mut subscription, false).await;
+
+        fixture.publish(Publication::Record {
+            session: "s1".into(),
+            record: tool_call(next, "cell/code-2", "view_image", json!({"path": "b.png"})),
+        });
+        settle().await;
+        let activity = activity_of(&drain(&mut subscription), "s1");
+        assert_eq!(activity["tool"]["name"], "exec");
+        assert_eq!(activity["tool"]["state"], "running");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cell_that_regroups_and_finishes_in_one_update_stays_the_newest_tool() {
+        let fixture = fixture();
+        fixture.open("s1", Some("Write the docs"));
+        fixture.activate("s1");
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        settle().await;
+        let next = a_cell_running_across_a_prompt(&fixture, &mut subscription, false).await;
+
+        for record in [
+            tool_call(next, "cell/code-2", "view_image", json!({"path": "b.png"})),
+            tool_result(next + 1, "cell/code-1", "view_image", json!("ok")),
+            tool_result(next + 2, "cell/code-2", "view_image", json!("ok")),
+            tool_call(next + 3, "wait", "wait", json!({"cell_id": "7"})),
+            tool_result(
+                next + 4,
+                "wait",
+                "wait",
+                json!([{"text": "Script completed"}]),
+            ),
+        ] {
+            fixture.publish(Publication::Record {
+                session: "s1".into(),
+                record,
+            });
+        }
+        settle().await;
+        let activity = activity_of(&drain(&mut subscription), "s1");
+        assert_eq!(activity["tool"]["name"], "exec");
+        assert_eq!(activity["tool"]["state"], "succeeded");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cell_left_running_by_a_finished_run_stays_the_newest_tool_when_it_regroups() {
+        let fixture = fixture();
+        fixture.open("s1", Some("Write the docs"));
+        fixture.activate("s1");
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        settle().await;
+        let next = a_cell_running_across_a_prompt(&fixture, &mut subscription, true).await;
+
+        fixture.publish(Publication::Record {
+            session: "s1".into(),
+            record: tool_call(next, "cell/code-2", "view_image", json!({"path": "b.png"})),
+        });
+        settle().await;
+        assert_eq!(
+            activity_of(&drain(&mut subscription), "s1")["tool"]["name"],
+            "exec",
+            "the finished run already settled the cell's state, but its calls still regroup"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_that_fails_after_a_prompt_becomes_the_newest_tool() {
+        let fixture = fixture();
+        fixture.open("s1", Some("Write the docs"));
+        fixture.activate("s1");
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        settle().await;
+        let publish = |record| {
+            fixture.publish(Publication::Record {
+                session: "s1".into(),
+                record,
+            });
+        };
+
+        publish(tool_call(2, "wait", "wait", json!({"cell_id": "7"})));
+        publish(user_record(3, "Also cover the docs"));
+        settle().await;
+        assert_eq!(
+            activity_of(&drain(&mut subscription), "s1")["tool"],
+            Value::Null,
+            "a running wait is hidden"
+        );
+        publish(agent_record(
+            4,
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "wait", "tool": "wait", "status": "failed", "duration_ns": 1,
+                "result": "no such cell", "structured_result": "no such cell", "metadata": null,
+            }),
+        ));
+        settle().await;
+        let activity = activity_of(&drain(&mut subscription), "s1");
+        assert_eq!(activity["tool"]["name"], "wait", "a failed wait is shown");
+        assert_eq!(activity["tool"]["state"], "failed");
     }
 }

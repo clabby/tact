@@ -27,7 +27,7 @@ use tact_subagents::{
 };
 
 /// Version of the browser protocol. Bundles declare the range they speak in their manifest.
-pub(super) const PROTOCOL_VERSION: u32 = 10;
+pub(super) const PROTOCOL_VERSION: u32 = 11;
 /// Longest string sent to a browser in an entry or a tool detail.
 const MAX_STRING_BYTES: usize = 256 * 1024;
 const MAX_SUMMARY_CHARS: usize = 200;
@@ -199,12 +199,22 @@ pub(super) struct WireEntry {
     body: WireBody,
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum WireToolState {
+pub(super) enum WireToolState {
     Running,
     Succeeded,
     Failed,
+}
+
+impl From<ToolState> for WireToolState {
+    fn from(state: ToolState) -> Self {
+        match state {
+            ToolState::Running => Self::Running,
+            ToolState::Succeeded => Self::Succeeded,
+            ToolState::Failed => Self::Failed,
+        }
+    }
 }
 
 /// Whether a tool call may fold into a run of routine work or keeps a row of its own.
@@ -383,11 +393,7 @@ impl WireBody {
         Self::Tool {
             name: tool.name.clone(),
             summary: tool_summary(tool),
-            state: match tool.state {
-                ToolState::Running => WireToolState::Running,
-                ToolState::Succeeded => WireToolState::Succeeded,
-                ToolState::Failed => WireToolState::Failed,
-            },
+            state: tool.state.into(),
             duration_ns: tool.duration_ns,
             elapsed_ns: (tool.state == ToolState::Running)
                 .then(|| elapsed_ns_since(tool.started_at_unix_ms)),
@@ -484,7 +490,7 @@ pub(super) fn cap(text: &str) -> String {
 }
 
 /// A single line naming what a tool call operates on, mirroring the terminal's tool rows.
-fn tool_summary(tool: &ToolEntry) -> String {
+pub(super) fn tool_summary(tool: &ToolEntry) -> String {
     let arguments = &tool.arguments;
     let text = |key: &str| arguments.get(key).and_then(Value::as_str);
     let subject = match tool.name.as_str() {

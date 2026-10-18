@@ -17,6 +17,10 @@ export type SidebarHost = {
   catalog(): ModelCatalog | null;
   /** Called after the user picked a session, so phones can close the drawer. */
   navigated(): void;
+  /** Shows the Monitor in place of the chat. */
+  openMonitor(): void;
+  /** Shows the chat; picking a session always lands on its conversation. */
+  showChat(): void;
   renameSession(session: string): void;
   setTheme(choice: "system" | "light" | "dark"): void;
   themeChoice(): "system" | "light" | "dark";
@@ -33,13 +37,18 @@ const CONNECTION_LABELS: Record<Connection, string> = {
   locked: "Signed out",
 };
 
-/** Sessions navigation: new chat, live sessions, history search, instances, and connection. */
+/** What the Monitor item shows: how many sessions need the user, how many run, and whether it is shown. */
+export type MonitorItem = { needs: number; running: number; current: boolean };
+
+/** Sessions navigation: new chat, the Monitor, live sessions, history search, instances, and connection. */
 export class Sidebar {
   private readonly liveList: HTMLElement;
   private readonly historyList: HTMLElement;
   private readonly search: HTMLInputElement;
   private readonly more: HTMLButtonElement;
   private readonly footer: HTMLElement;
+  private readonly monitorItem: HTMLButtonElement;
+  private monitor: MonitorItem = { needs: 0, running: 0, current: false };
   private live: SessionSummary[] = [];
   private active: string | null = null;
   private historyCursor: string | null = null;
@@ -67,6 +76,12 @@ export class Sidebar {
         <button type="button" class="new-chat-button">${glyph("plus")}<span>New chat</span></button>
         <button type="button" class="new-chat-model" aria-label="New chat with model" aria-haspopup="menu">${glyph("chevron-down")}</button>
       </div>
+      <button type="button" class="monitor-item">
+        <span class="monitor-glyph" aria-hidden="true">${glyph("gauge")}</span>
+        <span class="monitor-label">Monitor</span>
+        <span class="monitor-running" hidden></span>
+        <span class="monitor-badge" hidden></span>
+      </button>
       <label class="chat-search">${glyph("search")}<input type="search" placeholder="Search chats" aria-label="Search chats" autocomplete="off"></label>
       <nav class="sidebar-scroll" aria-label="Sessions">
         <h2 class="section-title live-title">Live <span class="live-count"></span></h2>
@@ -81,6 +96,7 @@ export class Sidebar {
     this.search = root.querySelector(".chat-search input")!;
     this.more = root.querySelector(".history-more")!;
     this.footer = root.querySelector(".sidebar-foot")!;
+    this.monitorItem = root.querySelector(".monitor-item")!;
     this.bind();
     this.renderFooter("connecting", []);
   }
@@ -101,6 +117,32 @@ export class Sidebar {
     // predate it. A reload also recomputes which rows the live list now hides.
     if (closed && this.historyLoaded) void this.loadHistory(true);
     else this.renderHistory();
+  }
+
+  /**
+   * Updates the Monitor item. While the Monitor is shown it is the current item, so the active
+   * session's row stops looking selected.
+   */
+  setMonitor(monitor: MonitorItem) {
+    const shownChanged = monitor.current !== this.monitor.current;
+    this.monitor = monitor;
+    const item = this.monitorItem;
+    item.classList.toggle("current", monitor.current);
+    if (monitor.current) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+    const running = item.querySelector<HTMLElement>(".monitor-running")!;
+    running.hidden = monitor.running === 0;
+    running.textContent = `${monitor.running} running`;
+    const badge = item.querySelector<HTMLElement>(".monitor-badge")!;
+    badge.hidden = monitor.needs === 0;
+    badge.textContent = String(monitor.needs);
+    item.setAttribute("aria-label", [
+      "Monitor",
+      monitor.needs ? `${monitor.needs} need${monitor.needs === 1 ? "s" : ""} you` : "",
+      monitor.running ? `${monitor.running} running` : "",
+    ].filter(Boolean).join(", "));
+    item.title = monitor.needs ? `${monitor.needs} session${monitor.needs === 1 ? " needs" : "s need"} you` : "Watch every live session";
+    if (shownChanged) this.renderLive();
   }
 
   private renderLive() {
@@ -193,13 +235,14 @@ export class Sidebar {
     const row = document.createElement("li");
     row.className = "session-row";
     const pinned = this.pinned.has(session.id);
+    const current = session.id === this.active && !this.monitor.current;
     row.classList.toggle("pinned", pinned);
     row.dataset.state = session.state;
-    row.classList.toggle("active", session.id === this.active);
+    row.classList.toggle("active", current);
     row.classList.toggle("unread", session.unread);
     const label = this.host.catalog()?.models.find((model) => model.id === session.model)?.label ?? session.model;
     row.innerHTML = `
-      <button type="button" class="session-main" ${session.id === this.active ? 'aria-current="true"' : ""}>
+      <button type="button" class="session-main" ${current ? 'aria-current="true"' : ""}>
         <span class="session-marker" aria-hidden="true"></span>
         <span class="session-text"><span class="session-title"></span><span class="session-meta"><span class="model-dot"></span><span class="session-model"></span><span class="session-workspace"></span><span class="session-age"></span></span></span>
         ${pinned ? `<span class="pin-mark" title="Pinned">${glyph("pin")}</span>` : ""}
@@ -247,6 +290,10 @@ export class Sidebar {
 
   private bind() {
     this.root.querySelector(".new-chat-button")!.addEventListener("click", () => void this.newChat());
+    this.monitorItem.addEventListener("click", () => {
+      this.host.openMonitor();
+      this.host.navigated();
+    });
     const modelButton = this.root.querySelector<HTMLButtonElement>(".new-chat-model")!;
     modelButton.addEventListener("click", () => {
       const models = this.host.catalog();
@@ -272,6 +319,7 @@ export class Sidebar {
 
   private async activate(id: string) {
     this.host.navigated();
+    this.host.showChat();
     if (id === this.active) return;
     try {
       await this.host.api.command("activate", { session: id });
@@ -284,6 +332,7 @@ export class Sidebar {
     try {
       await this.host.api.command("open_session", spec);
       this.host.navigated();
+      this.host.showChat();
     } catch (error) {
       toast(describeError(error), "warning");
     }

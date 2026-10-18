@@ -7,6 +7,8 @@ const host: SidebarHost = {
   api: {} as SidebarHost["api"],
   catalog: () => null,
   navigated() {},
+  openMonitor() {},
+  showChat() {},
   renameSession() {},
   setTheme() {},
   themeChoice: () => "system",
@@ -145,5 +147,54 @@ describe("sidebar titles", () => {
     new Sidebar(root, { ...host, api });
     await Bun.sleep(0);
     expect(root.querySelector(".history-row .session-title")!.classList.contains("title-pending")).toBe(true);
+  });
+});
+describe("sidebar Monitor item", () => {
+  test("shows how many sessions need the user and run, and takes the selection while shown", () => {
+    const root = document.createElement("aside");
+    const sidebar = new Sidebar(root, host);
+    sidebar.setLive([session("a", "idle"), session("b", "idle")], "a");
+    const item = root.querySelector<HTMLElement>(".monitor-item")!;
+    const badge = item.querySelector<HTMLElement>(".monitor-badge")!;
+    const running = item.querySelector<HTMLElement>(".monitor-running")!;
+    const activeRows = () => [...root.querySelectorAll(".live-list .session-row.active .session-title")].map((title) => title.textContent);
+
+    sidebar.setMonitor({ needs: 0, running: 0, current: false });
+    expect([badge.hidden, running.hidden]).toEqual([true, true]);
+    expect(activeRows()).toEqual(["a"]);
+
+    sidebar.setMonitor({ needs: 2, running: 1, current: true });
+    expect([badge.textContent, running.textContent]).toEqual(["2", "1 running"]);
+    expect(item.getAttribute("aria-current")).toBe("page");
+    expect(item.getAttribute("aria-label")).toBe("Monitor, 2 need you, 1 running");
+    expect(activeRows()).toEqual([]);
+
+    sidebar.setMonitor({ needs: 2, running: 1, current: false });
+    expect(item.hasAttribute("aria-current")).toBe(false);
+    expect(activeRows()).toEqual(["a"]);
+  });
+
+  test("opens the Monitor, and picking any live session, the active one included, shows its chat", async () => {
+    const calls: string[] = [];
+    const api = {
+      query: async () => ({ sessions: [], next_cursor: null, live_matches: {} }),
+      command: async (name: string, args: { session: string }) => void calls.push(`${name} ${args.session}`),
+    } as unknown as SidebarHost["api"];
+    const root = document.createElement("aside");
+    const sidebar = new Sidebar(root, {
+      ...host,
+      api,
+      openMonitor: () => void calls.push("monitor"),
+      showChat: () => void calls.push("chat"),
+    });
+    sidebar.setLive([session("a", "idle"), session("b", "idle")], "a");
+
+    root.querySelector<HTMLElement>(".monitor-item")!.click();
+    const rows = root.querySelectorAll<HTMLElement>(".live-list .session-main");
+    rows[0]!.click();
+    rows[1]!.click();
+    await Bun.sleep(0);
+
+    expect(calls).toEqual(["monitor", "chat", "chat", "activate b"]);
   });
 });

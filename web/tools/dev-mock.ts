@@ -1,6 +1,6 @@
 // A self-contained imitation of a running Tact for UI development: sessions that stream realistic
 // turns with tool rows and subagents, the shared draft with origin echoes and images, queue,
-// every query, history, instances, and the review endpoints.
+// every query, history, instances, the review endpoints, and the Monitor's activity and monitor model.
 // It follows docs/web.md; the dev server (dev.ts) only adapts it to HTTP.
 
 import type {
@@ -13,12 +13,15 @@ import type {
   Effort,
   ListedMemory,
   ModelCatalog,
+  MonitorState,
   PatchStats,
   PersistedSession,
   Queries,
   QueryName,
   QueuedPrompt,
   ReasoningMode,
+  SessionActivity,
+  SessionNote,
   Significance,
   Speed,
   Subagent,
@@ -106,6 +109,10 @@ const WINDOW_TOKENS = 272_000;
 const MAX_LIVE = 8;
 /** How long the imitated title model takes, long enough to see and screenshot the pending title. */
 const TITLE_GENERATION_MS = 4_000;
+/** How long the imitated monitor model takes to check the sessions, long enough to see it working. */
+const CHECK_MS = 2_500;
+/** The web protocol version this mock speaks. */
+const PROTOCOL_VERSION = 11;
 
 export const MOCK_DEFAULT_WORKSPACE = "/Users/dev/src/tact";
 const WS2 = "/Users/dev/src/tact-ws2";
@@ -211,6 +218,55 @@ class MockSession {
     return this.turnStartedAt === null ? null : (Date.now() - this.turnStartedAt) * 1e6;
   }
 
+  /** The session's activity as the hub derives it from its projection (docs/web.md, `activity`). */
+  activity(): SessionActivity {
+    const visible = this.entries.filter((entry) => entry.kind !== "reasoning");
+    const promptIndex = visible.map((entry) => entry.kind).lastIndexOf("user");
+    const prompt = visible[promptIndex];
+    const message = [...visible].reverse().find((entry) => entry.kind === "assistant" && entry.complete);
+    const isTool = (entry: WireEntry): entry is Extract<WireEntry, { kind: "tool" }> => entry.kind === "tool" && entry.parent === null;
+    const tools = visible.filter(isTool);
+    const tool = tools.at(-1);
+    const turnTools = visible.slice(promptIndex + 1).filter(isTool);
+    const planCall = [...tools].reverse().find((entry) => entry.name === "update_plan");
+    const plan = planCall && (this.details.get(planCall.id)?.arguments as { plan?: { step: string; status: string }[] } | undefined)?.plan;
+    const newest = visible.at(-1);
+    const clip = (text: string, limit: number) => (text.length > limit ? `${text.slice(0, limit - 1)}…` : text);
+    return {
+      session: this.id,
+      status: this.status,
+      turn_elapsed_ns: this.turnElapsedNs(),
+      prompt: prompt?.kind === "user" ? { text: clip(prompt.text, 600), at_ms: prompt.at_ms ?? null } : null,
+      message: message?.kind === "assistant"
+        ? {
+          text: message.text.length > 1800 ? `${message.text.slice(0, 1200)}\n…\n${message.text.slice(-500)}` : message.text,
+          commentary: message.commentary,
+          at_ms: message.at_ms ?? null,
+        }
+        : null,
+      tool: tool ? { name: tool.name, summary: tool.summary, state: tool.state, at_ms: tool.at_ms ?? null, outcome: tool.outcome ?? null } : null,
+      turn: {
+        tools: turnTools.length,
+        failed: turnTools.filter((entry) => entry.state === "failed").length,
+        patches: turnTools.filter((entry) => entry.name === "apply_patch" && entry.state === "succeeded").length,
+      },
+      plan: plan
+        ? {
+          done: plan.filter((step) => step.status === "completed").length,
+          total: plan.length,
+          current: plan.find((step) => step.status === "in_progress")?.step ?? null,
+        }
+        : null,
+      error: this.status?.kind === "error" ? clip(this.status.message, 600) : newest?.kind === "error" ? clip(newest.message, 600) : null,
+      agents: {
+        running: this.subagents.agents.filter((agent) => agent.status.state === "pending" || agent.status.state === "running").length,
+        total: this.subagents.agents.length,
+      },
+      queued: this.queue.length,
+      context: { ...this.context },
+    };
+  }
+
   push(body: EntryBody, parent: number | null = null, at = Date.now()): WireEntry {
     const entry = { ...body, id: this.nextEntry++, revision: 1, parent, at_ms: at } as WireEntry;
     this.entries.push(entry);
@@ -248,6 +304,14 @@ export class MockTact {
   private listeners = new Set<MockListener>();
   private nextSession = 1;
   private nextQueue = 1;
+  /** The activity last broadcast, keyed without the passage of time, and the pending broadcast. */
+  private activitySent = "";
+  private activityTimer: ReturnType<typeof setTimeout> | null = null;
+  private monitorState: MonitorState = {
+    availability: "ready", detail: null, running: false, error: null, interval_seconds: 120, check: null,
+  };
+  private checkStarted = 0;
+  private checkInput = "";
 
   constructor(seed = true) {
     if (seed) this.seed();
@@ -258,11 +322,12 @@ export class MockTact {
     return () => this.listeners.delete(listener);
   }
 
-  /** The events a fresh stream receives: hello, live, active, and the active session's snapshot. */
+  /** The events a fresh stream receives: hello, live, activity, active, and the active session's snapshot. */
   greeting(): { name: StreamEventName; data: unknown }[] {
     const events: { name: StreamEventName; data: unknown }[] = [
-      { name: "hello", data: { protocol_version: 10, client_hint: "tact-dev" } },
+      { name: "hello", data: { protocol_version: PROTOCOL_VERSION, client_hint: "tact-dev" } },
       { name: "live", data: this.live() },
+      { name: "activity", data: this.activity() },
     ];
     const session = this.active ? this.sessions.get(this.active) : undefined;
     if (session) {
@@ -279,10 +344,14 @@ export class MockTact {
     };
   }
 
+  activity(): StreamEvents["activity"] {
+    return { sessions: [...this.sessions.values()].map((session) => session.activity()) };
+  }
+
   instance() {
     const sessions = [...this.sessions.values()];
     return {
-      protocol_version: 10,
+      protocol_version: PROTOCOL_VERSION,
       workspace: "/Users/dev/src/tact",
       repository: "tact",
       live: sessions.length,
@@ -614,6 +683,52 @@ export class MockTact {
     return { entries: this.session(sessionId).agentEntries.get(agent) ?? [] };
   }
 
+  /** Imitates a monitor model without credentials, so the Monitor shows no notes. */
+  makeMonitorUnavailable() {
+    this.monitorState = { ...this.monitorState, availability: "unavailable", detail: "No credentials load for the monitor model (luna).", check: null };
+  }
+
+  /**
+   * Imitates POST /api/monitor: a check starts when none ever ran, when a refresh asks for one at
+   * least 10 s after the last, or when the sessions changed and the interval has passed.
+   */
+  monitor(refresh: boolean): MonitorState {
+    const state = this.monitorState;
+    const since = Date.now() - this.checkStarted;
+    const changed = this.checkFingerprint() !== this.checkInput;
+    const due = state.check === null || (refresh ? since >= 10_000 : changed && since >= state.interval_seconds * 1000);
+    if (state.availability === "ready" && !state.running && this.sessions.size > 0 && due) this.runCheck();
+    return structuredClone(state);
+  }
+
+  /** What a check reads, without anything that changes merely because time passes. */
+  private checkFingerprint() {
+    return JSON.stringify([...this.sessions.values()].map((session) => [
+      session.id, session.entries.length, session.running, session.queue.length, session.unread,
+      session.subagents.agents.map((agent) => agent.status.state),
+    ]));
+  }
+
+  private runCheck() {
+    const state = this.monitorState;
+    const asOf = Date.now();
+    this.checkStarted = asOf;
+    this.checkInput = this.checkFingerprint();
+    state.running = true;
+    this.emit("monitor", state);
+    setTimeout(() => {
+      state.running = false;
+      state.error = null;
+      state.check = {
+        as_of_ms: asOf,
+        generated_at_ms: Date.now(),
+        model: "luna",
+        sessions: [...this.sessions.values()].map((session) => mockNote(session)),
+      };
+      this.emit("monitor", state);
+    }, CHECK_MS * this.pace);
+  }
+
   /** Starts the background session that keeps working, so the sidebar always shows activity. */
   startAmbientWork() {
     this.startAgentActivity();
@@ -686,11 +801,31 @@ export class MockTact {
   }
 
   private emit<Name extends StreamEventName>(name: Name, data: StreamEvents[Name]) {
+    if (name !== "activity" && name !== "monitor") this.scheduleActivity();
     const session = (data as { session?: unknown }).session;
     const scoped = name !== "live" && name !== "workspace" && name !== "hello" && name !== "active"
-      && name !== "closed" && name !== "snapshot";
+      && name !== "closed" && name !== "snapshot" && name !== "activity" && name !== "monitor";
     if (scoped && session !== this.active) return;
     for (const listener of this.listeners) listener(name, structuredClone(data));
+  }
+
+  /**
+   * Broadcasts every session's activity shortly after a change, as the hub does at its next flush,
+   * and only when it differs from the last broadcast. Turns are compared by their start time, so
+   * time passing alone sends nothing.
+   */
+  private scheduleActivity() {
+    if (this.activityTimer !== null) return;
+    this.activityTimer = setTimeout(() => {
+      this.activityTimer = null;
+      const activity = this.activity();
+      const key = JSON.stringify(activity.sessions.map((entry) => ({
+        ...entry, turn_elapsed_ns: this.sessions.get(entry.session)?.turnStartedAt ?? null,
+      })));
+      if (key === this.activitySent) return;
+      this.activitySent = key;
+      this.emit("activity", activity);
+    }, 50 * this.pace);
   }
 
   private publishLive() {
@@ -1134,9 +1269,188 @@ export class MockTact {
     failing.lastActivity -= 3_600_000;
 
     const bench = new MockSession(this.newId(), "astra", "max", "Benchmark journal compaction");
-    for (const session of [main, bench, ideas, failing]) this.sessions.set(session.id, session);
+
+    // An agent that finished by asking a question, which the monitor model reports as needing input.
+    const loader = new MockSession(this.newId(), "haiku-5.5", "medium", "Choose the config loader", "/Users/dev/src/review-ui");
+    loader.push({ kind: "user", text: "Config loading is getting messy. Compare the options and recommend one." });
+    const search = loader.push(tool("exec_command", "rg -n 'toml::from_str' crates", { has_detail: true, outcome: outcomeOf({ exit_code: 0, output: "crates/config/src/load.rs:41:    let raw = toml::from_str(&text)?;\n" }) }));
+    loader.details.set(search.id, { arguments: { cmd: "rg -n 'toml::from_str' crates" }, result: { exit_code: 0, output: "crates/config/src/load.rs:41" }, metadata: null });
+    loader.push({
+      kind: "assistant",
+      text: [
+        "Configuration is read in eight places today:",
+        "",
+        "- `crates/config/src/load.rs` (the TOML parse)",
+        "- `crates/config/src/env.rs`",
+        "- `crates/config/src/defaults.rs`",
+        "- `bin/tact/src/app/config/file.rs`",
+        "- `bin/tact/src/app/config/web.rs`",
+        "- `bin/tact/src/app/config/mod.rs`",
+        "- `bin/tact/src/web/assets.rs`",
+        "- `bin/tact/src/tui/theme.rs`",
+        "",
+        "There are two reasonable paths: **keep the TOML loader** and layer environment overrides on top of it (no new dependency, about 60 lines), or **switch to figment**, which merges files, environment, and defaults but adds a dependency and changes the error messages users see.",
+        "",
+        "Which do you prefer: keep the TOML loader with overrides, or switch to figment? And should `web.rs` keep its own defaults?",
+      ].join("\n"),
+      complete: true,
+      commentary: false,
+    });
+    loader.push({ kind: "turn_completed", duration_ns: 48_000_000_000 });
+    loader.unread = true;
+    loader.lastActivity -= 240_000;
+    for (const session of [main, loader, bench, ideas, failing]) this.sessions.set(session.id, session);
     this.active = main.id;
   }
+}
+
+/**
+ * The imitated monitor model's verdicts on the seeded sessions, and on the sessions the screenshot
+ * script opens, by title. Between them they show every attention level, every block type, and
+ * every live source; the seeded ones also show every health band, with a rise and a fall since the
+ * previous check, and one the script opens has no score.
+ */
+const MOCK_NOTES: Record<string, Omit<SessionNote, "session">> = {
+  "Wire the web bridge into the TUI loop": {
+    attention: "ok",
+    goal: "Make draft echoes follow the acknowledgement without blocking the loop",
+    health: 62,
+    previous_health: 66,
+    blocks: [
+      {
+        type: "checklist",
+        title: null,
+        items: [
+          { label: "Reorder the reply after the publication in bridge.rs", state: "done" },
+          { label: "Run the bridge tests", state: "done" },
+          { label: "Audit protocol versioning with three subagents", state: "active" },
+          { label: "Update docs/web.md", state: "pending" },
+        ],
+      },
+      { type: "live", source: "agents" },
+      {
+        type: "history",
+        items: [
+          { action: "Ran the full tact test suite", outcome: "worked", detail: "312 passed" },
+          { action: "Ran the bridge tests", outcome: "failed", detail: "17 of 18 passed" },
+          { action: "Compared two orderings for the echo", outcome: "unclear", detail: null },
+          { action: "Audit protocol versioning", outcome: "running", detail: "2 running, 1 pending" },
+        ],
+      },
+      { type: "live", source: "plan" },
+    ],
+    reason: null,
+    suggestion: null,
+  },
+  "Choose the config loader": {
+    attention: "needs_input",
+    goal: "Pick a cleaner way to load the configuration",
+    health: 74,
+    previous_health: 72,
+    blocks: [
+      {
+        type: "question",
+        text: "Keep the TOML loader with environment overrides, or switch to figment? And should web.rs keep its own defaults?",
+        options: ["Keep TOML with overrides", "Switch to figment", "web.rs keeps its defaults"],
+      },
+      { type: "text", text: "Only one call site parses TOML directly, so either choice is a small change.", tone: "neutral" },
+      { type: "code", label: "The call site", text: "crates/config/src/load.rs:42\nlet config: Config = toml::from_str(&raw)?;" },
+      { type: "live", source: "message" },
+    ],
+    reason: "Its last message asks which loader to keep, and it has been idle since.",
+    suggestion: "Keep the TOML loader and layer environment overrides on top of it; no new dependency.",
+  },
+  // Leads with a passing metric, as a model may, though the danger text after it is the news: the
+  // off-track tile shows the text first.
+  "Benchmark journal compaction": {
+    attention: "off_track",
+    goal: "Re-run the journal benchmark and report regressions",
+    health: 28,
+    previous_health: 61,
+    blocks: [
+      { type: "metric", label: "Benchmark runs passing", value: "3/3", previous: null, tone: "success" },
+      { type: "text", text: "It is editing web/stream.rs, but you asked only for benchmark numbers.", tone: "danger" },
+      { type: "live", source: "tool" },
+      {
+        type: "history",
+        items: [
+          { action: "Ran the focused stream tests", outcome: "failed", detail: "17 passed, 1 failed" },
+          { action: "Patched FRAME_INTERVAL in web/stream.rs", outcome: "worked", detail: "applied" },
+        ],
+      },
+    ],
+    reason: "You asked for benchmark numbers; it is editing web/stream.rs instead.",
+    suggestion: "Revert the stream.rs edits and only report the benchmark results and any regressions.",
+  },
+  "Sketch the overview prompt": {
+    attention: "ready",
+    goal: "Draft a better overview prompt",
+    health: 94,
+    previous_health: 78,
+    blocks: [
+      { type: "text", text: "Delivered a prompt that asks for a narrative first and a risk list second.", tone: "success" },
+      { type: "live", source: "message" },
+    ],
+    reason: "It delivered the prompt and nothing blocks it.",
+    suggestion: null,
+  },
+  "Flaky release pipeline test": {
+    attention: "stuck",
+    goal: "Find why release_pipeline fails only on CI",
+    health: 9,
+    previous_health: 11,
+    blocks: [
+      { type: "live", source: "error" },
+      { type: "text", text: "Nothing has retried the turn since the stream dropped an hour ago.", tone: "danger" },
+      { type: "code", label: "To reproduce", text: "cargo nextest run -p tact -E 'test(release_pipeline)'" },
+    ],
+    reason: "The only turn ended on a dropped model stream an hour ago and was never retried.",
+    suggestion: "Try again: find why release_pipeline fails only on CI. Compare the CI toolchain and environment with local first.",
+  },
+  "Port the review search to CSS": {
+    attention: "ok",
+    goal: "Move review search highlighting to the CSS Custom Highlight API",
+    health: 78,
+    previous_health: 66,
+    blocks: [
+      { type: "progress", label: "Views ported", done: 3, total: 5, unit: "views" },
+      { type: "live", source: "tool" },
+    ],
+    reason: null,
+    suggestion: null,
+  },
+  "Speed up transcript rendering": {
+    attention: "ok",
+    goal: "Cut the transcript's frame time on long sessions",
+    health: 91,
+    previous_health: 88,
+    blocks: [
+      { type: "metric", label: "p99 frame time", value: "42 ms", previous: "51 ms", tone: "success" },
+      { type: "metric", label: "Dropped frames", value: "0", previous: "7", tone: "success" },
+      { type: "live", source: "prompt" },
+    ],
+    reason: null,
+    suggestion: null,
+  },
+  "Explain the journal pruning invariant": {
+    attention: "ok",
+    goal: "Explain when the journal may be pruned",
+    health: null,
+    previous_health: null,
+    blocks: [{ type: "text", text: "A snapshot must be published before the journal entries it covers are truncated.", tone: "neutral" }],
+    reason: null,
+    suggestion: null,
+  },
+};
+
+/** A canned verdict, or for any other session its latest prompt as the goal and no blocks yet. */
+function mockNote(session: MockSession): SessionNote {
+  const prompt = session.activity().prompt?.text.replace(/\s+/g, " ").trim();
+  // A session opened moments ago may not have its title yet, so its prompt finds the note too.
+  const canned = MOCK_NOTES[session.title] ?? Object.entries(MOCK_NOTES).find(([title]) => prompt?.startsWith(title))?.[1];
+  if (canned) return { session: session.id, ...canned };
+  const goal = prompt ? (prompt.length > 100 ? prompt.slice(0, 99) + "…" : prompt) : null;
+  return { session: session.id, attention: "ok", goal, health: null, previous_health: null, blocks: [], reason: null, suggestion: null };
 }
 
 /** A conversation thread entry as the server publishes it: the thread plus its latest message. */

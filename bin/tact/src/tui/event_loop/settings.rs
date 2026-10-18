@@ -211,11 +211,12 @@ impl EventLoop {
             apply_subagent_config(&runtime.subagent_control, &config);
         }
         config.claude().publish_glasswing();
+        self.web_config.send_replace(config.clone());
         self.config = config;
         let message = if workspace_changed {
-            "Reloaded config · theme, UI, memory browser, and subagent limits applied · agent/auth/tool settings apply to new sessions · workspace requires restart"
+            "Reloaded config · theme, UI, memory browser, subagent limits, and web Monitor applied · agent/auth/tool settings apply to new sessions · workspace requires restart"
         } else {
-            "Reloaded config · theme, UI, memory browser, and subagent limits applied · agent/auth/tool settings apply to new sessions"
+            "Reloaded config · theme, UI, memory browser, subagent limits, and web Monitor applied · agent/auth/tool settings apply to new sessions"
         };
         self.show(AppEvent::ConfigReloaded {
             pane,

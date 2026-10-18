@@ -140,6 +140,8 @@ struct EventLoop {
     opens: PendingOpens,
     shells: JoinSet<(PaneId, ShellExecution)>,
     web_status: watch::Receiver<WebStatus>,
+    /// The configuration the web server's monitor reads; replaced when the configuration reloads.
+    web_config: watch::Sender<Config>,
     web_tasks: JoinSet<WebTaskCompletion>,
     memory: Memory,
     recent_prompts: RecentPrompts,
@@ -290,7 +292,9 @@ impl EventLoop {
             main_session_id,
             restored_records.unwrap_or_default(),
         );
-        let web_server = WebServer::spawn(&config, &workspace, web_end, &shutdown);
+        let (web_config, web_config_updates) = watch::channel(config.clone());
+        let web_server =
+            WebServer::spawn(&config, web_config_updates, &workspace, web_end, &shutdown);
         let mut tasks = BackgroundTasks::default();
         tasks.spawn(
             TaskKind::RecentPrompts,
@@ -346,6 +350,7 @@ impl EventLoop {
             opens: PendingOpens::default(),
             shells: JoinSet::new(),
             web_status,
+            web_config,
             web_tasks: JoinSet::new(),
             memory,
             recent_prompts: RecentPrompts::default(),
