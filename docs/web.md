@@ -30,7 +30,7 @@ similar) and give Tact its address (`web.public_url`). See "Remote access".
   `max_live_sessions = 8`. `public_url` and `tailscale` are mutually exclusive: setting both is a
   configuration error. `--web=false` (`TACT_WEB`) disables the server.
 - Config `[web.monitor]`: `enabled = true` (the monitor model checks the sessions while a browser
-  shows the Monitor), `model = ""` and `thinking = ""`, which work like `[agent] model` and
+  shows the Monitor and at least two sessions are live), `model = ""` and `thinking = ""`, which work like `[agent] model` and
   `[agent] thinking`: any model id and effort those accept, and empty means Tact's default model
   (`[agent] model` after command-line overrides) with `[agent] thinking`. An explicit model
   without an explicit thinking runs at that model's catalog default effort. `interval_seconds = 120`
@@ -564,7 +564,8 @@ type StatusBlock =
 
 Scheduling. The browser calls `POST /api/monitor` when the Monitor becomes visible and every 20 s
 while it stays visible; each call holds a 60 s lease. While a lease is live, a check starts when
-the model is available, none is running, at least one session is live, and either:
+the model is available, none is running, at least two sessions are live (the Monitor compares
+sessions, so one live session is never checked, even on refresh), and either:
 
 - the call asked for `refresh` and the last check started at least 10 s ago, or
 - the sessions changed since the last check read them and the last check started at least
@@ -679,36 +680,38 @@ mobile-first.
 - **Tabs.** **Chat** holds the transcript and the shared composer. **Review** holds the Pierre
   diffs, live while the agent edits, and an **Overview** sub-tab. Cmd/Ctrl . switches between them,
   and from the Monitor it returns to Chat.
-- **Monitor.** The sidebar item (or the **Monitor** palette command) replaces the chat with a
-  dashboard of every live session of this process: one grid of compact tiles that fills the window,
-  with the sessions that need you first, then those working, then idle ones, each group newest
-  first; the toolbar's **Order** switches to **Health**, which puts the sessions going worst first.
-  The item stays in place above the session list and counts the sessions that need you and those
-  running. A toolbar filters the tiles (**All**, **Needs you**, **Working**, **Idle**, each with its
-  count) and shows when the monitor model last checked the sessions and which model it is, with a
-  refresh button. A session needs you when it failed, the monitor reads it as waiting on you, stuck,
-  or off track, it has a reply nobody has read (**New reply**), it is retrying, or its running turn
-  has shown no activity for 10 minutes with no tool call or subagent in flight. Every tile has the
-  same frame: its title, one badge, and a gauge of the monitor's health score (0 to 100, how well
-  the work is going, with an arrow when it moved by 10 or more since the previous check), what the
-  session is doing now with the turn's duration or the time since its last activity, and its
-  actions. Between them, the monitor chooses how to show the session's status from a set of blocks:
-  a sentence, a progress bar, a measurement with its previous value, a checklist, its latest steps
-  newest first with whether each worked, a question with the agent's options, a short literal such
-  as a command, or live data that updates in real time (the last message, the plan, the call in
-  flight, the prompt, subagents, or the error). A model block written before the session's latest
-  activity is marked **earlier**. A session's error always takes the tile's body, and without a
-  current note the tile shows one piece of evidence chosen by its state: the end of its last message
-  when it is idle (where a question to you sits), or, while it runs, the monitor's goal or the
-  prompt. A question's options put that answer in the reply box when the session is idle and the
-  question is current; they never send it. **Details** holds every block in full with the monitor's
-  goal, reason, and suggested message, then the prompt, the full latest reply, the plan, counters,
-  and the model and workspace. Clicking a tile opens the session's chat. **Reply** (**Steer** while
-  a turn runs) sends a prompt from the tile, and its box can insert the monitor's suggestion for
-  editing. The **…** menu opens the session, stops a running turn after confirmation, or closes a
-  session that is not running, which moves it to History. A session with an unsent draft offers
-  **Open** instead of Reply, so the draft is never overwritten, and the active session's reply goes
-  to the composer. The Monitor asks for checks and ticks its clocks only while it is on screen.
+- **Monitor.** While at least two sessions are live, the sidebar item (or the **Monitor** palette
+  command) replaces the chat with a dashboard of every live session of this process: one grid of
+  compact tiles that fills the window, with the sessions that need you first, then those working,
+  then idle ones, each group newest first; the toolbar's **Order** switches to **Health**, which
+  puts the sessions going worst first. The item sits above the session list, outside its scrolling,
+  and counts the sessions that need you and those running; when fewer than two sessions remain live,
+  it disappears and the view returns to the chat. A toolbar filters the tiles (**All**, **Needs
+  you**, **Working**, **Idle**, each with its count) and shows when the monitor model last checked
+  the sessions and which model it is, with a refresh button. A session needs you when it failed, the
+  monitor reads it as waiting on you, stuck, or off track, it has a reply nobody has read (**New
+  reply**), it is retrying, or its running turn has shown no activity for 10 minutes with no tool
+  call or subagent in flight. Every tile has the same frame: its title, one badge, and a gauge of
+  the monitor's health score (0 to 100, how well the work is going, with an arrow when it moved by
+  10 or more since the previous check), what the session is doing now with the turn's duration or
+  the time since its last activity, and its actions. Between them, the monitor chooses how to show
+  the session's status from a set of blocks: a sentence, a progress bar, a measurement with its
+  previous value, a checklist, its latest steps newest first with whether each worked, a question
+  with the agent's options, a short literal such as a command, or live data that updates in real
+  time (the last message, the plan, the call in flight, the prompt, subagents, or the error). A
+  model block written before the session's latest activity is marked **earlier**. A session's error
+  always takes the tile's body, and without a current note the tile shows one piece of evidence
+  chosen by its state: the end of its last message when it is idle (where a question to you sits),
+  or, while it runs, the monitor's goal or the prompt. A question's options put that answer in the
+  reply box when the session is idle and the question is current; they never send it. **Details**
+  holds every block in full with the monitor's goal, reason, and suggested message, then the prompt,
+  the full latest reply, the plan, counters, and the model and workspace. Clicking a tile opens the
+  session's chat. **Reply** (**Steer** while a turn runs) sends a prompt from the tile, and its box
+  can insert the monitor's suggestion for editing. The **…** menu opens the session, stops a running
+  turn after confirmation, or closes a session that is not running, which moves it to History. A
+  session with an unsent draft offers **Open** instead of Reply, so the draft is never overwritten,
+  and the active session's reply goes to the composer. The Monitor asks for checks and ticks its
+  clocks only while it is on screen.
 - **Transcript.** Prompts and messages render as Markdown with highlighted code and KaTeX math
   (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`, or a `math` fence). A `mermaid` fence renders as a
   diagram; Mermaid loads with the first one, a diagram opens enlarged on click, and one that

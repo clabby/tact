@@ -8,6 +8,21 @@ export type Viewport = "phone" | "tablet" | "desktop";
  */
 export type View = "chat" | "review" | "monitor";
 
+/**
+ * The Monitor exists only while at least this many sessions are live: with one, its chat already
+ * shows everything. The server's monitor checks follow the same rule.
+ */
+export const MONITOR_MIN_LIVE = 2;
+
+export function monitorAvailable(liveSessions: number) {
+  return liveSessions >= MONITOR_MIN_LIVE;
+}
+
+/** Whether the palette offers to open the Monitor: it exists and is not already shown. */
+export function offersMonitor(layout: Layout, liveSessions: number) {
+  return layout.view !== "monitor" && monitorAvailable(liveSessions);
+}
+
 export type Layout = {
   viewport: Viewport;
   /** The sidebar drawer on phones and tablets; the sidebar is always shown on desktops. */
@@ -28,6 +43,8 @@ export type LayoutAction =
   | { type: "toggle-drawer"; open?: boolean }
   | { type: "toggle-sidebar" }
   | { type: "view"; view: View }
+  /** The number of live sessions changed. */
+  | { type: "live"; count: number }
   | { type: "escape" };
 
 export function loadLayout(width: number, sidebarCollapsed = false): Layout {
@@ -52,6 +69,9 @@ export function layoutReducer(layout: Layout, action: LayoutAction): Layout {
         : { ...layout, drawerOpen: !layout.drawerOpen };
     case "view":
       return action.view === layout.view ? layout : { ...layout, view: action.view, drawerOpen: false };
+    case "live":
+      // A Monitor left with too few live sessions gives way to the chat.
+      return layout.view === "monitor" && !monitorAvailable(action.count) ? { ...layout, view: "chat" } : layout;
     case "escape":
       return layout.drawerOpen ? { ...layout, drawerOpen: false } : layout;
   }

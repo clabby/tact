@@ -12,7 +12,7 @@ import { showFileViewer } from "./viewer/file-viewer";
 import { setAttentionBadge } from "./shell/favicon";
 import { effortColor, modelColor } from "./core/format";
 import { glyph } from "./ui/glyphs";
-import { layoutReducer, loadLayout, type Layout, type LayoutAction, type View } from "./shell/layout";
+import { layoutReducer, loadLayout, offersMonitor, type Layout, type LayoutAction, type View } from "./shell/layout";
 import { openConfigEditor, openContextDiagnostics, openMemories, openPhoneLink, openReflect } from "./shell/features";
 import { openSubagents, type SubagentsView } from "./chat/subagents";
 import { formatAge } from "./core/format";
@@ -270,6 +270,7 @@ class App {
           break;
         case "live": {
           this.sidebar.setLive(state.live, state.active);
+          this.dispatch({ type: "live", count: state.live.length });
           this.sidebar.renderFooter(state.connection, this.instances);
           this.composer.statusChanged();
           this.composer.settingsChanged();
@@ -827,10 +828,10 @@ class App {
         void this.api.command("reload_config").then(() => toast("Configuration reloaded."), (error) => toast(describeError(error), "danger"));
       } },
       { id: "view", title: this.layout.view === "chat" ? "Show review" : "Show chat", group: "View", icon: this.layout.view === "chat" ? "panel" : "message", keywords: "diff changes overview", hint: isMac ? "⌘." : "Ctrl .", run: () => this.showView(this.layout.view === "chat" ? "review" : "chat") },
-      ...(this.layout.view === "monitor" ? [] : [{
+      ...(offersMonitor(this.layout, this.store.state.live.length) ? [{
         id: "monitor", title: "Monitor", group: "View", icon: "gauge" as const, keywords: "sessions dashboard attention tasks",
         run: () => this.showView("monitor"),
-      }]),
+      }] : []),
       { id: "sidebar", title: "Toggle sidebar", group: "View", icon: "sidebar", hint: isMac ? "⌘B" : "Ctrl B", run: () => this.dispatch({ type: "toggle-sidebar" }) },
       { id: "composer", title: "Focus composer", group: "View", icon: "pencil", hint: "/", run: () => this.composer.focus() },
       { id: "find", title: "Find in transcript", group: "View", icon: "search", keywords: "search", hint: isMac ? "⌘F" : "Ctrl F", run: () => this.openFind() },

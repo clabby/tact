@@ -150,6 +150,19 @@ describe("sidebar titles", () => {
   });
 });
 describe("sidebar Monitor item", () => {
+  test("shows only while at least two sessions are live", () => {
+    const root = document.createElement("aside");
+    const sidebar = new Sidebar(root, host);
+    const item = root.querySelector<HTMLElement>(".monitor-item")!;
+    expect(item.hidden).toBe(true);
+    sidebar.setLive([session("a", "idle")], "a");
+    expect(item.hidden).toBe(true);
+    sidebar.setLive([session("a", "idle"), session("b", "idle")], "a");
+    expect(item.hidden).toBe(false);
+    sidebar.setLive([session("b", "idle")], "b");
+    expect(item.hidden).toBe(true);
+  });
+
   test("shows how many sessions need the user and run, and takes the selection while shown", () => {
     const root = document.createElement("aside");
     const sidebar = new Sidebar(root, host);

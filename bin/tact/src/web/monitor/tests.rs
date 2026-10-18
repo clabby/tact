@@ -235,6 +235,25 @@ async fn nothing_runs_without_live_sessions_or_an_available_model() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn one_live_session_is_never_checked() {
+    let fixture = fixture(FakeModel::default());
+    fixture.open("s1", "Fix the parser").await;
+    assert_eq!(fixture.touch(true).await["running"], false);
+    tokio::time::sleep(INTERVAL * 2).await;
+    fixture.prompt("s1", "Also update the docs").await;
+    fixture.touch(true).await;
+    assert_eq!(
+        fixture.calls(),
+        0,
+        "neither a refresh nor the periodic check runs for one session"
+    );
+
+    fixture.open("s2", "Write the docs").await;
+    fixture.touch(false).await;
+    assert_eq!(fixture.calls(), 1, "a second session makes a check due");
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_disabled_monitor_reports_why_and_never_runs() {
     let (_terminal, end) = bridge::bridge();
     let shutdown = CancellationToken::new();
@@ -262,6 +281,7 @@ async fn one_check_runs_at_a_time_and_its_progress_is_broadcast() {
         ..replies([notes(&[("s1", "needs_input")])])
     });
     fixture.open("s1", "Fix the parser").await;
+    fixture.open("s2", "Write the docs").await;
     let mut subscription = fixture.hub.subscribe().unwrap();
     settle().await;
     monitor_events(&mut subscription);
@@ -311,6 +331,7 @@ async fn one_check_runs_at_a_time_and_its_progress_is_broadcast() {
 async fn automatic_checks_wait_for_changes_and_the_interval_and_refreshes_for_the_floor() {
     let fixture = fixture(FakeModel::default());
     fixture.open("s1", "Fix the parser").await;
+    fixture.open("s2", "Write the docs").await;
     fixture.touch(false).await;
     assert_eq!(fixture.calls(), 1, "the first check is due at once");
 
@@ -343,6 +364,7 @@ async fn automatic_checks_wait_for_changes_and_the_interval_and_refreshes_for_th
 async fn nothing_runs_once_the_lease_expires() {
     let fixture = fixture(FakeModel::default());
     fixture.open("s1", "Fix the parser").await;
+    fixture.open("s2", "Write the docs").await;
     fixture.touch(false).await;
     assert_eq!(fixture.calls(), 1);
 
@@ -363,6 +385,7 @@ async fn failures_are_reported_until_the_next_success() {
         notes(&[("s1", "ok")]),
     ]));
     fixture.open("s1", "Fix the parser").await;
+    fixture.open("s2", "Write the docs").await;
 
     fixture.touch(true).await;
     assert_eq!(
@@ -433,6 +456,7 @@ async fn the_next_check_reads_the_previous_notes() {
         Ok(json!({"sessions": [{"session": "s1", "attention": "ok", "health": 80}]}).to_string()),
     ]));
     fixture.open("s1", "Work").await;
+    fixture.open("s2", "Write the docs").await;
     fixture.touch(true).await;
     assert_eq!(fixture.last_input()["previous_check"], Value::Null);
     assert_eq!(
@@ -464,6 +488,7 @@ async fn a_different_model_judges_without_the_previous_notes() {
         Ok(json!({"sessions": [{"session": "s1", "attention": "ok", "health": 80}]}).to_string()),
     ]));
     fixture.open("s1", "Work").await;
+    fixture.open("s2", "Write the docs").await;
     fixture.touch(true).await;
 
     *fixture.model.model.lock().unwrap() = HarnessModel::Claude(ClaudeModel::Sonnet55);
@@ -486,6 +511,7 @@ async fn figures_must_come_from_what_the_model_read_about_the_session() {
     ]})
     .to_string())]));
     fixture.open("s1", "Fix the 387 failing parser tests").await;
+    fixture.open("s2", "Write the docs").await;
     fixture.touch(true).await;
     let blocks = fixture.state()["check"]["sessions"][0]["blocks"].clone();
     assert_eq!(
@@ -503,6 +529,7 @@ async fn shutdown_abandons_a_running_check() {
         ..FakeModel::default()
     });
     fixture.open("s1", "Work").await;
+    fixture.open("s2", "Write the docs").await;
     fixture.touch(false).await;
     let waiting = Arc::strong_count(&gate);
 

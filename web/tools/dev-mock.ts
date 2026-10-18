@@ -38,6 +38,7 @@ import type {
   Workspaces,
 } from "../src/core/wire";
 import { parseApplyPatch, patchStats } from "../src/chat/patch";
+import { monitorAvailable } from "../src/shell/layout";
 
 type EntryBody = WireEntry extends infer Entry
   ? Entry extends WireEntry ? Omit<Entry, "id" | "revision" | "parent"> : never
@@ -689,15 +690,16 @@ export class MockTact {
   }
 
   /**
-   * Imitates POST /api/monitor: a check starts when none ever ran, when a refresh asks for one at
-   * least 10 s after the last, or when the sessions changed and the interval has passed.
+   * Imitates POST /api/monitor: while at least two sessions are live, a check starts when none
+   * ever ran, when a refresh asks for one at least 10 s after the last, or when the sessions
+   * changed and the interval has passed.
    */
   monitor(refresh: boolean): MonitorState {
     const state = this.monitorState;
     const since = Date.now() - this.checkStarted;
     const changed = this.checkFingerprint() !== this.checkInput;
     const due = state.check === null || (refresh ? since >= 10_000 : changed && since >= state.interval_seconds * 1000);
-    if (state.availability === "ready" && !state.running && this.sessions.size > 0 && due) this.runCheck();
+    if (state.availability === "ready" && !state.running && monitorAvailable(this.sessions.size) && due) this.runCheck();
     return structuredClone(state);
   }
 

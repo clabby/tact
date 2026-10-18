@@ -132,6 +132,17 @@ test("the mock monitor model runs one check at a time and notes every live sessi
   expect(check!.sessions.find((note) => note.attention === "needs_input")).toMatchObject({ reason: expect.any(String), suggestion: expect.any(String) });
   expect(check!.sessions.filter((note) => note.attention === "ok").every((note) => note.reason === null)).toBe(true);
 });
+test("the mock monitor model checks only while at least two sessions are live", () => {
+  const mock = new MockTact();
+  mock.pace = 0;
+  const [kept, ...others] = mock.live().sessions.map((summary) => summary.id);
+  for (const session of others) mock.command("close_session", { session, force: true }, 1);
+  expect(mock.live().sessions.map((summary) => summary.id)).toEqual([kept]);
+  expect([mock.monitor(false).running, mock.monitor(true).running]).toEqual([false, false]);
+  mock.command("open_session", { new: {} }, 1);
+  expect(mock.monitor(false).running).toBe(true);
+});
+
 test("the mock monitor model's notes give goals and show every block type and live source", async () => {
   const mock = new MockTact();
   mock.pace = 0;

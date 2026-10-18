@@ -5,6 +5,7 @@ import { createSphere } from "../ui/dot-sphere";
 import { openMenu } from "../ui/menu";
 import { orderSessions } from "./session-pins";
 import { SessionTitles } from "./session-title";
+import { monitorAvailable } from "./layout";
 import type { Connection } from "../core/store";
 import { toast } from "../ui/toast";
 import type { ModelCatalog, OpenSpec, PersistedSession, SessionSummary, SiblingInstance } from "../core/wire";
@@ -76,7 +77,7 @@ export class Sidebar {
         <button type="button" class="new-chat-button">${glyph("plus")}<span>New chat</span></button>
         <button type="button" class="new-chat-model" aria-label="New chat with model" aria-haspopup="menu">${glyph("chevron-down")}</button>
       </div>
-      <button type="button" class="monitor-item">
+      <button type="button" class="monitor-item" hidden>
         <span class="monitor-glyph" aria-hidden="true">${glyph("gauge")}</span>
         <span class="monitor-label">Monitor</span>
         <span class="monitor-running" hidden></span>
@@ -112,6 +113,7 @@ export class Sidebar {
     const closed = this.live.some((old) => !live.some((session) => session.id === old.id));
     this.live = orderSessions(live, this.pinned);
     this.active = active;
+    this.monitorItem.hidden = !monitorAvailable(live.length);
     this.renderLive();
     // A closed session is only in History once it has been listed again, and the loaded pages
     // predate it. A reload also recomputes which rows the live list now hides.

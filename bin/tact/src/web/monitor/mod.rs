@@ -4,12 +4,12 @@
 //! unblock the agent.
 //!
 //! Browsers declare interest by calling `POST /api/monitor`; each call holds a lease for [`LEASE`].
-//! While a lease is live, a check starts when none is running, at least one session is live, the
-//! model is available, and either the caller asked for a refresh at least [`REFRESH_FLOOR`] after
-//! the last check started, or the sessions changed since the last check read them and the
-//! configured interval has passed since it started. Calls and a periodic check apply these rules,
-//! so automatic checks do not depend on how often browsers call. Without a browser showing the
-//! Monitor, the model is never called.
+//! While a lease is live, a check starts when none is running, at least [`MIN_LIVE_SESSIONS`]
+//! sessions are live, the model is available, and either the caller asked for a refresh at least
+//! [`REFRESH_FLOOR`] after the last check started, or the sessions changed since the last check
+//! read them and the configured interval has passed since it started. Calls and a periodic check
+//! apply these rules, so automatic checks do not depend on how often browsers call. Without a
+//! browser showing the Monitor, the model is never called.
 //!
 //! The state sits behind one synchronous lock that is never held across an await or while the
 //! hub's lock is taken. Every change is broadcast to all streams as a `monitor` event.
@@ -54,6 +54,8 @@ const LEASE: Duration = Duration::from_secs(60);
 const REFRESH_FLOOR: Duration = Duration::from_secs(10);
 /// How often the automatic rule is applied between browser calls.
 const CHECK_PERIOD: Duration = Duration::from_secs(5);
+/// The Monitor exists to compare sessions, so the model never checks fewer than this many.
+const MIN_LIVE_SESSIONS: usize = 2;
 
 pub(super) struct Monitor {
     hub: Hub,
@@ -224,7 +226,7 @@ impl Monitor {
                 return;
             }
             let leased = inner.lease_until.is_some_and(|until| now < until);
-            if inner.running || live == 0 || !leased {
+            if inner.running || live < MIN_LIVE_SESSIONS || !leased {
                 return;
             }
             let waited = |at_least: Duration| {
@@ -271,7 +273,7 @@ impl Monitor {
             .hub
             .read_sessions(|views| input::build(views, continued, as_of_ms));
         let result =
-            if input.sessions.is_empty() {
+            if input.sessions.len() < MIN_LIVE_SESSIONS {
                 None
             } else {
                 let reply = tokio::select! {
@@ -286,7 +288,7 @@ impl Monitor {
             let mut inner = self.lock();
             inner.running = false;
             match result {
-                // Every session closed before the input was read; there is nothing to report.
+                // Sessions closed before the input was read, leaving too few to check.
                 None => {}
                 Some(Ok(mut notes)) => {
                     for note in &mut notes {
