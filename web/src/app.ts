@@ -574,9 +574,8 @@ class App {
       } else if (mod && event.key === ".") {
         event.preventDefault();
         this.showView(this.layout.view === "review" ? "chat" : "review");
-      } else if (mod && event.key.toLowerCase() === "f" && !event.shiftKey && !event.altKey && !isEditable(event.target)) {
-        event.preventDefault();
-        this.openFind();
+      } else if (mod && event.key.toLowerCase() === "f" && !event.shiftKey && !event.altKey && !keepsBrowserFind(event.target)) {
+        if (this.find()) event.preventDefault();
       } else if (mod && event.key.toLowerCase() === "k") {
         event.preventDefault();
         if (this.palette.isOpen) this.palette.close();
@@ -657,11 +656,14 @@ class App {
     }, agent);
   }
 
-  /** Find in the transcript; in a text field the browser's own find stays in charge. */
-  private openFind() {
-    if (!this.store.state.session) return;
-    this.showView("chat");
-    this.findBar.open();
+  /**
+   * Opens find for the shown view. Returns false while the review has no changes to search, so
+   * the browser's own find stays in charge.
+   */
+  private find() {
+    if (this.layout.view === "review") return this.review?.openSearch() ?? false;
+    if (this.store.state.session) this.findBar.open();
+    return true;
   }
 
   /** Sends a command, reporting a refusal as a toast. */
@@ -770,7 +772,7 @@ class App {
       { id: "view", title: this.layout.view === "review" ? "Show chat" : "Show review", group: "View", icon: this.layout.view === "review" ? "message" : "panel", keywords: "diff changes overview", hint: isMac ? "⌘." : "Ctrl .", run: () => this.showView(this.layout.view === "review" ? "chat" : "review") },
       { id: "sidebar", title: "Toggle sidebar", group: "View", icon: "sidebar", hint: isMac ? "⌘B" : "Ctrl B", run: () => this.dispatch({ type: "toggle-sidebar" }) },
       { id: "composer", title: "Focus composer", group: "View", icon: "pencil", hint: "/", run: () => this.composer.focus() },
-      { id: "find", title: "Find in transcript", group: "View", icon: "search", keywords: "search", hint: isMac ? "⌘F" : "Ctrl F", run: () => this.openFind() },
+      { id: "find", title: this.layout.view === "review" ? "Find in changes" : "Find in transcript", group: "View", icon: "search", keywords: "search", hint: isMac ? "⌘F" : "Ctrl F", run: () => this.find() },
       { id: "shortcuts", title: "Keyboard shortcuts", group: "View", icon: "keyboard", hint: "?", run: () => showShortcuts() },
       ...(["system", "light", "dark"] as const).filter((choice) => choice !== this.theme.choice).map((choice): PaletteCommand => ({
         id: `theme:${choice}`, title: `Theme: ${choice}`, group: "View", icon: choice === "dark" ? "moon" : choice === "light" ? "sun" : "monitor",
@@ -805,7 +807,7 @@ const SHORTCUTS: [string, string][] = [
   [isMac ? "⌘B" : "Ctrl B", "Show or hide the sidebar"],
   [isMac ? "⌘." : "Ctrl .", "Switch between chat and review"],
   ["/", "Focus the composer"],
-  [isMac ? "⌘F" : "Ctrl F", "Find in the transcript (outside text fields)"],
+  [isMac ? "⌘F" : "Ctrl F", "Find in the transcript, or in the changes on the review (outside text fields)"],
   ["Enter", "Send, or steer while a turn runs"],
   ["Shift Tab", "Queue the prompt while a turn runs (instead of steering)"],
   ["Shift Enter", "New line"],
@@ -839,6 +841,11 @@ function linkTarget(hash: string): HashLink | null {
 
 function isEditable(target: EventTarget | null) {
   return target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
+}
+
+/** Text fields keep the browser's find, except a find bar's own query, where the shortcut selects it again. */
+function keepsBrowserFind(target: EventTarget | null) {
+  return isEditable(target) && !(target as HTMLElement).closest('[role="search"]');
 }
 
 async function main() {
