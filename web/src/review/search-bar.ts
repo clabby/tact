@@ -37,7 +37,7 @@ export class SearchBar {
       this.move(event.shiftKey ? -1 : 1);
       return;
     }
-    if (event.key === "Escape") {
+    if (event.key === "Escape" && !event.defaultPrevented && !document.querySelector('[role="menu"]')) {
       event.preventDefault();
       this.close();
     }
@@ -49,7 +49,9 @@ export class SearchBar {
   ) {}
 
   bind() {
-    document.addEventListener("keydown", this.handleShortcut);
+    // Page shortcuts listen in the bubble phase. Capturing lets Esc close the search before the
+    // page treats it as a request to interrupt the running turn.
+    document.addEventListener("keydown", this.handleShortcut, true);
     const input = this.root.querySelector<HTMLInputElement>("#review-search-input");
     input?.addEventListener("input", () => this.update());
     input?.addEventListener("keydown", (event) => {
@@ -249,7 +251,7 @@ export class SearchBar {
 
   /** Stops listening for the search's keys. */
   dispose() {
-    document.removeEventListener("keydown", this.handleShortcut);
+    document.removeEventListener("keydown", this.handleShortcut, true);
   }
 
   /** Tracks the reviewer's own line selection so closing the search restores it. */

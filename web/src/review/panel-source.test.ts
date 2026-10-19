@@ -73,7 +73,7 @@ test("review search integrates with the virtualized review lifecycle", async () 
   expect(search).toContain("if (this.isOpen()) this.selection = null");
   expect((await allPanelSources()).match(/viewer(\(\))?\?\.clearSelectedLines\(\)/g)).toHaveLength(1);
   expect(cleanup).toContain("this.search.dispose()");
-  expect(dispose).toContain('document.removeEventListener("keydown", this.handleShortcut)');
+  expect(dispose).toContain('document.removeEventListener("keydown", this.handleShortcut, true)');
   expect(cleanup.indexOf("this.diffView.dispose()")).toBeLessThan(cleanup.indexOf("CSS.highlights?.delete"));
   expect(diffDispose).toContain("this.codeView?.cleanUp()");
   expect(css).toMatch(/\.review-search\s*{[^}]*position:\s*absolute/s);
