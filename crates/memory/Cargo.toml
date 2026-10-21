@@ -19,12 +19,13 @@ client = ["dep:reqwest", "dep:rustls", "dep:tokio", "dep:url", "dep:zeroize"]
 local = ["dep:rusqlite", "dep:tokio", "dep:zeroize"]
 native-server = ["server", "dep:tokio", "tower/limit"]
 server = ["dep:axum", "dep:sha2", "dep:tower", "dep:tracing", "dep:web-time", "dep:zeroize"]
-tool = ["client", "local", "dep:nanocodex", "dep:zeroize"]
+tool = ["client", "local", "dep:async-trait", "dep:nanocode", "dep:zeroize"]
 
 [dependencies]
+async-trait = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 const_format.workspace = true
-nanocodex = { workspace = true, optional = true }
+nanocode = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }

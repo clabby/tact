@@ -13,12 +13,13 @@ use crate::{
     },
 };
 use axum::http::{Method, StatusCode};
-use nanocodex::{
-    ClaudeModel, HarnessModel,
+use nanocode::{
+    ClaudeModel,
     agent::events::{AgentEvent, AgentEventKind},
 };
 use serde_json::{Value, json, value::to_raw_value};
 use std::{cell::Cell, collections::VecDeque, sync::Arc, time::Duration};
+use tact_subagents::HarnessModel;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 

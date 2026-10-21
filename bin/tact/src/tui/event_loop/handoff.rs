@@ -23,8 +23,8 @@ use crate::{
     },
     tui::components::AppEvent,
 };
-use nanocodex::HarnessModel as Model;
 use std::future;
+use tact_subagents::HarnessModel as Model;
 use tokio::{
     sync::oneshot,
     task::{JoinError, JoinHandle},

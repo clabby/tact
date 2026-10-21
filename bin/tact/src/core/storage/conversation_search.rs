@@ -94,7 +94,7 @@ pub(super) fn ensure_schema(connection: &Connection, path: &Path) -> Result<(), 
 /// SQL for the conversation text of the `events` row named `row`, or NULL for any other event.
 /// Prompts already have their text in a column; only records whose prefix names an assistant
 /// message are parsed.
-fn conversation_text(row: &str) -> String {
+pub(super) fn conversation_text(row: &str) -> String {
     format!(
         "CASE WHEN {row}.prompt_text IS NOT NULL THEN {row}.prompt_text\n\
          WHEN instr(CAST(substr({row}.record_json, 1, {RECORD_TYPE_PREFIX_BYTES}) AS TEXT),\n\
@@ -268,7 +268,7 @@ mod tests {
             },
         },
     };
-    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use nanocode::agent::events::{AgentEvent, AgentEventKind};
     use rusqlite::Connection;
     use serde_json::{json, value::to_raw_value};
     use std::{path::Path, sync::Arc};

@@ -5,7 +5,7 @@
 [![Crates.io MSRV](https://img.shields.io/crates/msrv/tact?style=for-the-badge)](https://crates.io/crates/tact)
 [![Crates.io Version](https://img.shields.io/crates/v/tact?style=for-the-badge)](https://crates.io/crates/tact)
 
-Tact is a coding agent for your terminal, built on [Nanocodex](https://github.com/gakonst/nanocodex).
+Tact is a coding agent for your terminal, built on [Nanocodex](https://github.com/gakonst/nanocode).
 It runs OpenAI's GPT-6 models out of the box and can also drive Anthropic's Claude models. Alongside
 the terminal UI, every Tact process serves a web interface you can open from a browser or your phone,
 with a built-in code review panel. Agents can delegate work to subagents, keep a small long-term
@@ -323,7 +323,7 @@ Esc to cancel.
 | Model | ID | Default effort |
 | --- | --- | --- |
 | `luna` | `gpt-6-luna` | medium |
-| `sol` | `gpt-6.1-sol` | low |
+| `sol` | `gpt-6.1-sol` | medium |
 | `astra` | `gpt-6-astra` | low |
 | `haiku-5.5` | `claude-haiku-5-5` | medium |
 | `sonnet-5.5` | `claude-sonnet-5-5` | high |
@@ -458,8 +458,8 @@ internal prompt.
 ### Messaging other sessions
 
 Every session has the `find_sessions`, `read_session`, and `message_session` tools. `find_sessions` reports
-each session's model and effort, whether it is `live` (open in any Tact process, detected through
-its session lock), and whether it is `messageable` (open in this process). `live_only` limits a search to
+each session's model and effort, and whether it is `live` (open in any Tact process, detected through
+its session lock). `live_only` limits a search to
 live sessions. A session meant to watch and orchestrate others can combine them: find live
 sessions, read their transcripts, and steer them.
 
@@ -469,9 +469,12 @@ target is idle. The target sees the text prefixed with the sending session's ID,
 records the message like a steer. The result says whether the target was `steered` or `started`.
 It is not a reply. Read the target's transcript to see what it did next.
 
-Only sessions open in the same Tact process can be messaged, including panes and forks beside the
-current one. A session that is live in another process shows `live: true` but fails with a
-not-live error. A session cannot message itself.
+A target that is stored but not open is resumed in a background pane of the same Tact process, then
+receives the message, provided it was recorded in this Tact's workspace or another checkout of the
+same repository. Sessions from unrelated workspaces are rejected, so an orchestrating session can open the sessions it steers. The new pane
+doesn't take focus, and the open counts against the live session limit. A session that is live in
+another process shows `live: true` and the message is rejected, because only one process can open
+it. A session cannot message itself.
 
 Tact doesn't prompt agents to use `message_session`. The tool description tells the model to use it
 only when you explicitly ask it to message or steer another session. In the TUI and web UI the call

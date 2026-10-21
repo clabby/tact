@@ -8,11 +8,13 @@ use super::{
     output::OutputContract,
     runtime::{AgentDirectoryEntry, AgentSummary, Registry, forward_events},
 };
-use nanocodex::{
-    HarnessModel as Model, ReasoningMode, Thinking, Tool,
+use crate::HarnessModel as Model;
+use async_trait::async_trait;
+use nanocode::{
+    ReasoningMode, Thinking, Tool,
     tools::{
         ToolsBuilder,
-        contract::{ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, async_trait},
+        contract::{ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult},
     },
 };
 use serde::{Deserialize, Serialize};
@@ -673,13 +675,14 @@ fn agent_status_schema() -> Value {
 mod tests {
     use super::{SendAgentMessage, SpawnAgent, SubmitResult, WaitAgent};
     use crate::{
-        AgentContext, AgentDescriptor, AgentUpdate, ScopedAgentUpdate, Speed,
+        AgentContext, AgentDescriptor, AgentUpdate, HarnessModel as Model, ScopedAgentUpdate,
+        Speed,
         error::{SpawnError, SubagentError},
         runtime::Registry,
         test_support::recording_agent,
     };
-    use nanocodex::{
-        HarnessModel as Model, Model as CodexModel, NanocodexError, ReasoningMode, Thinking, Tool,
+    use nanocode::{
+        Model as CodexModel, NanocodexError, ReasoningMode, Thinking, Tool,
         tools::contract::{ToolContext, ToolError, ToolInput, ToolOutput},
     };
     use serde_json::{Value, json, value::to_raw_value};

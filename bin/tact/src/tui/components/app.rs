@@ -37,7 +37,6 @@ use crate::{
     },
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
-use nanocodex::HarnessModel as Model;
 use ratatui::{
     Frame,
     layout::{Position, Rect},
@@ -47,7 +46,7 @@ use ratatui::{
 use semver::Version;
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
 use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
-use tact_subagents::{AgentUpdate, SubagentRoster};
+use tact_subagents::{AgentUpdate, HarnessModel as Model, SubagentRoster};
 use unicode_width::UnicodeWidthStr;
 
 const SPLIT_HINT: &str = " mouse: focus · Ctrl+C: clear · Ctrl+C×2: close ";
@@ -1678,11 +1677,12 @@ mod tests {
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use nanocodex::{HarnessModel as Model, Model as CodexModel};
+    use nanocode::Model as CodexModel;
     use ratatui::{Terminal, backend::TestBackend};
     use semver::Version;
     use std::{num::NonZeroU16, path::PathBuf, sync::Arc};
     use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord};
+    use tact_subagents::HarnessModel as Model;
 
     fn app() -> AppNode {
         let workspace = PathBuf::from("/workspace");
@@ -1799,7 +1799,7 @@ mod tests {
         let mut app = app();
         app.pane_mut(PaneId::Main)
             .unwrap()
-            .set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
+            .set_model(Model::Claude(nanocode::ClaudeModel::Opus55));
         app.update(AppEvent::ContextBudget {
             pane: PaneId::Main,
             budget: crate::core::context::ContextBudget {
@@ -2489,8 +2489,9 @@ mod registry_tests {
         web::bridge::{self, WebEnd},
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    use nanocodex::{HarnessModel as Model, Model as CodexModel};
+    use nanocode::Model as CodexModel;
     use std::{path::PathBuf, sync::Arc};
+    use tact_subagents::HarnessModel as Model;
 
     struct Harness {
         app: AppNode,
@@ -3207,9 +3208,8 @@ mod parity_tests {
         web::bridge::{self, WebEnd},
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    use nanocodex::{
-        ClaudeModel, HarnessModel as Model, Model as CodexModel,
-        ReasoningMode as NanocodexReasoningMode, Thinking,
+    use nanocode::{
+        ClaudeModel, Model as CodexModel, ReasoningMode as NanocodexReasoningMode, Thinking,
         agent::{
             events::{AgentEvent, AgentEventKind},
             input::{PromptInput, UserInput},
@@ -3217,7 +3217,7 @@ mod parity_tests {
     };
     use serde_json::{json, value::to_raw_value};
     use std::{path::PathBuf, sync::Arc};
-    use tact_subagents::{AgentDescriptor, AgentId, AgentUpdate};
+    use tact_subagents::{AgentDescriptor, AgentId, AgentUpdate, HarnessModel as Model};
 
     const IMAGE: &str = "data:image/png;base64,iVBORw0KGgo=";
 

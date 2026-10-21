@@ -1,4 +1,5 @@
-use nanocodex::{HarnessModel as Model, oai::pricing::ServiceTier};
+use crate::HarnessModel as Model;
+use nanocode::oai::pricing::ServiceTier;
 use serde::{Deserialize, Serialize};
 
 /// Preferred processing speed, inherited by newly created child sessions.
@@ -28,7 +29,7 @@ impl Speed {
     }
 
     /// Resolves a preference to the fastest supported speed no higher than requested.
-    pub const fn for_model(self, model: Model) -> Self {
+    pub fn for_model(self, model: Model) -> Self {
         match (self, model) {
             (Self::Standard, _) => Self::Standard,
             (Self::Ultrafast, Model::Codex(model))
@@ -58,7 +59,8 @@ impl From<Speed> for ServiceTier {
 #[cfg(test)]
 mod tests {
     use super::Speed;
-    use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
+    use crate::HarnessModel as Model;
+    use nanocode::{ClaudeModel, Model as CodexModel};
 
     #[test]
     fn speed_preferences_fall_back_to_the_models_fastest_supported_tier() {

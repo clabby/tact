@@ -1,5 +1,6 @@
-use nanocodex::{
-    HarnessModel as Model, Model as CodexModel, ReasoningMode, Thinking,
+use crate::HarnessModel as Model;
+use nanocode::{
+    Model as CodexModel, ReasoningMode, Thinking,
     agent::events::AgentEvent,
     oai::{Prompt, PromptInput, UserInput},
 };
@@ -482,8 +483,9 @@ impl SubagentRuntimeId {
 #[cfg(test)]
 mod tests {
     use super::{AgentContext, AgentId, AgentStatus, MessagePriority, agent_prompt};
-    use nanocodex::{
-        HarnessModel as Model, Model as CodexModel, ReasoningMode, Thinking,
+    use crate::HarnessModel as Model;
+    use nanocode::{
+        Model as CodexModel, ReasoningMode, Thinking,
         oai::{Prompt, PromptInput, PromptMessage, UserInput},
     };
 

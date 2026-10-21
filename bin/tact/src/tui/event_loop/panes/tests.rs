@@ -8,18 +8,20 @@ use crate::{
         pane::PaneId,
         session::{SessionLock, SessionStore},
         shell::ShellExecution,
+        storage::database_path,
         subagent_updates::ForwardedSubagentUpdate,
         transcript::{
-            LocalEvent, LocalKind, SessionEnded, SessionOutcome, SessionStarted, TranscriptRecord,
-            TurnId, UserSubmitted,
+            DurableTranscripts, LocalEvent, LocalKind, SessionEnded, SessionOutcome,
+            SessionStarted, TranscriptRecord, TurnId, UserSubmitted,
         },
         worker::WorkerCommand,
     },
     tui::event_loop::worker_events::WorkerLink,
 };
-use nanocodex::{HarnessModel as Model, Model as CodexModel};
+use nanocode::Model as CodexModel;
+use rusqlite::Connection;
 use std::{fs, sync::Arc};
-use tact_subagents::{AgentId, AgentStatus, AgentUpdate, Subagents};
+use tact_subagents::{AgentId, AgentStatus, AgentUpdate, HarnessModel as Model, Subagents};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
@@ -45,7 +47,7 @@ impl Harness {
             ..ConfigOverrides::default()
         })
         .unwrap();
-        let (panes, reports) = Panes::new();
+        let (panes, reports) = Panes::new(DurableTranscripts::new(config.path()).unwrap());
         let (subagents, _updates) = Subagents::new(32);
         let (sender, commands) = mpsc::unbounded_channel();
         Self {
@@ -318,4 +320,70 @@ async fn a_submission_waits_for_running_shells_and_carries_their_results() {
         panic!("a submission without running shells is sent at once");
     };
     assert_eq!(prompt.display_text(), "again");
+}
+
+#[tokio::test]
+async fn a_closed_pane_keeps_its_session_locked_until_its_writer_drains() {
+    let mut harness = Harness::new();
+    let runtime = harness.open(PaneId::Main, 0, PaneSession::fresh("session"));
+    runtime.record(submitted(1, "stored")).unwrap();
+    runtime.journal_mut().unwrap().flush().await.unwrap();
+    let write_lock = Connection::open(database_path(harness.config.path())).unwrap();
+    write_lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    harness
+        .panes
+        .runtime(PaneId::Main)
+        .unwrap()
+        .record(submitted(2, "waiting"))
+        .unwrap();
+
+    harness.panes.close(PaneId::Main);
+    assert_eq!(
+        harness
+            .panes
+            .agent_stream_ended(PaneId::Main, "session", 0)
+            .unwrap(),
+        StreamEnd::Removed
+    );
+    assert!(SessionLock::is_held(harness.config.path(), "session"));
+
+    write_lock.execute_batch("COMMIT").unwrap();
+    harness.drain_writers(1).await;
+    assert!(!SessionLock::is_held(harness.config.path(), "session"));
+}
+
+#[tokio::test]
+async fn a_failed_writer_keeps_the_session_locked_while_its_pane_is_open() {
+    let mut harness = Harness::new();
+    let runtime = harness.open(PaneId::Main, 0, PaneSession::fresh("session"));
+    runtime.record(submitted(1, "stored")).unwrap();
+    runtime.journal_mut().unwrap().flush().await.unwrap();
+    Connection::open(database_path(harness.config.path()))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_events BEFORE INSERT ON events BEGIN
+                 SELECT RAISE(ABORT, 'forced persistence failure');
+             END;",
+        )
+        .unwrap();
+    harness
+        .panes
+        .runtime(PaneId::Main)
+        .unwrap()
+        .record(submitted(2, "rejected"))
+        .unwrap();
+
+    let completion = harness.reports.writer_completions.recv().await;
+    assert!(harness.panes.writer_finished(completion).is_err());
+    assert!(SessionLock::is_held(harness.config.path(), "session"));
+
+    harness.panes.close(PaneId::Main);
+    assert_eq!(
+        harness
+            .panes
+            .agent_stream_ended(PaneId::Main, "session", 0)
+            .unwrap(),
+        StreamEnd::Removed
+    );
+    assert!(!SessionLock::is_held(harness.config.path(), "session"));
 }

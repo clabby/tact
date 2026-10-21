@@ -26,7 +26,7 @@ use axum::{
     http::{HeaderMap, Method, Request, StatusCode, header},
 };
 use futures_util::future::BoxFuture;
-use nanocodex::{HarnessModel, Model as CodexModel, Thinking};
+use nanocode::{Model as CodexModel, Thinking};
 use std::{
     collections::VecDeque,
     fs,
@@ -36,6 +36,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tact_subagents::HarnessModel;
 use tempfile::TempDir;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;

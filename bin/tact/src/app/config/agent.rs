@@ -6,9 +6,10 @@ use super::{
     render::{non_empty, serialize_optional_string},
     settings::{DEFAULT_MAX_SUBAGENTS, ReasoningEffort, ReasoningMode, Speed, Transport},
 };
-use nanocodex::{HarnessModel as Model, Model as CodexModel};
+use nanocode::Model as CodexModel;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use tact_subagents::HarnessModel as Model;
 
 /// Effective Nanocodex configuration.
 #[derive(Clone, Debug, Serialize)]
@@ -152,8 +153,9 @@ mod tests {
         },
         error::{ConfigError, Error},
     };
-    use nanocodex::{HarnessModel as Model, Model as CodexModel};
+    use nanocode::Model as CodexModel;
     use std::fs;
+    use tact_subagents::HarnessModel as Model;
     use tempfile::tempdir;
 
     #[test]
@@ -186,7 +188,7 @@ mod tests {
     #[test]
     fn model_defaults_choose_the_catalog_effort() {
         for (model, expected) in [
-            ("sol", ReasoningEffort::Low),
+            ("sol", ReasoningEffort::Medium),
             ("luna", ReasoningEffort::Medium),
             ("astra", ReasoningEffort::Low),
             ("haiku-5.5", ReasoningEffort::Medium),
@@ -202,8 +204,8 @@ mod tests {
             assert_eq!(config.agent().thinking(), expected, "model {model}");
         }
 
-        let configured = load_config("[agent]\nmodel = \"sol\"\nthinking = \"medium\"\n").unwrap();
-        assert_eq!(configured.agent().thinking(), ReasoningEffort::Medium);
+        let configured = load_config("[agent]\nmodel = \"sol\"\nthinking = \"high\"\n").unwrap();
+        assert_eq!(configured.agent().thinking(), ReasoningEffort::High);
     }
 
     #[test]

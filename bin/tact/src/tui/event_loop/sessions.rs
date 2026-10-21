@@ -24,8 +24,8 @@ use crate::{
     tui::components::{AppEvent, DraftReset, RestoredSessionProjection, RootNode, SessionListKind},
 };
 use crossterm::event::EventStream;
-use nanocodex::HarnessModel as Model;
 use std::{path::Path, sync::Arc, time::Instant};
+use tact_subagents::HarnessModel as Model;
 
 /// A stored session loaded with an agent configured to continue it.
 pub(super) struct RestoredSession {
@@ -401,9 +401,10 @@ mod tests {
             transcript::{LocalEvent, SessionStarted, TranscriptRecord},
         },
     };
-    use nanocodex::{HarnessModel as Model, Model as CodexModel, agent::session::SessionSnapshot};
+    use nanocode::{Lineage, Model as CodexModel, ModelSelection, SessionCheckpoint, Thinking};
     use serde_json::json;
     use std::{fs, sync::Arc};
+    use tact_subagents::HarnessModel as Model;
 
     #[test]
     fn fresh_openai_sessions_keep_the_pro_reasoning_preference() {
@@ -454,9 +455,9 @@ mod tests {
             .unwrap()
             .append_records("session", &[record])
             .unwrap();
-        let snapshot: SessionSnapshot = serde_json::from_value(json!({
+        let conversation = json!({
             "version": 1,
-            "model": nanocodex::oai::MODEL,
+            "model": nanocode::oai::MODEL,
             "lineage_id": "resume",
             "prompt_cache_key": "cache-resume",
             "workspace": "/work",
@@ -469,8 +470,18 @@ mod tests {
                 "content": [{"type": "input_text", "text": "canonical"}]
             },
             "history": []
-        }))
-        .unwrap();
+        });
+        let snapshot = SessionCheckpoint::native(
+            "session",
+            ModelSelection::Codex(CodexModel::Astra),
+            Thinking::Medium,
+            Lineage::root("session"),
+            "resume",
+            None,
+            true,
+            json!({"service_tier": "standard", "conversation": conversation}),
+        )
+        .into();
         SessionStore::new(&config_path)
             .save_checkpoint("session", &snapshot, "instructions", false)
             .unwrap();

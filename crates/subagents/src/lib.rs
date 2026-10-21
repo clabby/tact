@@ -21,7 +21,10 @@ pub use model::{
     AgentThread, AgentUpdate, MessageDeliveryState, MessageDisposition, MessageId, MessagePriority,
     MessagePurpose, MessageSender, ScopedAgentUpdate, SubagentRuntimeId, ThreadId,
 };
-pub use models::{SUPPORTED_MODELS, UnsupportedModel, is_access_gated, parse_model};
+pub use models::{
+    HarnessModel, SUPPORTED_MODELS, UnknownHarnessModel, UnsupportedModel, is_access_gated,
+    parse_model,
+};
 pub use roster::{SubagentNode, SubagentRoster};
 pub use runtime::{AuthorityError, RootAgentAuthority, Subagents, WeakSubagents};
 pub use speed::Speed;

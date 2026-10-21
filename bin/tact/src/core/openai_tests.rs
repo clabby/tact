@@ -1,7 +1,7 @@
 use super::{ConfiguredAgent, set_speed};
 use crate::{
     app::config::{Config, ConfigOverrides, ReasoningMode, Speed, Transport},
-    core::session::SessionStore,
+    core::session::{AgentSnapshot, SessionStore},
 };
 use axum::{
     Json, Router,
@@ -10,7 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use nanocodex::{HarnessModel, Model, Nanocodex, agent::events::AgentEventKind};
+use nanocode::{Agent, ForkRequest, Model, agent::events::AgentEventKind};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -18,7 +18,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tact_subagents::{AgentStatus, AgentUpdate};
+use tact_subagents::{AgentStatus, AgentUpdate, HarnessModel};
 use tempfile::{TempDir, tempdir};
 use tokio::{net::TcpListener, process::Command, task::JoinHandle, time::timeout};
 
@@ -253,7 +253,7 @@ fn configured(config: &Config, model: Model) -> ConfiguredAgent {
     .unwrap()
 }
 
-async fn prompt(agent: &Nanocodex, text: &str) {
+async fn prompt(agent: &Agent, text: &str) {
     let result = timeout(Duration::from_secs(10), async {
         agent.prompt(text).await.unwrap().result().await.unwrap()
     })
@@ -368,9 +368,9 @@ async fn custom_workspace_reaches_the_agent_checkpoint() {
     let scoped = config.with_workspace(selected.clone());
     let agent = configured(&scoped, Model::Sol);
     prompt(&agent.agent, "Inspect this checkout").await;
-    let snapshot = agent.agent.snapshot().await.unwrap();
+    let checkpoint = agent.agent.checkpoint().await.unwrap();
     assert_eq!(
-        serde_json::to_value(snapshot).unwrap()["workspace"],
+        checkpoint.payload()["conversation"]["workspace"],
         selected.to_string_lossy().as_ref()
     );
     assert_eq!(config.agent().workspace(), directory.path());
@@ -601,7 +601,7 @@ async fn configured_lineage_and_effort_survive_speed_changes_children_and_restor
             child.shutdown().await.unwrap();
             drop(child_events);
 
-            let (fork, fork_events) = root.agent.fork().await.unwrap();
+            let (fork, fork_events) = root.agent.fork(ForkRequest::latest()).await.unwrap();
             prompt(&fork, "fork turn").await;
             let fork_requests = fixture.take_requests();
             assert_policy(&fork_requests, model, transport, Some("ultrafast"));
@@ -610,7 +610,7 @@ async fn configured_lineage_and_effort_survive_speed_changes_children_and_restor
             drop(fork_events);
 
             let session_id = root.agent.session_id().to_owned();
-            let snapshot = root.agent.snapshot().await.unwrap();
+            let snapshot = AgentSnapshot::from(root.agent.checkpoint().await.unwrap());
             SessionStore::new(config.path())
                 .save_checkpoint(&session_id, &snapshot, &root.instructions, true)
                 .unwrap();

@@ -1,6 +1,7 @@
 //! SQLite-backed V2 session persistence.
 
 mod conversation_search;
+mod durable;
 
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
@@ -13,7 +14,11 @@ use crate::{
     },
 };
 pub(crate) use conversation_search::{ConversationMatch, search_terms};
-use nanocodex::agent::events::AgentEventKind;
+use durable::EventPosition;
+#[cfg(test)]
+pub(crate) use durable::SqliteStateReader;
+pub(crate) use durable::{HostBatch, SqliteStateStore, transcript_commit};
+use nanocode::agent::events::AgentEventKind;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, ffi::ErrorCode, params,
     params_from_iter, types::Value,
@@ -36,6 +41,8 @@ pub(super) const BUSY_TIMEOUT: Duration = if cfg!(test) {
     Duration::from_secs(5)
 };
 const STATE_COMPRESSION_LEVEL: i32 = 3;
+/// Bounds the walk up a fork lineage, so a corrupt parent cycle cannot loop.
+const MAX_LINEAGE_DEPTH: u32 = 10_000;
 
 #[derive(Debug, Error)]
 pub(crate) enum StorageError {
@@ -67,6 +74,12 @@ pub(crate) enum StorageError {
     },
     #[error("failed to encode session data: {0}")]
     Encode(#[from] serde_json::Error),
+    #[error("the session event sequence exceeds the largest storable sequence")]
+    SequenceOverflow,
+    #[error("a host batch for session {state_id} is already staged for its writer's next commit")]
+    HostBatchPending { state_id: String },
+    #[error("failed to start the session store thread: {0}")]
+    Thread(#[source] std::io::Error),
     #[error("failed to compress session data: {0}")]
     Compress(#[source] std::io::Error),
     #[error("failed to decode session data: {0}")]
@@ -178,6 +191,7 @@ impl SessionStorage {
         ensure_discovery_indexes(&connection, &path)?;
         conversation_search::ensure_schema(&connection, &path)?;
         ensure_titles(&connection, &path)?;
+        durable::ensure_schema(&connection, &path)?;
         set_private_file_permissions(&path)?;
         Ok(Self {
             path,
@@ -220,6 +234,8 @@ impl SessionStorage {
             active_turns: HashMap::new(),
         }))
     }
+    /// Writes records outside the durability contract, as binaries that predate it do.
+    #[cfg(test)]
     pub(crate) fn append_records(
         &mut self,
         session_id: &str,
@@ -228,6 +244,7 @@ impl SessionStorage {
         self.append_records_and_resume_state(session_id, records, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn append_records_and_resume_state(
         &mut self,
         session_id: &str,
@@ -237,10 +254,7 @@ impl SessionStorage {
         if records.is_empty() && resume_state.is_none() {
             return Ok(());
         }
-        let compressed_state = resume_state
-            .map(|state| zstd::encode_all(state, STATE_COMPRESSION_LEVEL))
-            .transpose()
-            .map_err(StorageError::Compress)?;
+        let compressed_state = resume_state.map(compress_resume_state).transpose()?;
         let path = self.path.clone();
         let transaction = self
             .connection
@@ -249,18 +263,16 @@ impl SessionStorage {
         let mut active_turn = self.active_turns.get(session_id).copied();
         let mut encoded = Vec::new();
         for record in records {
-            if record.local_kind() == Some(LocalKind::WorkerTurnAccepted) {
-                active_turn = Some(record.decode_payload::<WorkerTurnAccepted>()?.id);
-            }
             encoded.clear();
             serde_json::to_writer(&mut encoded, record.as_ref())?;
-            append_record(
+            write_record(
                 &transaction,
                 &path,
                 session_id,
-                active_turn,
+                &mut active_turn,
                 record,
                 &encoded,
+                None,
             )?;
         }
         if let Some(compressed) = compressed_state {
@@ -422,8 +434,7 @@ impl SessionStorage {
         session_id: &str,
         encoded: &[u8],
     ) -> Result<(), StorageError> {
-        let compressed =
-            zstd::encode_all(encoded, STATE_COMPRESSION_LEVEL).map_err(StorageError::Compress)?;
+        let compressed = compress_resume_state(encoded)?;
         write_resume_state(&self.connection, &self.path, session_id, &compressed)
     }
 
@@ -634,6 +645,28 @@ impl SessionStorage {
         Ok(())
     }
 
+    /// The root of the fork lineage that contains `session_id`, and the session's depth below it.
+    /// A session without a stored row is its own root.
+    pub(crate) fn lineage_root(&self, session_id: &str) -> Result<(String, u32), StorageError> {
+        let root = self
+            .connection
+            .query_row(
+                "WITH RECURSIVE chain(session_id, parent_session_id, depth) AS (
+                     SELECT session_id, parent_session_id, 0 FROM sessions WHERE session_id = ?1
+                     UNION ALL
+                     SELECT s.session_id, s.parent_session_id, c.depth + 1 FROM sessions s
+                     JOIN chain c ON s.session_id = c.parent_session_id
+                     WHERE c.depth < ?2
+                 )
+                 SELECT session_id, depth FROM chain ORDER BY depth DESC LIMIT 1",
+                params![session_id, MAX_LINEAGE_DEPTH],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
+            )
+            .optional()
+            .map_err(|source| query(&self.path, source))?;
+        Ok(root.unwrap_or_else(|| (session_id.to_owned(), 0)))
+    }
+
     pub(crate) fn list_sessions(
         &self,
         workspace: &Path,
@@ -825,6 +858,10 @@ impl SessionStorage {
     }
 }
 
+fn compress_resume_state(state: &[u8]) -> Result<Vec<u8>, StorageError> {
+    zstd::encode_all(state, STATE_COMPRESSION_LEVEL).map_err(StorageError::Compress)
+}
+
 fn write_resume_state(
     connection: &Connection,
     path: &Path,
@@ -957,6 +994,31 @@ fn database_version(connection: &Connection, path: &Path) -> Result<i32, Storage
         .map_err(|source| query(path, source))
 }
 
+/// Appends one record and returns its event id, tracking the turn whose assistant stream the
+/// following records belong to.
+fn write_record(
+    transaction: &Transaction<'_>,
+    path: &Path,
+    session_id: &str,
+    active_turn: &mut Option<TurnId>,
+    record: &TranscriptRecord,
+    encoded: &[u8],
+    position: Option<EventPosition>,
+) -> Result<i64, StorageError> {
+    if record.local_kind() == Some(LocalKind::WorkerTurnAccepted) {
+        *active_turn = Some(record.decode_payload::<WorkerTurnAccepted>()?.id);
+    }
+    append_record(
+        transaction,
+        path,
+        session_id,
+        *active_turn,
+        record,
+        encoded,
+        position,
+    )
+}
+
 fn append_record(
     transaction: &Transaction<'_>,
     path: &Path,
@@ -964,7 +1026,8 @@ fn append_record(
     active_turn: Option<TurnId>,
     record: &TranscriptRecord,
     encoded: &[u8],
-) -> Result<(), StorageError> {
+    position: Option<EventPosition>,
+) -> Result<i64, StorageError> {
     if record.local_kind() == Some(LocalKind::SessionStarted) {
         let started = record.decode_payload::<SessionStarted>()?;
         upsert_session(transaction, path, record, &started)?;
@@ -974,9 +1037,10 @@ fn append_record(
     if record.agent_kind() == Some(AgentEventKind::AssistantMessage)
         && let Some(stream) = &assistant_stream
     {
+        // Sequenced rows are immutable contract events; a final message replaces only drafts.
         transaction
             .execute(
-                "DELETE FROM events WHERE session_id = ?1 AND assistant_stream = ?2",
+                "DELETE FROM events WHERE session_id = ?1 AND assistant_stream = ?2 AND seq IS NULL",
                 params![session_id, stream],
             )
             .map_err(|source| query(path, source))?;
@@ -984,8 +1048,9 @@ fn append_record(
     transaction
         .execute(
             "INSERT INTO events(\n\
-                 session_id, record_json, prompt_text, prompt_recorded_at_ms, assistant_stream\n\
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                 session_id, record_json, prompt_text, prompt_recorded_at_ms, assistant_stream,\n\
+                 seq, revision\n\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 session_id,
                 encoded,
@@ -995,10 +1060,13 @@ fn append_record(
                     .map(|_| to_sql_u64(record.recorded_at_unix_ms())),
                 (record.agent_kind() == Some(AgentEventKind::AssistantDelta))
                     .then_some(assistant_stream)
-                    .flatten()
+                    .flatten(),
+                position.map(|position| position.seq),
+                position.map(|position| position.revision)
             ],
         )
         .map_err(|source| query(path, source))?;
+    let event_id = transaction.last_insert_rowid();
     transaction
         .execute(
             "UPDATE sessions SET updated_at_ms = ?2 WHERE session_id = ?1",
@@ -1017,7 +1085,8 @@ fn append_record(
                 .map_err(|source| query(path, source))?;
         }
     }
-    update_settings(transaction, path, session_id, record)
+    update_settings(transaction, path, session_id, record)?;
+    Ok(event_id)
 }
 
 fn upsert_session(

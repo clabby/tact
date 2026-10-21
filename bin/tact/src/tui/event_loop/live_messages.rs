@@ -1,7 +1,8 @@
 //! Delivery of messages that one live session sends to another through `message_session`.
 //!
 //! A message becomes a worker steer on the target's pane, so it joins the running turn or starts
-//! one when the pane is idle. The sender waits for the worker's verdict, which arrives as the
+//! one when the pane is idle. A target that is stored but not open is resumed in a background pane
+//! first, and the message is delivered once it is live. The sender waits for the worker's verdict, which arrives as the
 //! ordinary steer events keyed by a queue identifier that no composer queue entry can use. The
 //! target's transcript records the message as received from the sending session, in both cases.
 
@@ -81,7 +82,12 @@ impl EventLoop {
             .find(|runtime| runtime.session_id == target)
             .map(|runtime| runtime.pane)
         else {
-            drop(reply.send(Err(DeliveryError::NotLive(target))));
+            self.open_message_target(LiveSessionMessage {
+                from,
+                target,
+                text,
+                reply,
+            });
             return Ok(());
         };
         let queue_id = QueueId::new(self.messages.next_id);
@@ -103,6 +109,36 @@ impl EventLoop {
             fallback_id,
             prompt,
         })
+    }
+
+    /// Resumes the stored target of `message` without taking focus from the active pane, provided
+    /// it was recorded in this Tact's workspace (or another checkout of its repository). The
+    /// message is delivered when the resumed session is live and rejected if it cannot be.
+    fn open_message_target(&mut self, message: LiveSessionMessage) {
+        if let Some(pane) = self.opens.pane_resuming(&message.target) {
+            self.opens.await_message(pane, message);
+            return;
+        }
+        let active = self.app.active_pane();
+        let workspace = self.config.agent().workspace().to_owned();
+        match self.opens.resume(
+            message.target.clone(),
+            Some(workspace),
+            &mut self.app,
+            &self.config,
+        ) {
+            Ok(pane) => {
+                self.app.activate(active);
+                self.opens.await_message(pane, message);
+            }
+            Err(error) => {
+                drop(
+                    message
+                        .reply
+                        .send(Err(DeliveryError::Rejected(error.to_string()))),
+                );
+            }
+        }
     }
 
     /// Records a message that joined the target's running turn.

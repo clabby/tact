@@ -49,16 +49,13 @@ test("review search integrates with the virtualized review lifecycle", async () 
   const search = await read("search-bar.ts");
   const diff = await read("diff-view.ts");
   const css = await styles();
-  const shortcuts = search.slice(search.indexOf("handleShortcut"), search.indexOf("constructor("));
-  const open = search.slice(search.indexOf("private open()"), search.indexOf("\n  close()"));
+  const open = search.slice(search.indexOf("\n  open()"), search.indexOf("\n  close()"));
   const close = search.slice(search.indexOf("\n  close()"), search.indexOf("\n  reset()"));
   const dispose = search.slice(search.indexOf("\n  dispose()"), search.indexOf("\n  selectedLinesChanged("));
   const cleanup = app.slice(app.indexOf("\n  cleanUp()"), app.indexOf("private runningChanged"));
   const diffDispose = diff.slice(diff.indexOf("\n  dispose()"), diff.indexOf("\n  render("));
 
   expect(await read("panel-markup.ts")).toContain('id="review-search" role="search" hidden');
-  expect(shortcuts.indexOf("dialog[open]")).toBeLessThan(shortcuts.indexOf('key === "f"'));
-  expect(shortcuts).toContain("this.root.contains(event.target as Node)");
   expect(search).toContain("event.isComposing");
   expect(search).toContain("moveSearchTarget(");
   expect(search).toContain("this.paused = true");
@@ -76,7 +73,7 @@ test("review search integrates with the virtualized review lifecycle", async () 
   expect(search).toContain("if (this.isOpen()) this.selection = null");
   expect((await allPanelSources()).match(/viewer(\(\))?\?\.clearSelectedLines\(\)/g)).toHaveLength(1);
   expect(cleanup).toContain("this.search.dispose()");
-  expect(dispose).toContain('document.removeEventListener("keydown", this.handleShortcut)');
+  expect(dispose).toContain('document.removeEventListener("keydown", this.handleShortcut, true)');
   expect(cleanup.indexOf("this.diffView.dispose()")).toBeLessThan(cleanup.indexOf("CSS.highlights?.delete"));
   expect(diffDispose).toContain("this.codeView?.cleanUp()");
   expect(css).toMatch(/\.review-search\s*{[^}]*position:\s*absolute/s);

@@ -13,7 +13,7 @@ use super::{
     UserImage, UserSteered, UserSubmitted, WorkerSteerFailed, WorkerStopped, WorkerTurnAccepted,
     WorkerTurnFinished, WorkerTurnsInterrupted,
 };
-use nanocodex::{
+use nanocode::{
     agent::events::{
         AgentEventKind, AssistantDelta, AssistantMessage, CompactionCompleted, CompactionFailed,
         ReasoningSummaryDelta, RunError,
@@ -1594,7 +1594,7 @@ mod tests {
             WorkerTurnFinished, WorkerTurnsInterrupted,
         },
     };
-    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use nanocode::agent::events::{AgentEvent, AgentEventKind};
     use serde::Serialize;
     use serde_json::{json, value::to_raw_value};
     use std::sync::Arc;

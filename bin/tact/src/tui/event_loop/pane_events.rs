@@ -13,7 +13,7 @@ use crate::{
     },
     tui::components::AppEvent,
 };
-use nanocodex::agent::events::AgentEventKind;
+use nanocode::agent::events::AgentEventKind;
 
 impl EventLoop {
     /// Journals an agent event of a pane's current session and shows it.

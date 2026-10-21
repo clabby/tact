@@ -10,7 +10,7 @@ pub(crate) use entry::{
     DirectedMessageEntry, EntryId, EntryKind, MessageDelivery, MessagePhase, ToolEntry, ToolState,
     TranscriptEntry, TransientStatus, UserImage,
 };
-pub(crate) use journal::TranscriptJournal;
+pub(crate) use journal::{DurableTranscripts, TranscriptJournal};
 pub(crate) use model::{TranscriptModel, humanize_tool};
 pub(crate) use record::{
     CompactionFinished, ContextObserved, EffortChanged, FastModeChanged, LocalEvent, LocalKind,
@@ -33,6 +33,12 @@ pub(crate) enum TranscriptError {
         path: PathBuf,
         #[source]
         source: serde_json::Error,
+    },
+    #[error("failed to persist the transcript in {path}: {source}")]
+    Durability {
+        path: PathBuf,
+        #[source]
+        source: nanocode::durability::Error,
     },
     #[error("the transcript writer for {0} stopped unexpectedly")]
     WriterStopped(PathBuf),

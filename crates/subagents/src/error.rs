@@ -5,7 +5,8 @@
 //! exists, name the corrective action.
 
 use super::model::{AgentId, AgentStatus, MessageId, MessagePriority};
-use nanocodex::{HarnessModel as Model, NanocodexError, ReasoningMode, Thinking};
+use crate::HarnessModel as Model;
+use nanocode::{NanocodexError, ReasoningMode, Thinking};
 use std::fmt;
 use thiserror::Error;
 use tokio::task::JoinError;

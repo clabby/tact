@@ -17,19 +17,21 @@ use crate::{
     },
     core::{
         ConfiguredAgent,
+        live_sessions::{DeliveryError, LiveSessionMessage},
         pane::PaneId,
         protocol::{CommandError, OpenSpec, Reply},
-        session::{self, SessionLock},
+        session::{self, SessionError, SessionLock, SessionStore},
         worker::WorkerCommand,
     },
     tui::components::{AppEvent, AppNode, DraftReset},
 };
-use nanocodex::{AgentEvents, HarnessModel as Model};
+use nanocode::AgentEvents;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tact_subagents::HarnessModel as Model;
 use tokio::{
     sync::oneshot,
     task::{JoinError, JoinSet},
@@ -62,11 +64,15 @@ pub(super) enum OpenStart {
     Fork { pane: PaneId, parent: PaneId },
 }
 
-/// Open tasks in flight and the web callers waiting for their panes.
+/// Open tasks in flight, the web callers waiting for their panes, and the session messages
+/// waiting to be delivered once their target opens.
 #[derive(Default)]
 pub(super) struct PendingOpens {
     tasks: JoinSet<OpenTask>,
     replies: HashMap<PaneId, CommandReply>,
+    /// The stored session each pane is resuming, until its open finishes.
+    resuming: HashMap<PaneId, String>,
+    messages: HashMap<PaneId, Vec<LiveSessionMessage>>,
 }
 
 impl PendingOpens {
@@ -130,32 +136,8 @@ impl PendingOpens {
                     app.activate(pane);
                     return Ok(OpenStart::Activated(session));
                 }
-                app.can_open()?;
-                let lock =
-                    SessionLock::acquire(config.path(), &session).map_err(|error| match error {
-                        session::SessionError::Locked { .. } => CommandError::SessionLocked,
-                        error => CommandError::Failed(error.to_string()),
-                    })?;
-                let pane = app.begin_open("Resuming session…")?;
-                let agent = config.agent();
-                let (effort, speed) = (agent.thinking(), agent.speed());
-                let preferred_reasoning_mode = agent.reasoning_mode();
-                let config = config.clone();
-                self.tasks.spawn(async move {
-                    let restored = sessions::restore_session(config, session, effort, lock).await;
-                    let opened = restored.map(|restored| OpenedSession::Restored {
-                        settings: PaneSettings::new(
-                            effort,
-                            restored.reasoning_mode,
-                            speed,
-                            restored.model,
-                        ),
-                        restored: Box::new(restored),
-                        preferred_reasoning_mode,
-                    });
-                    (pane, opened)
-                });
-                Ok(OpenStart::Pending(pane))
+                self.resume(session, None, app, config)
+                    .map(OpenStart::Pending)
             }
             OpenSpec::Fork { session } => {
                 let parent = app
@@ -167,6 +149,62 @@ impl PendingOpens {
         }
     }
 
+    /// Opens the stored `session`, which must not be open here, in a new pane. With
+    /// `within`, the session must have been recorded in that workspace or another checkout of
+    /// its repository.
+    pub(super) fn resume(
+        &mut self,
+        session: String,
+        within: Option<PathBuf>,
+        app: &mut AppNode,
+        config: &Config,
+    ) -> std::result::Result<PaneId, CommandError> {
+        app.can_open()?;
+        let lock = SessionLock::acquire(config.path(), &session).map_err(|error| match error {
+            session::SessionError::Locked { .. } => CommandError::SessionLocked,
+            error => CommandError::Failed(error.to_string()),
+        })?;
+        let pane = app.begin_open("Resuming session…")?;
+        self.resuming.insert(pane, session.clone());
+        let agent = config.agent();
+        let (effort, speed) = (agent.thinking(), agent.speed());
+        let preferred_reasoning_mode = agent.reasoning_mode();
+        let config = config.clone();
+        self.tasks.spawn(async move {
+            let restored = async {
+                if let Some(workspace) = within {
+                    ensure_recorded_in(&config, &session, &workspace).await?;
+                }
+                sessions::restore_session(config, session, effort, lock).await
+            }
+            .await;
+            let opened = restored.map(|restored| OpenedSession::Restored {
+                settings: PaneSettings::new(effort, restored.reasoning_mode, speed, restored.model),
+                restored: Box::new(restored),
+                preferred_reasoning_mode,
+            });
+            (pane, opened)
+        });
+        Ok(pane)
+    }
+
+    /// Holds `message` until `pane` opens its target session, or rejects it if the open fails.
+    pub(super) fn await_message(&mut self, pane: PaneId, message: LiveSessionMessage) {
+        self.messages.entry(pane).or_default().push(message);
+    }
+
+    /// The pane that is resuming `session`, if any.
+    pub(super) fn pane_resuming(&self, session: &str) -> Option<PaneId> {
+        self.resuming
+            .iter()
+            .find_map(|(&pane, resuming)| (resuming == session).then_some(pane))
+    }
+
+    /// The messages waiting for `pane`'s session, which is now live.
+    fn take_messages(&mut self, pane: PaneId) -> Vec<LiveSessionMessage> {
+        self.messages.remove(&pane).unwrap_or_default()
+    }
+
     /// Answers `reply` once `pane`'s session is live or has failed to open.
     pub(super) fn await_reply(&mut self, pane: PaneId, reply: CommandReply) {
         self.replies.insert(pane, reply);
@@ -174,6 +212,16 @@ impl PendingOpens {
 
     /// Answers the web caller waiting for `pane`, if there is one.
     fn reply(&mut self, pane: PaneId, result: std::result::Result<Reply, CommandError>) {
+        self.resuming.remove(&pane);
+        if let Err(error) = &result {
+            for message in self.take_messages(pane) {
+                drop(
+                    message
+                        .reply
+                        .send(Err(DeliveryError::Rejected(error.to_string()))),
+                );
+            }
+        }
         if let Some(reply) = self.replies.remove(&pane) {
             drop(reply.send(result));
         }
@@ -186,6 +234,22 @@ impl PendingOpens {
     pub(super) fn abort_all(&mut self) {
         self.tasks.abort_all();
     }
+}
+
+async fn ensure_recorded_in(config: &Config, session_id: &str, workspace: &Path) -> Result<()> {
+    let family = SessionStore::new(config.path())
+        .list_workspace_family(workspace, false)
+        .await?;
+    if family
+        .iter()
+        .any(|summary| summary.session_id == session_id)
+    {
+        return Ok(());
+    }
+    Err(SessionError::OutsideWorkspace {
+        session_id: session_id.to_owned(),
+    }
+    .into())
 }
 
 /// The canonical form of a workspace requested by the web interface, which must be an absolute
@@ -309,6 +373,9 @@ impl EventLoop {
         };
         self.app.session_opened(pane, session.clone(), records);
         self.opens.reply(pane, Ok(Reply::Opened { session }));
+        for message in self.opens.take_messages(pane) {
+            self.on_live_session_message(message)?;
+        }
         Ok(())
     }
 
@@ -410,14 +477,19 @@ impl EventLoop {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenStart, OpenedSession, PendingOpens, open_workspace};
+    use super::{OpenStart, OpenedSession, PendingOpens, ensure_recorded_in, open_workspace};
     use crate::{
         app::config::{Config, ConfigOverrides, ReasoningEffort},
-        core::protocol::{CommandError, OpenSpec},
+        core::{
+            live_sessions::{DeliveryError, LiveSessionMessage},
+            pane::PaneId,
+            protocol::{CommandError, OpenSpec},
+        },
         tui::components::{AppNode, RootNode},
     };
     use std::{fs, path::Path};
     use tempfile::tempdir;
+    use tokio::sync::oneshot;
 
     fn workspace_config(directory: &Path) -> Config {
         let path = directory.join("config.toml");
@@ -509,5 +581,68 @@ mod tests {
             open_workspace(&directory.path().to_string_lossy()),
             Ok(directory.path().canonicalize().unwrap())
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_open_rejects_the_message_waiting_for_it() {
+        let mut opens = PendingOpens::default();
+        let (reply, delivered) = oneshot::channel();
+        let pane = PaneId::Opened(1);
+        opens.await_message(
+            pane,
+            LiveSessionMessage {
+                from: "sender".to_owned(),
+                target: "target".to_owned(),
+                text: "hello".to_owned(),
+                reply,
+            },
+        );
+
+        opens.reply(pane, Err(CommandError::SessionLocked));
+
+        let Err(DeliveryError::Rejected(reason)) = delivered.await.unwrap() else {
+            panic!("expected a rejected message")
+        };
+        assert_eq!(reason, CommandError::SessionLocked.to_string());
+        assert!(opens.take_messages(pane).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_session_missing_from_the_workspace_family_is_rejected() {
+        let directory = tempdir().unwrap();
+        let config = workspace_config(directory.path());
+
+        let result = ensure_recorded_in(&config, "unrecorded", directory.path()).await;
+
+        assert!(matches!(
+            result,
+            Err(crate::app::error::Error::Session(
+                crate::core::session::SessionError::OutsideWorkspace { .. }
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_pending_resume_is_found_by_session_until_it_finishes() {
+        let directory = tempdir().unwrap();
+        let config = workspace_config(directory.path());
+        let mut app = app(&config, directory.path());
+        let mut opens = PendingOpens::default();
+
+        let started = opens.start(
+            OpenSpec::Resume {
+                session: "stored".to_owned(),
+            },
+            &mut app,
+            &config,
+        );
+
+        let Ok(OpenStart::Pending(pane)) = started else {
+            panic!("expected pending session")
+        };
+        assert_eq!(opens.pane_resuming("stored"), Some(pane));
+        assert_eq!(opens.pane_resuming("other"), None);
+        opens.reply(pane, Err(CommandError::Failed("gone".to_owned())));
+        assert_eq!(opens.pane_resuming("stored"), None);
     }
 }

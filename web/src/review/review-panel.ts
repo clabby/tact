@@ -87,6 +87,7 @@ export function mountReviewPanel(container: HTMLElement, host: ReviewHost) {
     dispose: () => panel.cleanUp(),
     setVisible: (visible: boolean) => panel.setVisible(visible),
     revealFile: (path: string, line: number | null) => panel.revealFile(path, line),
+    openSearch: () => panel.openSearch(),
   };
 }
 
@@ -550,6 +551,12 @@ class ReviewPanel {
 
   private seenFiles() {
     return this.seen.among(this.bootstrap.checkout.path, this.files);
+  }
+
+  /** Opens find in changes, showing the Changes tab. Returns false until the changes have rendered. */
+  openSearch() {
+    if (this.root.querySelector<HTMLElement>("#changes-panel")?.hidden) this.selectTab("changes");
+    return this.search.open();
   }
 
   private bindEvents() {

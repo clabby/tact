@@ -17,9 +17,8 @@ use crate::{
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use nanocodex::{
-    ClaudeModel, HarnessModel as Model, Model as CodexModel,
-    ReasoningMode as NanocodexReasoningMode, Thinking,
+use nanocode::{
+    ClaudeModel, Model as CodexModel, ReasoningMode as NanocodexReasoningMode, Thinking,
     agent::{
         events::{AgentEvent, AgentEventKind},
         input::{PromptInput, UserInput},
@@ -42,7 +41,8 @@ use std::{
 };
 use tact_memory::{MemoryAccess, MemoryKey, MemoryRecord, MemorySource};
 use tact_subagents::{
-    AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate, SUPPORTED_MODELS,
+    AgentDescriptor, AgentId, AgentMessageUpdate, AgentStatus, AgentUpdate, HarnessModel as Model,
+    SUPPORTED_MODELS,
 };
 
 fn key(code: KeyCode, modifiers: KeyModifiers) -> super::RootEvent {
@@ -226,7 +226,7 @@ fn native_context_budget_updates_live_and_restored_meter() {
     .unwrap();
     let record = Arc::new(record);
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-    root.set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
+    root.set_model(Model::Claude(nanocode::ClaudeModel::Opus55));
     root.update(super::RootEvent::ContextBudget(
         crate::core::context::ContextBudget {
             active_tokens: 0,
@@ -259,7 +259,7 @@ fn native_context_budget_updates_live_and_restored_meter() {
         Speed::Standard,
         vec![record],
     );
-    root.set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
+    root.set_model(Model::Claude(nanocode::ClaudeModel::Opus55));
     assert_eq!(
         root.composer().context_budget(),
         crate::core::context::ContextBudget {
@@ -2853,7 +2853,7 @@ fn rejected_effort_update_restores_display_and_reports_error() {
 #[test]
 fn started_claude_session_explains_why_effort_is_fixed() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-    root.set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
+    root.set_model(Model::Claude(nanocode::ClaudeModel::Opus55));
     root.open_effort();
     assert!(matches!(root.overlay, Some(Overlay::Effort(_))));
     root.thread = ThreadState::Started;
@@ -3811,7 +3811,7 @@ mod qr_code_overlay {
 #[test]
 fn claude_steer_applied_after_interrupt_is_submitted_with_the_queue() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-    root.set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
+    root.set_model(Model::Claude(nanocode::ClaudeModel::Opus55));
     root.turns.start_turn();
     root.queue.push("later".to_owned());
     root.queue.push("priority steer".to_owned());
@@ -3841,7 +3841,7 @@ fn claude_steer_applied_after_interrupt_is_submitted_with_the_queue() {
 #[test]
 fn claude_steer_applied_while_interrupting_is_submitted_after_the_interrupt() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
-    root.set_model(Model::Claude(nanocodex::ClaudeModel::Opus55));
+    root.set_model(Model::Claude(nanocode::ClaudeModel::Opus55));
     root.turns.start_turn();
     root.queue.push("steer".to_owned());
     root.queue.set_focused(true);

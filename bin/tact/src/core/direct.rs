@@ -6,15 +6,15 @@
 //! served here; they authenticate with separate Glasswing credentials that only sessions use.
 
 use crate::app::{auth::ClaudeApiKey, config::Config, model, secret::SecretString};
-use nanocodex::{
-    ClaudeModel, HarnessModel as Model, Model as CodexModel, OpenAi, Thinking,
+use nanocode::{
+    ClaudeModel, Model as CodexModel, OpenAi, Thinking,
     claude::{ClaudeClient, ContentBlock, Effort, Message, MessagesRequest, OutputConfig, Role},
     oai::{auth::OpenAiAuth, transport::ResponsesTransport},
 };
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::json;
 use std::{num::NonZeroU32, time::Duration};
-use tact_subagents::is_access_gated;
+use tact_subagents::{HarnessModel as Model, is_access_gated};
 use thiserror::Error;
 
 /// One request: the model, its instructions and input, and the bounds it runs under.

@@ -6,7 +6,7 @@ import { moveSearchTarget, searchReview, type ReviewSearchMatch } from "./review
 export const SEARCH_HIGHLIGHT = "tact-web-search-match";
 
 export type SearchBarDeps = {
-  /** Whether the panel is shown; the find shortcut belongs to the page while it is hidden. */
+  /** Whether the panel is shown. The search's keys belong to the page while it is hidden. */
   visible(): boolean;
   files(): readonly FileDiffMetadata[];
   items(): readonly ReviewDiffItem[];
@@ -20,7 +20,7 @@ export type SearchBarDeps = {
  * Find-in-changes for the virtualized diff. The search bar owns the current match and its
  * highlight, and the temporary view changes it makes to reveal a match: it replaces the line
  * selection and may expand a file marked as seen. Both are put back when the match moves on or
- * the search closes.
+ * the search closes. The page owns the find shortcut and calls `open` while the review is shown.
  */
 export class SearchBar {
   private count = 0;
@@ -31,21 +31,13 @@ export class SearchBar {
   private expandedItem?: string;
   private returnFocus?: HTMLElement;
   private readonly handleShortcut = (event: KeyboardEvent) => {
-    if (event.isComposing || this.root.querySelector("dialog[open]")) return;
-    const key = event.key.toLowerCase();
-    if ((event.metaKey || event.ctrlKey) && key === "f") {
-      const changes = this.root.querySelector<HTMLElement>("#changes-panel");
-      if (!this.deps.visible() || !this.root.contains(event.target as Node) || !changes?.matches(".active:not([hidden])")) return;
-      event.preventDefault();
-      this.open();
-      return;
-    }
-    if ((event.metaKey || event.ctrlKey) && key === "g" && this.isOpen()) {
+    if (event.isComposing || !this.isOpen() || !this.deps.visible() || this.root.querySelector("dialog[open]")) return;
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "g") {
       event.preventDefault();
       this.move(event.shiftKey ? -1 : 1);
       return;
     }
-    if (event.key === "Escape" && this.isOpen()) {
+    if (event.key === "Escape" && !event.defaultPrevented && !document.querySelector('[role="menu"]')) {
       event.preventDefault();
       this.close();
     }
@@ -57,7 +49,9 @@ export class SearchBar {
   ) {}
 
   bind() {
-    document.addEventListener("keydown", this.handleShortcut);
+    // Page shortcuts listen in the bubble phase. Capturing lets Esc close the search before the
+    // page treats it as a request to interrupt the running turn.
+    document.addEventListener("keydown", this.handleShortcut, true);
     const input = this.root.querySelector<HTMLInputElement>("#review-search-input");
     input?.addEventListener("input", () => this.update());
     input?.addEventListener("keydown", (event) => {
@@ -74,10 +68,11 @@ export class SearchBar {
     return this.root.querySelector<HTMLElement>("#review-search")?.hidden === false;
   }
 
-  private open() {
+  /** Shows the search with its query selected. Returns false until the changes have rendered. */
+  open() {
     const panel = this.root.querySelector<HTMLElement>("#review-search");
     const input = this.root.querySelector<HTMLInputElement>("#review-search-input");
-    if (!panel || !input) return;
+    if (!panel || !input) return false;
     if (panel.hidden) {
       this.returnFocus = deepActiveElement(document);
       this.selection = this.deps.viewer()?.getSelectedLines() ?? null;
@@ -85,6 +80,7 @@ export class SearchBar {
     }
     input.focus();
     input.select();
+    return true;
   }
 
   close() {
@@ -253,9 +249,9 @@ export class SearchBar {
       : "0 of 0";
   }
 
-  /** Stops listening for the find shortcut. */
+  /** Stops listening for the search's keys. */
   dispose() {
-    document.removeEventListener("keydown", this.handleShortcut);
+    document.removeEventListener("keydown", this.handleShortcut, true);
   }
 
   /** Tracks the reviewer's own line selection so closing the search restores it. */

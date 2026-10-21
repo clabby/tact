@@ -203,16 +203,19 @@ or steered. Failed or interrupted delivery is surfaced explicitly rather than tr
 ## Messaging live sessions
 
 `message_session` is separate from the task tree. Directed messages stay inside one tree, while
-`message_session` targets any session open in the same Tact process, by session ID, with no
-authority check beyond that. It is installed independently of the subagent tool group and is used
+`message_session` targets any session open in the same Tact process, and any stored session of this Tact's
+workspace family that no other process has open, by session ID, with no authority check beyond that. It is installed independently of the subagent tool group and is used
 only on explicit user request. Its description says so, and no instruction text promotes it.
 Every delivery steers (see the README for the user-facing contract).
 
-The tool resolves the target through a process-wide registry that each open pane joins. It sends
-the message to the event loop, which turns it into a worker steer for the target's pane and
-reports the worker's verdict back as `steered` or `started`. Composer steers use low queue IDs and
+The tool resolves the target through a process-wide registry that each open pane joins, falling back
+to the sender's own entry because every pane of a process shares one event loop. It sends the
+message to that loop. If the target is not open, the loop resumes it in a background pane, holds
+the message until the session is live, and rejects it if the resume fails (locked elsewhere,
+missing, outside the workspace family, or the live session limit). It then turns the message into a worker steer for the
+target's pane and reports the worker's verdict back as `steered` or `started`. Composer steers use low queue IDs and
 these messages count down from the maximum, so the two never share an ID. `find_sessions` reports
-`live` from the session's lock file, which any process holds, and `messageable` from the registry.
+`live` from the session's lock file, which any process holds.
 
 ## Waiting and lifecycle
 

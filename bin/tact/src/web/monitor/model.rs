@@ -6,8 +6,9 @@ use crate::{
     core::direct::{self, DirectError, DirectRequest},
 };
 use futures_util::future::BoxFuture;
-use nanocodex::{HarnessModel as Model, Thinking};
+use nanocode::Thinking;
 use std::time::Duration;
+use tact_subagents::HarnessModel as Model;
 use tokio::sync::watch;
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(120);

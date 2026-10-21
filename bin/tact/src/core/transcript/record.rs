@@ -13,7 +13,7 @@ use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
     core::context::ContextBudget,
 };
-use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+use nanocode::agent::events::{AgentEvent, AgentEventKind};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{self, Visitor, value::StrDeserializer},
@@ -487,6 +487,24 @@ impl TranscriptRecord {
         })
     }
 
+    /// The text of a prompt, steer, or completed assistant reply, which is all of a record that
+    /// conversation search and the durability contract match against. The rule mirrors the
+    /// conversation index, which stores the same text for the same records.
+    pub(crate) fn conversation_text(&self) -> Result<Option<String>, serde_json::Error> {
+        if let Some(prompt) = self.prompt_text()? {
+            return Ok(Some(prompt));
+        }
+        if self.agent_kind() != Some(AgentEventKind::AssistantMessage) {
+            return Ok(None);
+        }
+        let payload = self.decode_payload::<serde_json::Value>()?;
+        Ok(payload
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned))
+    }
+
     pub(crate) const fn schema_version(&self) -> u32 {
         self.schema_version
     }
@@ -589,7 +607,7 @@ mod tests {
         TurnId, UserSteered, UserSubmitted, WorkerTurnFinished,
     };
     use crate::app::config::Speed;
-    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use nanocode::agent::events::{AgentEvent, AgentEventKind};
     use serde_json::{Value, json, value::to_raw_value};
     use std::sync::Arc;
 

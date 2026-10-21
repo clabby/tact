@@ -20,7 +20,7 @@ use crate::{
     },
     tui::components::AppEvent,
 };
-use nanocodex::NanocodexError;
+use nanocode::NanocodexError;
 use std::collections::HashSet;
 use tokio::sync::mpsc;
 

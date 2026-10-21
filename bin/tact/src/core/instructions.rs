@@ -29,9 +29,9 @@ use super::{
     extensions::{Skill, SkillCatalog},
 };
 use crate::app::config::Config;
-use nanocodex::{ClaudeModel, HarnessModel as Model, oai::tower::ResponsesServiceConfig};
+use nanocode::{ClaudeModel, oai::tower::ResponsesServiceConfig};
 use std::sync::Arc;
-use tact_subagents::SUPPORTED_MODELS;
+use tact_subagents::{HarnessModel as Model, SUPPORTED_MODELS};
 
 const SECTION_SEPARATOR: &str = "\n\n";
 
@@ -313,7 +313,7 @@ impl AgentInstructions {
         model: Model,
         restored: Option<RestoredInstructions>,
         memory_enabled: bool,
-    ) -> nanocodex::agent::Result<Self> {
+    ) -> nanocode::agent::Result<Self> {
         let fresh = restored.is_none();
         // Discovery walks the skill roots, so every fresh prompt shares one catalog.
         let catalog = SkillCatalog::load(config.skills());
@@ -532,9 +532,9 @@ mod tests {
         app::config::{Config, ConfigOverrides, SkillsConfig},
         core::extensions::{Skill, SkillCatalog},
     };
-    use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
+    use nanocode::{ClaudeModel, Model as CodexModel};
     use std::{fs, path::Path, sync::Arc};
-    use tact_subagents::SUPPORTED_MODELS;
+    use tact_subagents::{HarnessModel as Model, SUPPORTED_MODELS};
     use tempfile::{TempDir, tempdir};
 
     const CODEX_MODELS: [Model; 3] = [

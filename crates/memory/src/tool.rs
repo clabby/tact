@@ -3,11 +3,10 @@
 use super::{
     MemoryAccess, MemoryKey, MemoryLimits, MemoryRecord, MemoryStore, SelectedMemoryStore,
 };
-use nanocodex::{
+use async_trait::async_trait;
+use nanocode::{
     Tool,
-    tools::contract::{
-        ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, async_trait,
-    },
+    tools::contract::{ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult},
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
@@ -446,11 +445,11 @@ fn memory_record_schema() -> Value {
 mod tests {
     use super::{MemoryOperation, MemoryTool, MemoryToolError, MutationAuthorizer};
     use crate::{MemoryError, MemoryLimits, MemoryStore, SelectedMemoryStore};
-    use nanocodex::{
+    use async_trait::async_trait;
+    use nanocode::{
         Tool,
         tools::contract::{
             DEFAULT_TOOL_OUTPUT_TOKENS, ToolContext, ToolError, ToolInput, ToolOutputBody,
-            async_trait,
         },
     };
     use serde_json::{json, value::to_raw_value};

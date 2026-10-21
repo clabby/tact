@@ -15,7 +15,7 @@ use crate::{
         node::{ComponentUpdate, RenderRequest},
     },
 };
-use nanocodex::HarnessModel as Model;
+use tact_subagents::HarnessModel as Model;
 
 /// A web command that applies to one pane.
 #[derive(Debug)]

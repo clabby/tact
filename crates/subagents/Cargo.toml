@@ -14,9 +14,10 @@ readme = "README.md"
 workspace = true
 
 [dependencies]
+async-trait.workspace = true
 futures-util.workspace = true
 jsonschema.workspace = true
-nanocodex.workspace = true
+nanocode.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

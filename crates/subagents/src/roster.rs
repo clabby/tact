@@ -5,7 +5,8 @@
 //! messages belong to an agent's transcript and leave the roster unchanged.
 
 use super::model::{AgentDescriptor, AgentId, AgentStatus, AgentUpdate, serialize_reasoning_mode};
-use nanocodex::{HarnessModel as Model, ReasoningMode, Thinking};
+use crate::HarnessModel as Model;
+use nanocode::{ReasoningMode, Thinking};
 use serde::{Serialize, Serializer};
 
 /// The agents of one root session's task tree and the concurrency limit they share.
@@ -127,8 +128,8 @@ fn serialize_model<S: Serializer>(model: &Model, serializer: S) -> Result<S::Ok,
 #[cfg(test)]
 mod tests {
     use super::SubagentRoster;
-    use crate::{AgentDescriptor, AgentId, AgentStatus, AgentUpdate};
-    use nanocodex::{HarnessModel as Model, Model as CodexModel, ReasoningMode, Thinking};
+    use crate::{AgentDescriptor, AgentId, AgentStatus, AgentUpdate, HarnessModel as Model};
+    use nanocode::{Model as CodexModel, ReasoningMode, Thinking};
     use serde_json::json;
 
     fn added(id: u64, parent: Option<u64>, task: &str) -> AgentUpdate {

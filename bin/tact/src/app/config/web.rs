@@ -11,13 +11,13 @@ use crate::app::{
     model,
 };
 use clap::ValueEnum;
-use nanocodex::HarnessModel as Model;
 use serde::{Serialize, Serializer};
 use std::{
     net::{IpAddr, Ipv4Addr},
     num::NonZeroUsize,
     time::Duration,
 };
+use tact_subagents::HarnessModel as Model;
 
 const DEFAULT_PORT: u16 = 7878;
 const DEFAULT_MAX_LIVE_SESSIONS: NonZeroUsize = NonZeroUsize::new(8).expect("8 is non-zero");
@@ -194,8 +194,9 @@ mod tests {
         config::{ReasoningEffort, test_support::load_config},
         error::{ConfigError, Error},
     };
-    use nanocodex::{HarnessModel as Model, Model as CodexModel};
+    use nanocode::Model as CodexModel;
     use std::time::Duration;
+    use tact_subagents::HarnessModel as Model;
 
     #[test]
     fn web_interface_is_enabled_on_loopback_by_default() {

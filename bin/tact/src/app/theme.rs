@@ -5,10 +5,11 @@
 //! follow it.
 
 use crate::app::config::{ReasoningEffort, Speed};
-use nanocodex::{ClaudeModel, HarnessModel as Model, Model as CodexModel};
+use nanocode::{ClaudeModel, Model as CodexModel};
 use ratatui::style::Color;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::{fmt, str::FromStr};
+use tact_subagents::HarnessModel as Model;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -382,8 +383,9 @@ impl fmt::Display for ColorName {
 #[cfg(test)]
 mod tests {
     use super::{ColorScheme, Theme, ThemeMode};
-    use nanocodex::{HarnessModel as Model, Model as CodexModel};
+    use nanocode::Model as CodexModel;
     use ratatui::style::Color;
+    use tact_subagents::HarnessModel as Model;
 
     #[test]
     fn auto_defaults_to_the_dark_palette_until_the_os_mode_is_known() {
@@ -424,7 +426,7 @@ mod tests {
         let mut theme: Theme = toml::from_str("model_luna = \"red\"\nmodel_opus = 123\n[light]\nmodel_luna = \"#123456\"\n[dark]\nmodel_sol = \"green\"\n").unwrap();
         let luna = Model::Codex(CodexModel::Luna);
         let sol = Model::Codex(CodexModel::Sol);
-        let opus = Model::Claude(nanocodex::ClaudeModel::Opus55);
+        let opus = Model::Claude(nanocode::ClaudeModel::Opus55);
         assert_eq!(theme.model(luna), Color::Red);
         assert_eq!(theme.model(sol), Color::Green);
         assert_eq!(theme.model(opus), Color::Indexed(123));

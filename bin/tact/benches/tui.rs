@@ -78,8 +78,16 @@ use crate::{
 };
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+use nanocode::{
+    Lineage, ModelSelection, SessionCheckpoint, Thinking,
+    agent::events::{AgentEvent, AgentEventKind},
+    durability::{
+        OwnerId, SessionRecord, SessionStore as SessionCatalog, SessionWrite, StateCommit,
+        StateStore, SummaryUpdate,
+    },
+};
 use ratatui::{Terminal, backend::TestBackend};
+use rusqlite::Connection;
 use serde_json::{json, value::to_raw_value};
 use std::{
     hint::black_box,
@@ -94,6 +102,9 @@ const HEIGHT: u16 = 40;
 const TARGET_SEMANTIC_EVENTS: u64 = 15_000;
 const UNRELATED_SESSIONS: u64 = 6;
 const UNRELATED_SEMANTIC_EVENTS: u64 = 4_000;
+const BATCH_PROMPTS: u64 = 19;
+/// About 256 KiB of conversation history in a commit benchmark's resume snapshot.
+const RESUME_HISTORY_ITEMS: usize = 256;
 
 struct Harness {
     app: AppNode,
@@ -406,7 +417,7 @@ fn write_session(config_path: &Path, session_id: &str, workspace: &Path, event_c
             session_id: session_id.to_owned(),
             parent_session_id: None,
             parent_sequence: None,
-            model: nanocodex::oai::MODEL.to_owned(),
+            model: nanocode::oai::MODEL.to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
             speed: Speed::Standard,
@@ -430,10 +441,7 @@ fn write_session(config_path: &Path, session_id: &str, workspace: &Path, event_c
         );
         records.push(record);
     }
-    storage::SessionStorage::open(config_path)
-        .unwrap()
-        .append_records(session_id, &records)
-        .unwrap();
+    commit_fixture(config_path, session_id, &records, None);
 }
 
 fn write_mixed_session_segment(config_path: &Path, session_id: &str, workspace: &Path, turns: u64) {
@@ -444,7 +452,7 @@ fn write_mixed_session_segment(config_path: &Path, session_id: &str, workspace: 
             session_id: session_id.to_owned(),
             parent_session_id: None,
             parent_sequence: None,
-            model: nanocodex::oai::MODEL.to_owned(),
+            model: nanocode::oai::MODEL.to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
             speed: Speed::Standard,
@@ -454,16 +462,33 @@ fn write_mixed_session_segment(config_path: &Path, session_id: &str, workspace: 
     );
     records.push(started);
     records.extend(mixed_projection_records(turns));
-    storage::SessionStorage::open(config_path)
-        .unwrap()
-        .append_records(session_id, &records)
-        .unwrap();
+    commit_fixture(config_path, session_id, &records, None);
 }
 
 fn save_benchmark_checkpoint(config_path: &Path, session_id: &str) {
-    let snapshot = serde_json::from_value(json!({
+    commit_fixture(
+        config_path,
+        session_id,
+        &[],
+        Some(benchmark_resume_state(session_id, 1)),
+    );
+}
+
+/// An encoded resume state whose conversation history holds `history_items` messages of about
+/// 1 KiB each.
+fn benchmark_resume_state(session_id: &str, history_items: usize) -> Vec<u8> {
+    let history = (0..history_items)
+        .map(|index| {
+            json!({
+                "type": "message",
+                "role": if index % 2 == 0 { "user" } else { "assistant" },
+                "content": [{"type": "input_text", "text": format!("{index} {}", "y".repeat(1_000))}]
+            })
+        })
+        .collect::<Vec<_>>();
+    let conversation = json!({
         "version": 1,
-        "model": nanocodex::oai::MODEL,
+        "model": nanocode::oai::MODEL,
         "lineage_id": session_id,
         "prompt_cache_key": "benchmark-cache-key",
         "workspace": "/benchmark-workspace",
@@ -476,23 +501,57 @@ fn save_benchmark_checkpoint(config_path: &Path, session_id: &str) {
             "role": "user",
             "content": [{"type": "input_text", "text": "benchmark"}]
         },
-        "history": [{
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": "benchmark"}]
-        }]
-    }))
-    .unwrap();
-    let resume_state = session::encode_checkpoint(
-        &session::AgentSnapshot::Codex(Box::new(snapshot)),
+        "history": history
+    });
+    let snapshot = SessionCheckpoint::native(
+        session_id,
+        ModelSelection::Codex(nanocode::Model::Astra),
+        Thinking::Medium,
+        Lineage::root(session_id),
+        session_id,
+        None,
+        true,
+        json!({"service_tier": "standard", "conversation": conversation}),
+    );
+    session::encode_checkpoint(
+        &session::AgentSnapshot::from(snapshot),
         "benchmark instructions",
         false,
     )
-    .unwrap();
-    storage::SessionStorage::open(config_path)
-        .unwrap()
-        .append_records_and_resume_state(session_id, &[], Some(&resume_state))
-        .unwrap();
+    .unwrap()
+}
+
+/// Commits records and an optional resume state through the session store in one transaction,
+/// as a journal batch does.
+fn commit_fixture(
+    config_path: &Path,
+    session_id: &str,
+    records: &[Arc<TranscriptRecord>],
+    resume_state: Option<Vec<u8>>,
+) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let mut store = storage::SqliteStateStore::new(config_path).unwrap();
+        let owned = store.acquire(session_id, OwnerId::new()).await.unwrap();
+        let (events, rows) = storage::transcript_commit(records.iter().map(AsRef::as_ref)).unwrap();
+        store
+            .stage(session_id, storage::HostBatch { rows, resume_state })
+            .unwrap();
+        store
+            .commit(
+                session_id,
+                &owned.owner,
+                owned.state.revision,
+                StateCommit {
+                    payload: "{}",
+                    records: &[],
+                    events: &events,
+                    summary: &SummaryUpdate::Unchanged,
+                },
+            )
+            .await
+            .unwrap();
+    });
 }
 
 fn benchmarks(criterion: &mut Criterion) {
@@ -783,7 +842,176 @@ fn benchmarks(criterion: &mut Criterion) {
         });
     });
 
+    // Steady-state commits of one prebuilt journal batch: prompts, a large tool result and a
+    // realistic resume snapshot. Both variants commit the same inputs; the session variant adds
+    // the durable session driver that the journal writer uses.
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let commit_directory = tempfile::tempdir().unwrap();
+    let commit_config = commit_directory.path().join("config.toml");
+    let tool_output = "x".repeat(64 * 1024);
+    let batch = (0..BATCH_PROMPTS)
+        .map(|index| {
+            local_record(
+                index.saturating_add(2),
+                LocalEvent::UserSubmitted(UserSubmitted {
+                    id: TurnId::new(index),
+                    text: format!("benchmark prompt {index}"),
+                }),
+            )
+        })
+        .chain(std::iter::once(agent_record(
+            BATCH_PROMPTS.saturating_add(2),
+            AgentEventKind::ToolResult,
+            json!({"call_id": "call", "output": tool_output}),
+        )))
+        .collect::<Vec<_>>();
+    let (batch_events, batch_rows) =
+        storage::transcript_commit(batch.iter().map(AsRef::as_ref)).unwrap();
+    let batch_host = storage::HostBatch {
+        rows: batch_rows,
+        resume_state: Some(benchmark_resume_state("commit", RESUME_HISTORY_ITEMS)),
+    };
+    eprintln!(
+        "session/commit_batch_*: {} events, {} resume bytes",
+        batch_events.len(),
+        batch_host.resume_state.as_ref().map_or(0, Vec::len)
+    );
+
+    let start = |session_id: &str| {
+        vec![local_record(
+            1,
+            LocalEvent::SessionStarted(benchmark_start(session_id, commit_directory.path())),
+        )]
+    };
+    commit_fixture(&commit_config, "store", &start("store"), None);
+    let mut store = storage::SqliteStateStore::new(&commit_config).unwrap();
+    let owned = runtime
+        .block_on(store.acquire("store", OwnerId::new()))
+        .unwrap();
+    let first_revision = owned.state.revision;
+    let mut revision = first_revision;
+    let mut iterations = 0_u64;
+    sessions.bench_function("commit_batch_store", |bencher| {
+        bencher.iter(|| {
+            store.stage("store", batch_host.clone()).unwrap();
+            revision = runtime
+                .block_on(store.commit(
+                    "store",
+                    &owned.owner,
+                    revision,
+                    StateCommit {
+                        payload: "{}",
+                        records: &[],
+                        events: &batch_events,
+                        summary: &SummaryUpdate::Unchanged,
+                    },
+                ))
+                .unwrap()
+                .revision;
+            iterations += 1;
+        });
+    });
+    eprintln!(
+        "session/commit_batch_store: {} commits in {iterations} iterations",
+        revision - first_revision
+    );
+
+    let handle = store.writer_handle();
+    let catalog = {
+        let _runtime = runtime.enter();
+        SessionCatalog::new(handle.clone()).unwrap()
+    };
+    let durable = runtime
+        .block_on(catalog.session(SessionRecord::root(
+            "session",
+            ModelSelection::Codex(nanocode::Model::Astra),
+            Some(commit_directory.path().to_path_buf()),
+        )))
+        .unwrap();
+    let (start_events, _) =
+        storage::transcript_commit(start("session").iter().map(AsRef::as_ref)).unwrap();
+    let first_revision = runtime
+        .block_on(durable.append(SessionWrite {
+            events: start_events,
+            metadata: None,
+        }))
+        .unwrap()
+        .revision;
+    let mut revision = first_revision;
+    let mut iterations = 0_u64;
+    sessions.bench_function("commit_batch_session", |bencher| {
+        bencher.iter(|| {
+            handle.stage("session", batch_host.clone()).unwrap();
+            revision = runtime
+                .block_on(durable.append(SessionWrite {
+                    events: batch_events.clone(),
+                    metadata: None,
+                }))
+                .unwrap()
+                .revision;
+            iterations += 1;
+        });
+    });
+    eprintln!(
+        "session/commit_batch_session: {} commits in {iterations} iterations",
+        revision - first_revision
+    );
+
+    // The first write to a session stored before the durability contract opens the store and
+    // numbers every stored row once.
+    let legacy_directory = tempfile::tempdir().unwrap();
+    let legacy_config = legacy_directory.path().join("config.toml");
+    write_session(
+        &legacy_config,
+        "legacy",
+        legacy_directory.path(),
+        TARGET_SEMANTIC_EVENTS,
+    );
+    let legacy_database = storage::database_path(&legacy_config);
+    Connection::open(&legacy_database)
+        .unwrap()
+        .execute_batch(
+            "UPDATE events SET seq = NULL, revision = NULL;
+             DELETE FROM durable_event_sequences; DELETE FROM durable_states;
+             DELETE FROM durable_owners; PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+    sessions.bench_function("first_write_adopts_legacy_session", |bencher| {
+        bencher.iter_batched(
+            || {
+                let directory = tempfile::tempdir().unwrap();
+                let config = directory.path().join("config.toml");
+                let database = storage::database_path(&config);
+                std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+                std::fs::copy(&legacy_database, &database).unwrap();
+                (directory, config)
+            },
+            |(directory, config)| {
+                runtime.block_on(async {
+                    let mut store = storage::SqliteStateStore::new(&config).unwrap();
+                    black_box(store.acquire("legacy", OwnerId::new()).await.unwrap());
+                });
+                directory
+            },
+            BatchSize::PerIteration,
+        );
+    });
+
     sessions.finish();
+}
+
+fn benchmark_start(session_id: &str, workspace: &Path) -> SessionStarted {
+    SessionStarted {
+        session_id: session_id.to_owned(),
+        parent_session_id: None,
+        parent_sequence: None,
+        model: nanocode::oai::MODEL.to_owned(),
+        effort: ReasoningEffort::Medium,
+        reasoning_mode: ReasoningMode::Standard,
+        speed: Speed::Standard,
+        workspace: workspace.to_path_buf(),
+        application_version: "benchmark".to_owned(),
+    }
 }
 
 criterion_group!(tui, benchmarks);

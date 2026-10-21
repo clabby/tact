@@ -22,6 +22,7 @@ manual_async_fn = "allow"
 
 [workspace.dependencies]
 arboard = "3.6.1"
+async-trait = "0.1.89"
 axum = { version = "0.8.4", default-features = false, features = ["json"] }
 base64 = "0.22.1"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
@@ -34,13 +35,14 @@ flate2 = "1.1.9"
 fs2 = "0.4.3"
 futures-util = "0.3.33"
 getrandom = "0.3.4"
-image = { version = "0.25.10", default-features = false, features = ["bmp", "dds", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp"] }
+image = { version = "0.25.6", default-features = false, features = ["bmp", "dds", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp"] }
 jsonschema = { version = "0.48.5", default-features = false }
 libc = "0.2.189"
 miette = { version = "7.6.0", features = ["fancy"] }
 minisign-verify = "0.2.5"
-nanocodex = { git = "https://github.com/clabby/nanocodex", rev = "7de6f676e1fa5229d348692e8851dbbbcccc0cc4", features = ["claude"] }
-nanocodex-agent = { git = "https://github.com/clabby/nanocodex", rev = "7de6f676e1fa5229d348692e8851dbbbcccc0cc4" }
+nanocode = { git = "https://github.com/gakonst/nanocode", rev = "0e70432fada624136b59684dab4d9dff7ec762a1" }
+nanocode-backend-codex = { git = "https://github.com/gakonst/nanocode", rev = "0e70432fada624136b59684dab4d9dff7ec762a1" }
+nanocode-agent = { git = "https://github.com/gakonst/nanocode", rev = "0e70432fada624136b59684dab4d9dff7ec762a1" }
 png = "0.18.1"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30.2"
@@ -48,7 +50,7 @@ ratatui-image = { version = "11.0.6", default-features = false, features = ["cro
 rayon = "1.12.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
 rstest = "0.26.1"
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite = { version = "0.38.0", features = ["bundled"] }
 rustls = { version = "0.23.42", default-features = false, features = ["ring", "std"] }
 self-replace = "1.5.0"
 semver = { version = "1.0.28", features = ["serde"] }
