@@ -119,9 +119,7 @@ test("live blocks show the session's own data, and nothing when it has none", ()
   const live = (source: "message" | "plan" | "tool" | "prompt" | "agents" | "error", form: BlockForm = "compact", from = busy) => draw({ type: "live", source }, form, from);
 
   expect(text(live("message")!.querySelector(".clip-inner"))).toBe("Done. Which loader do you prefer?");
-  expect(live("message")!.querySelector<HTMLElement>(".clip-box")!.dataset.shortened).toBeUndefined();
   const long = activity({ message: { text: "Background. ".repeat(40) + "Which loader do you prefer?", commentary: false, at_ms: null } });
-  expect(live("message", "compact", long)!.querySelector<HTMLElement>(".clip-box")!.dataset.shortened).toBe("true");
   expect(text(live("message", "full", long))).toContain("Background. Background.");
   expect([text(live("plan")!.querySelector(".block-count")), text(live("plan")!.querySelector(".plan-current"))]).toEqual(["2/4", "Run the focused tests"]);
   const tool = live("tool")!;

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { evidenceFor, liveLine, restates } from "./card";
-import { messageTail, plainText } from "./text";
+import { plainText } from "./text";
 import type { Assessment, Concern } from "./attention";
 import type { SessionActivity, SessionNote, SessionSummary } from "../core/wire";
 
@@ -66,12 +66,6 @@ test("a goal or prompt that only restates the title is left out", () => {
   expect(restates(title, "config loader")).toBe(true);
   expect(restates(title, "Choose the config loader, then port web.rs and the TUI to it and delete the old parser")).toBe(false);
   expect(restates(title, "Benchmark the journal")).toBe(false);
-});
-
-test("a long message is previewed by its end, cut at a word", () => {
-  expect(messageTail("short", 20)).toBeNull();
-  expect(messageTail("The first part is long. Which option do you prefer?", 30)).toBe("…Which option do you prefer?");
-  expect(messageTail("Some long preamble here.\nWhich option do you prefer?", 40)).toBe("…Which option do you prefer?");
 });
 
 test("messages are shown as plain prose", () => {

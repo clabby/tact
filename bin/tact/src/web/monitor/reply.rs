@@ -160,7 +160,8 @@ pub(super) fn parse(reply: &str, sessions: &[InputSession]) -> Result<Vec<Note>,
 }
 
 /// Escapes the control characters that appear unescaped inside JSON strings, which JSON does not
-/// allow. Outside strings they are whitespace and stay as they are.
+/// allow. Outside strings they are whitespace and stay as they are. A backslash right before a raw
+/// control character cannot escape it, so it is kept as a literal backslash.
 fn escape_raw_controls(json: &str) -> Cow<'_, str> {
     if !json.chars().any(|c| c < ' ') {
         return Cow::Borrowed(json);
@@ -172,6 +173,19 @@ fn escape_raw_controls(json: &str) -> Cow<'_, str> {
         if !in_string {
             in_string = c == '"';
             escaped.push(c);
+            continue;
+        }
+        if c < ' ' {
+            if after_backslash {
+                after_backslash = false;
+                escaped.push('\\');
+            }
+            match c {
+                '\n' => escaped.push_str("\\n"),
+                '\r' => escaped.push_str("\\r"),
+                '\t' => escaped.push_str("\\t"),
+                c => escaped.push_str(&format!("\\u{:04x}", u32::from(c))),
+            }
             continue;
         }
         if after_backslash {
@@ -188,10 +202,6 @@ fn escape_raw_controls(json: &str) -> Cow<'_, str> {
                 in_string = false;
                 escaped.push(c);
             }
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            c if c < ' ' => escaped.push_str(&format!("\\u{:04x}", u32::from(c))),
             c => escaped.push(c),
         }
     }
@@ -649,6 +659,38 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&notes[0].blocks).unwrap(),
             json!([{"type": "code", "label": null, "text": "fn add() {\n\treturn 5;\n}"}])
+        );
+    }
+
+    /// A raw control character right after an odd number of backslashes cannot stay raw: the
+    /// pending escape becomes a literal backslash and the control is escaped after it.
+    #[test]
+    fn raw_controls_after_backslashes_are_read_as_written() {
+        let text_of = |raw: &str| {
+            let reply = format!(
+                "{{\"sessions\":[{{\"session\":\"s1\",\"attention\":\"ok\",\"blocks\":[{{\"type\":\"text\",\"text\":\"echo a{raw} echo b\"}}]}},{{\"session\":\"s2\",\"attention\":\"ok\"}}]}}"
+            );
+            let notes = parse(&reply, &sessions()).unwrap();
+            assert_eq!(notes.len(), 2, "{raw:?}");
+            serde_json::to_value(&notes[0].blocks).unwrap()[0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        for control in ["\n", "\r\n", "\t", "\u{0}"] {
+            assert_eq!(
+                text_of(&format!("\\{control}")),
+                format!("echo a\\{control} echo b")
+            );
+            assert_eq!(
+                text_of(&format!("\\\\\\{control}")),
+                format!("echo a\\\\{control} echo b")
+            );
+        }
+        assert_eq!(
+            text_of(r#"\\ \" \n \u0041 \/"#),
+            "echo a\\ \" \n A / echo b",
+            "valid escapes are untouched"
         );
     }
 

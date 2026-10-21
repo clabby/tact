@@ -97,7 +97,11 @@ test("a fresh stream learns every session's activity right after the live list",
   const live = (greeting[1]!.data as StreamEvents["live"]).sessions;
   expect(sessions.map((activity) => activity.session)).toEqual(live.map((summary) => summary.id));
   const main = sessions.find((activity) => activity.session === mock.active)!;
-  expect(main).toMatchObject({ status: { kind: "waiting_for_background_work" }, agents: { running: 3, total: 5 }, plan: { done: 2, total: 4 } });
+  // The newest plan was updated inside a Code Mode cell, after an older top-level one.
+  expect(main).toMatchObject({
+    status: { kind: "waiting_for_background_work" }, agents: { running: 3, total: 5 },
+    plan: { done: 2, total: 4, current: "Make the reply wait for the loop to apply the command" },
+  });
   expect(main.turn_elapsed_ns).toBeGreaterThan(0);
 });
 
@@ -132,6 +136,24 @@ test("the mock monitor model runs one check at a time and notes every live sessi
   expect(check!.sessions.find((note) => note.attention === "needs_input")).toMatchObject({ reason: expect.any(String), suggestion: expect.any(String) });
   expect(check!.sessions.filter((note) => note.attention === "ok").every((note) => note.reason === null)).toBe(true);
 });
+test("a mock check describes the sessions as they were when it started, without the ones closed since", async () => {
+  const mock = new MockTact();
+  mock.pace = 0;
+  const seeded = mock.live().sessions;
+  const wire = seeded.find((summary) => summary.title.startsWith("Wire"))!.id;
+  const closed = seeded.find((summary) => summary.title.startsWith("Sketch"))!.id;
+  expect(mock.monitor(false).running).toBe(true);
+  const { session: opened } = mock.command("open_session", { new: {} }, 1) as { session: string };
+  mock.command("rename_session", { session: wire, title: "Renamed after the check started" }, 1);
+  mock.command("close_session", { session: closed, force: true }, 1);
+  await Bun.sleep(5);
+
+  const notes = mock.monitor(false).check!.sessions;
+  expect(notes.map((note) => note.session)).toEqual(seeded.map((summary) => summary.id).filter((id) => id !== closed));
+  expect(notes.some((note) => note.session === opened)).toBe(false);
+  expect(notes.find((note) => note.session === wire)!.goal).toBe("Make draft echoes follow the acknowledgement without blocking the loop");
+});
+
 test("the mock monitor model checks only while at least two sessions are live", () => {
   const mock = new MockTact();
   mock.pace = 0;

@@ -7,9 +7,9 @@ import { openMenu } from "../ui/menu";
 import type { ActivityView } from "../core/store";
 import type { ModelCatalog, SessionActivity, SessionSummary, StatusBlock } from "../core/wire";
 import type { Assessment, Concern } from "./attention";
-import { blocksKey, closedBlocks, outcomeText, renderBlock, showsLive, type BlockContext, type BlockForm } from "./blocks";
+import { blocksKey, closedBlocks, outcomeText, renderBlock, reportsProblem, showsLive, type BlockContext, type BlockForm } from "./blocks";
 import { healthReading, healthTrend } from "./health";
-import { messageTail, plainText } from "./text";
+import { plainText } from "./text";
 
 /** The palette colours the Monitor marks sessions with; see `.monitor-card[data-tone]`. */
 export type Tone = "danger" | "warning" | "accent" | "success" | "muted";
@@ -37,8 +37,8 @@ export type CardHost = {
   workspaceToken(path: string): string | null;
   /** Activates the session and shows its chat. */
   open(session: string): void;
-  /** Puts `text` in the active session's composer and shows its chat. */
-  compose(text: string): void;
+  /** Opens `session`'s chat and puts `text` in its draft in the composer. */
+  compose(session: string, text: string): void;
   /** Sends `text` to the session as a prompt, steering the turn when one runs. */
   send(session: string, text: string): Promise<void>;
   stop(session: string): void;
@@ -167,8 +167,6 @@ export class MonitorCard {
   readonly element: HTMLElement;
   private data: CardData | null = null;
   private detailsOpen = false;
-  /** The closed message shows only its end, so it reads as cut off whatever the layout. */
-  private messageShortened = false;
   private sending = false;
   private sphere: HTMLCanvasElement | null = null;
   private readonly reply: HTMLFormElement;
@@ -238,6 +236,12 @@ export class MonitorCard {
     this.measure = new ResizeObserver(() => this.measureMessage());
     this.measure.observe(card.querySelector(".evidence-inner")!);
     this.measure.observe(card.querySelector(".evidence-text")!);
+  }
+
+  /** Removes the card for good, once its session has left; a filtered card stays and keeps observing. */
+  dispose() {
+    this.measure.disconnect();
+    this.element.remove();
   }
 
   update(data: CardData, clock: number, now: number) {
@@ -356,15 +360,16 @@ export class MonitorCard {
   /**
    * The note's blocks in the order the closed tile considers them. A live tool block showing the
    * call the live line already names would only repeat it. A stuck or off-track session leads with
-   * the note's warning or danger text, so the problem shows without Details whatever the model put
-   * first.
+   * the first block that reports a problem, so the problem shows without Details whatever the model
+   * put first; when none does, the blocks give way to the monitor's reason.
    */
   private static closedOrder(blocks: readonly StatusBlock[], { summary, activity, assessment }: CardData): StatusBlock[] {
     const namesCall = liveLine(summary, activity).call;
     const candidates = blocks.filter((block) => !(namesCall && block.type === "live" && block.source === "tool"));
     if (assessment.concern !== "stuck" && assessment.concern !== "off_track") return candidates;
-    const problem = candidates.find((block) => block.type === "text" && (block.tone === "warning" || block.tone === "danger"));
-    return problem ? [problem, ...candidates.filter((block) => block !== problem)] : candidates;
+    const problem = candidates.find((block) => reportsProblem(block, activity));
+    if (problem) return [problem, ...candidates.filter((block) => block !== problem)];
+    return assessment.note?.reason ? [] : candidates;
   }
 
   /**
@@ -392,6 +397,11 @@ export class MonitorCard {
     if (container.dataset.key === key) return;
     container.dataset.key = key;
     const context = this.blockContext(activity, answerable);
+    // Released explicitly, since some browsers keep observed targets alive after they are replaced.
+    for (const box of container.querySelectorAll<HTMLElement>(".clip-box")) {
+      this.measure.unobserve(box);
+      this.measure.unobserve(box.querySelector(".clip-inner")!);
+    }
     container.replaceChildren(...blocks.flatMap((block) => renderBlock(block, form, context) ?? []));
     for (const box of container.querySelectorAll<HTMLElement>(".clip-box")) {
       this.measure.observe(box);
@@ -402,7 +412,6 @@ export class MonitorCard {
   private renderEvidence(evidence: Evidence | null, { assessment, checkedAt }: CardData, now: number) {
     const element = this.element.querySelector<HTMLElement>(".card-evidence")!;
     element.hidden = evidence === null;
-    this.messageShortened = false;
     if (!evidence) {
       delete element.dataset.kind;
       return;
@@ -428,12 +437,8 @@ export class MonitorCard {
       : evidence.kind === "reason" || evidence.kind === "goal" ? [plainText(evidence.text), null]
       : [evidence.text, null];
     let shown = detail ? `${text} · ${detail}` : text;
-    if (evidence.kind === "message") {
-      const tail = messageTail(text);
-      this.messageShortened = tail !== null;
-      // Paragraphs only break lines here, so the few lines shown are all text.
-      shown = (tail ?? text).replace(/\n{2,}/g, "\n");
-    }
+    // Paragraphs only break a message's lines here, so the few lines shown are all text.
+    if (evidence.kind === "message") shown = text.replace(/\n{2,}/g, "\n");
     const box = element.querySelector<HTMLElement>(".evidence-text")!;
     box.title = evidence.kind === "message" ? "" : shown;
     setText(element.querySelector(".evidence-inner")!, shown);
@@ -445,19 +450,18 @@ export class MonitorCard {
   }
 
   /**
-   * Marks a closed message as cut off when it is shortened, or when its box, which keeps the last
-   * lines, hides earlier ones; Details holds all of it. Reads layout, so it runs when text changes
-   * and when sizes change.
+   * Marks a closed message as cut off when its box, which keeps the last lines, hides earlier
+   * ones; Details holds all of it. Reads layout, so it runs when text changes and when sizes change.
    */
   private measureMessage() {
     const element = this.element.querySelector<HTMLElement>(".card-evidence")!;
     const message = element.dataset.kind === "message";
     const box = element.querySelector<HTMLElement>(".evidence-text")!;
     const inner = element.querySelector<HTMLElement>(".evidence-inner")!;
-    element.classList.toggle("clipped", message && (this.messageShortened || inner.offsetHeight > box.clientHeight + 1));
+    element.classList.toggle("clipped", message && inner.offsetHeight > box.clientHeight + 1);
     for (const clip of this.element.querySelectorAll<HTMLElement>(".card-blocks .clip-box")) {
       const text = clip.querySelector<HTMLElement>(".clip-inner")!;
-      clip.classList.toggle("clipped", clip.dataset.shortened === "true" || text.offsetHeight > clip.clientHeight + 1);
+      clip.classList.toggle("clipped", text.offsetHeight > clip.clientHeight + 1);
     }
   }
 
@@ -503,11 +507,14 @@ export class MonitorCard {
 
   /**
    * Replying writes the session's shared draft, so a draft someone is writing is left alone; the
-   * active session's draft belongs to the composer, where the reply goes instead.
+   * active session's draft belongs to the composer, where the reply goes instead. A failed send
+   * keeps its box and error until dismissed, though the text it saved now shows as the session's
+   * draft; after that the card offers Open.
    */
   private canReply() {
     const data = this.data;
-    return data !== null && (data.active || !data.summary.has_draft || this.sending);
+    const failed = !this.reply.querySelector<HTMLElement>(".card-reply-error")!.hidden;
+    return data !== null && (data.active || !data.summary.has_draft || this.sending || failed);
   }
 
   /**
@@ -596,7 +603,7 @@ export class MonitorCard {
     const data = this.data;
     if (!data) return;
     if (data.active) {
-      this.host.compose("");
+      this.host.compose(this.session, "");
       return;
     }
     this.reply.hidden = false;
@@ -624,7 +631,7 @@ export class MonitorCard {
     const data = this.data;
     if (!data) return;
     if (data.active) {
-      this.host.compose(option);
+      this.host.compose(this.session, option);
       return;
     }
     if (!this.canReply()) {
@@ -650,14 +657,15 @@ export class MonitorCard {
   }
 
   private async send() {
-    const text = this.replyText.value.trim();
+    const value = this.replyText.value;
+    const text = value.trim();
     if (!text || this.sending) return;
     // The active session's draft belongs to the composer, so a reply begun before the session
     // became active goes there instead of replacing that draft.
     if (this.data?.active) {
       this.replyText.value = "";
       this.closeReply();
-      this.host.compose(text);
+      this.host.compose(this.session, text);
       return;
     }
     this.sending = true;
@@ -667,9 +675,12 @@ export class MonitorCard {
     error.hidden = true;
     try {
       await this.host.send(this.session, text);
-      this.replyText.value = "";
-      this.closeReply();
-      this.element.focus({ preventScroll: true });
+      // The box stays editable while sending, so text changed meanwhile was not sent and stays.
+      if (this.replyText.value === value) {
+        this.replyText.value = "";
+        this.closeReply();
+        this.element.focus({ preventScroll: true });
+      }
     } catch (failure) {
       error.textContent = describeError(failure);
       error.hidden = false;

@@ -1,5 +1,5 @@
 import { glyph } from "../ui/glyphs";
-import { messageTail, plainText } from "./text";
+import { plainText } from "./text";
 import type { BlockTone, ChecklistItem, HistoryItem, LiveSource, SessionActivity, StatusBlock, ToolOutcome } from "../core/wire";
 
 /**
@@ -108,6 +108,23 @@ export function hasContent(block: StatusBlock, activity: SessionActivity | undef
 export function isOneLine(block: StatusBlock) {
   return block.type === "progress" || block.type === "metric"
     || (block.type === "live" && (block.source === "tool" || block.source === "agents" || block.source === "prompt"));
+}
+
+/**
+ * Whether a block reports a problem by itself: a warning or danger text or metric, a newest step
+ * that failed, a checklist whose shown item failed, or the session's error.
+ */
+export function reportsProblem(block: StatusBlock, activity: SessionActivity | undefined): boolean {
+  if (!hasContent(block, activity)) return false;
+  switch (block.type) {
+    case "text":
+    case "metric":
+      return block.tone === "warning" || block.tone === "danger";
+    case "history": return block.items[0]!.outcome === "failed";
+    case "checklist": return currentItem(block.items).state === "failed";
+    case "live": return block.source === "error";
+    default: return false;
+  }
 }
 
 /**
@@ -305,10 +322,8 @@ function live(data: LiveData, form: BlockForm): HTMLElement {
       // marks the box as cut off when the text overflows it.
       const element = node("div", "block-message");
       element.classList.toggle("commentary", data.commentary);
-      const tail = messageTail(data.text);
       const box = node("p", "clip-box");
-      if (tail !== null) box.dataset.shortened = "true";
-      box.append(node("span", "clip-inner", (tail ?? data.text).replace(/\n{2,}/g, "\n")));
+      box.append(node("span", "clip-inner", data.text.replace(/\n{2,}/g, "\n")));
       element.append(box);
       return element;
     }

@@ -199,13 +199,7 @@ pub(super) fn fingerprint(views: &[SessionView<'_>]) -> Fingerprint {
             .iter()
             .map(|view| SessionMark {
                 session: view.summary.id.clone(),
-                newest: view
-                    .model
-                    .entries()
-                    .iter()
-                    .rev()
-                    .find(|entry| !entry.hidden)
-                    .map(|entry| (entry.id.index(), entry.revision)),
+                transcript: view.transcript_revision,
                 state: view.summary.state,
                 queued: view.queued,
                 unread: view.summary.unread,
@@ -237,22 +231,41 @@ fn session(view: &SessionView<'_>, budget: usize, now_ms: u64) -> (SessionInput,
             .map(|started| now_ms.saturating_sub(started) / 1_000),
         last_activity_seconds_ago: now_ms.saturating_sub(summary.last_activity_unix_ms) / 1_000,
         status: model.transient().map(status_label),
-        plan: plan(model.entries()),
-        subagents: view
-            .roster
-            .agents
-            .iter()
-            .rev()
-            .take(MAX_SUBAGENTS)
-            .map(|agent| Subagent {
-                role: clip(&agent.role, MAX_ROLE_CHARS),
-                status: agent_status(&agent.status),
-            })
-            .collect(),
+        plan: Vec::new(),
+        subagents: Vec::new(),
         transcript: Vec::new(),
     };
+    // Everything about the session shares its budget. The newest prompts get their share first,
+    // the plan and the subagents may take half of what is left, and the rest of the transcript
+    // fills the remainder.
+    let entries = model.entries();
+    let available = budget.saturating_sub(json_len(&input));
+    let prompts = kept_prompts(entries, available / 2 / KEPT_PROMPTS);
+    let prompt_bytes: usize = prompts.iter().map(|(_, prompt)| json_len(prompt)).sum();
+    let details = json_len(&input) + available.saturating_sub(prompt_bytes) / 2;
+    for step in plan(entries) {
+        input.plan.push(step);
+        if json_len(&input) > details {
+            input.plan.pop();
+            break;
+        }
+    }
+    for agent in view.roster.agents.iter().rev().take(MAX_SUBAGENTS) {
+        input.subagents.push(Subagent {
+            role: clip(&agent.role, MAX_ROLE_CHARS),
+            status: agent_status(&agent.status),
+        });
+        if json_len(&input) > details {
+            input.subagents.pop();
+            break;
+        }
+    }
     let fields = to_json(&input);
-    input.transcript = transcript(model.entries(), budget.saturating_sub(fields.len()));
+    input.transcript = transcript(
+        entries,
+        prompts,
+        budget.saturating_sub(fields.len() + prompt_bytes),
+    );
     let mut numbers = HashSet::new();
     numbers_in(&fields, &mut numbers);
     for numbered in &input.transcript {
@@ -277,30 +290,63 @@ fn session(view: &SessionView<'_>, budget: usize, now_ms: u64) -> (SessionInput,
     (input, described)
 }
 
-/// The newest entries that fit `budget`, newest first. The newest prompts are always kept, so the
-/// model knows what the developer asked for even when the agent has been busy for a long time.
-fn transcript(entries: &[TranscriptEntry], budget: usize) -> Vec<Numbered> {
+/// The newest prompts, newest first, each shortened to an entry of at most `limit` bytes. They
+/// are always kept, so the model knows what the developer asked for even when the agent has been
+/// busy for a long time.
+fn kept_prompts(entries: &[TranscriptEntry], limit: usize) -> Vec<(usize, Numbered)> {
+    entries
+        .iter()
+        .enumerate()
+        .rev()
+        .filter_map(|(index, entry)| match &entry.kind {
+            EntryKind::User { text, .. } if !entry.hidden => {
+                Some((index, fitted_prompt(text, limit, entries.len())))
+            }
+            _ => None,
+        })
+        .take(KEPT_PROMPTS)
+        .collect()
+}
+
+/// The kept `prompts` and the newest other entries that fit `budget` bytes, newest first. The
+/// calls a Code Mode cell made are entries of their own beside the cell, so their commands and
+/// outcomes reach the model like any other call.
+fn transcript(
+    entries: &[TranscriptEntry],
+    mut prompts: Vec<(usize, Numbered)>,
+    budget: usize,
+) -> Vec<Numbered> {
+    // Entries are sized with the largest number they could carry, so numbering them afterwards
+    // never makes them larger.
+    let largest = entries.len();
     let newest_message = entries.iter().rposition(|entry| {
         !entry.hidden && matches!(entry.kind, EntryKind::Assistant { complete: true, .. })
     });
-    let mut items = Vec::new();
     let mut used = 0;
-    let mut prompts = 0;
+    let mut items = Vec::new();
     let mut full = false;
     for (index, entry) in entries.iter().enumerate().rev() {
-        if entry.hidden || entry.parent.is_some() {
+        if entry.hidden {
+            continue;
+        }
+        if prompts.first().is_some_and(|(kept, _)| *kept == index) {
+            items.push(prompts.remove(0).1);
+            if full && prompts.is_empty() {
+                break;
+            }
+            continue;
+        }
+        if full {
             continue;
         }
         let Some(item) = Item::of(entry, Some(index) == newest_message) else {
             continue;
         };
-        let prompt = matches!(item, Item::User { .. });
+        let item = Numbered { n: largest, item };
         let size = json_len(&item);
-        if prompt && prompts < KEPT_PROMPTS {
-            prompts += 1;
-        } else if full || used + size > budget {
+        if used + size > budget {
             full = true;
-            if prompts >= KEPT_PROMPTS {
+            if prompts.is_empty() {
                 break;
             }
             continue;
@@ -309,14 +355,31 @@ fn transcript(entries: &[TranscriptEntry], budget: usize) -> Vec<Numbered> {
         items.push(item);
     }
     let count = items.len();
+    for (index, item) in items.iter_mut().enumerate() {
+        item.n = count - index;
+    }
     items
-        .into_iter()
-        .enumerate()
-        .map(|(index, item)| Numbered {
-            n: count - index,
-            item,
-        })
-        .collect()
+}
+
+/// A prompt cut on a character boundary to the longest excerpt whose entry, escaped as JSON, takes
+/// at most `limit` bytes. An entry too small for any text keeps an empty excerpt.
+fn fitted_prompt(text: &str, limit: usize, n: usize) -> Numbered {
+    let entry = |chars: usize| Numbered {
+        n,
+        item: Item::User {
+            text: clip(text, chars),
+        },
+    };
+    let (mut shortest, mut longest) = (0, text.chars().count().min(MAX_USER_CHARS));
+    while shortest < longest {
+        let middle = (shortest + longest).div_ceil(2);
+        if json_len(&entry(middle)) <= limit {
+            shortest = middle;
+        } else {
+            longest = middle - 1;
+        }
+    }
+    entry(shortest)
 }
 
 impl Item {

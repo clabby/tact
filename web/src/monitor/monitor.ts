@@ -36,8 +36,8 @@ export type MonitorHost = {
   workspaceToken(path: string): string | null;
   /** Activates `session` and shows its chat. */
   open(session: string): void;
-  /** Puts `text` in the active session's composer and shows its chat. */
-  compose(text: string): void;
+  /** Puts `text` in `session`'s draft in the composer, or focuses it when `text` is empty. */
+  compose(session: string, text: string): void;
 };
 
 /** Sets text only when it differs, so the once-a-second refresh leaves unchanged nodes alone. */
@@ -108,7 +108,12 @@ export class Monitor {
       catalog: () => host.catalog(),
       workspaceToken: (path) => host.workspaceToken(path),
       open: (session) => host.open(session),
-      compose: (text) => host.compose(text),
+      // A card's idea of the active session can lag a frame behind, so composing opens its
+      // session first; the composer then holds the text until that session's snapshot arrives.
+      compose: (session, text) => {
+        host.open(session);
+        host.compose(session, text);
+      },
       send: async (session, text) => {
         const { rev } = await api.command("set_draft", { session, text });
         await api.command("submit", { session, rev });
@@ -208,7 +213,7 @@ export class Monitor {
     }
     for (const [id, card] of this.cards) {
       if (ranked.some((entry) => entry.summary.id === id)) continue;
-      card.element.remove();
+      card.dispose();
       this.cards.delete(id);
     }
     // Moving a card to another place detaches it for a moment, which drops focus from inside it.

@@ -186,9 +186,8 @@ class App {
       catalog: () => this.catalog,
       workspaceToken: (workspace) => this.workspaceToken(workspace),
       open: (session) => this.openSession(session),
-      compose: (text) => {
-        this.showView("chat");
-        if (text) this.composer.append(text);
+      compose: (session, text) => {
+        if (text) this.composer.appendTo(session, text);
         else this.composer.focus();
       },
     });
@@ -569,7 +568,7 @@ class App {
   }
 
   private showView(view: View) {
-    this.dispatch({ type: "view", view });
+    this.dispatch({ type: "view", view, liveSessions: this.store.state.live.length });
   }
 
   private ensureReview() {

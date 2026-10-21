@@ -28,10 +28,10 @@ test("desktops have no drawer", () => {
 
 test("switching views closes the drawer and starts on the chat", () => {
   expect(loadLayout(1440).view).toBe("chat");
-  const next = layoutReducer(layout({ drawerOpen: true }), { type: "view", view: "review" });
+  const next = layoutReducer(layout({ drawerOpen: true }), { type: "view", view: "review", liveSessions: 2 });
   expect(next).toMatchObject({ view: "review", drawerOpen: false });
-  expect(layoutReducer(next, { type: "view", view: "review" })).toBe(next);
-  expect(layoutReducer(layout({ drawerOpen: true }), { type: "view", view: "monitor" })).toMatchObject({ view: "monitor", drawerOpen: false });
+  expect(layoutReducer(next, { type: "view", view: "review", liveSessions: 2 })).toBe(next);
+  expect(layoutReducer(layout({ drawerOpen: true }), { type: "view", view: "monitor", liveSessions: 2 })).toMatchObject({ view: "monitor", drawerOpen: false });
 });
 
 test("the Monitor exists only with at least two live sessions, and gives way to the chat below that", () => {
@@ -43,6 +43,14 @@ test("the Monitor exists only with at least two live sessions, and gives way to 
   // Other views do not depend on how many sessions are live.
   const review = layout({ view: "review" });
   expect(layoutReducer(review, { type: "live", count: 0 })).toBe(review);
+});
+
+test("the Monitor cannot be entered with fewer than two live sessions, as by a palette command chosen after one closed", () => {
+  const chat = layout();
+  expect(layoutReducer(chat, { type: "view", view: "monitor", liveSessions: 1 })).toBe(chat);
+  expect(layoutReducer(chat, { type: "view", view: "monitor", liveSessions: 0 })).toBe(chat);
+  // Other views do not depend on how many sessions are live.
+  expect(layoutReducer(chat, { type: "view", view: "review", liveSessions: 1 })).toMatchObject({ view: "review" });
 });
 
 test("the palette offers the Monitor only while it exists and is not already shown", () => {

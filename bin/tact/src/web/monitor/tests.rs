@@ -39,7 +39,7 @@ fn fixture(mut model: FakeModel) -> Fixture {
     let (terminal, end) = bridge::bridge();
     let shutdown = CancellationToken::new();
     let hub = Hub::spawn(end.publications, shutdown.clone());
-    model.settings.interval = INTERVAL;
+    model.settings.get_mut().unwrap().interval = INTERVAL;
     let model = Arc::new(model);
     let monitor = Monitor::new(hub.clone(), Arc::clone(&model) as _, shutdown.clone());
     Fixture {
@@ -116,6 +116,13 @@ impl Fixture {
     }
 
     fn assistant_record(&self, text: &str) -> Arc<TranscriptRecord> {
+        self.agent_record(
+            AgentEventKind::AssistantMessage,
+            json!({"model_call_index": 0, "phase": null, "text": text}),
+        )
+    }
+
+    fn agent_record(&self, kind: AgentEventKind, payload: Value) -> Arc<TranscriptRecord> {
         let sequence = self.next_sequence();
         Arc::new(TranscriptRecord::from_agent(
             sequence,
@@ -124,10 +131,8 @@ impl Fixture {
                 protocol_version: 1,
                 request_id: Arc::from("request"),
                 seq: sequence,
-                kind: AgentEventKind::AssistantMessage,
-                payload: to_raw_value(&json!({"model_call_index": 0, "phase": null, "text": text}))
-                    .unwrap()
-                    .into(),
+                kind,
+                payload: to_raw_value(&payload).unwrap().into(),
             },
         ))
     }
@@ -225,7 +230,7 @@ async fn nothing_runs_without_live_sessions_or_an_available_model() {
     assert_eq!(idle.calls(), 0, "no session is live");
 
     let unavailable = fixture(FakeModel {
-        unavailable: Some("Sol needs OpenAI credentials.".to_owned()),
+        unavailable: std::sync::Mutex::new(Some("Sol needs OpenAI credentials.".to_owned())),
         ..FakeModel::default()
     });
     unavailable.open("s1", "Fix the parser").await;
@@ -260,7 +265,7 @@ async fn a_disabled_monitor_reports_why_and_never_runs() {
     let shutdown = CancellationToken::new();
     let hub = Hub::spawn(end.publications, shutdown.clone());
     let mut model = FakeModel::default();
-    model.settings.enabled = false;
+    model.settings.get_mut().unwrap().enabled = false;
     let model = Arc::new(model);
     let monitor = Monitor::new(hub, Arc::clone(&model) as _, shutdown);
     let state = json(&monitor.touch(true).await);
@@ -413,6 +418,108 @@ async fn failures_are_reported_until_the_next_success() {
     );
 }
 
+/// A Code Mode cell's only call is shown on its own, and its result can arrive through a hidden
+/// `wait` while a later message stays the newest entry. The changed result is new evidence.
+#[tokio::test(start_paused = true)]
+async fn an_older_entry_that_changes_makes_a_check_due() {
+    let fixture = fixture(FakeModel::default());
+    fixture.open("s1", "Make the parser tests pass").await;
+    fixture.open("s2", "Write the docs").await;
+    let call = |id: &str, tool: &str, arguments: Value| {
+        fixture.agent_record(
+            AgentEventKind::ToolCall,
+            json!({"call_id": id, "tool": tool, "arguments": arguments}),
+        )
+    };
+    let result = |id: &str, tool: &str, result: Value| {
+        fixture.agent_record(
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": id, "tool": tool, "status": "completed", "duration_ns": 1,
+                "result": result, "structured_result": result, "metadata": null,
+            }),
+        )
+    };
+    let publish = |record| {
+        fixture.publish(Publication::Record {
+            session: "s1".to_owned(),
+            record,
+        });
+    };
+    publish(fixture.agent_record(AgentEventKind::RunStarted, json!({})));
+    publish(call("flow", "exec", json!("await tools.exec_command()")));
+    publish(call(
+        "flow/code-1",
+        "exec_command",
+        json!({"cmd": "cargo test"}),
+    ));
+    publish(result(
+        "flow",
+        "exec",
+        json!([{"text": "Script running with cell ID 1"}]),
+    ));
+    publish(fixture.agent_record(
+        AgentEventKind::AssistantMessage,
+        json!({"model_call_index": 1, "phase": "commentary", "text": "Waiting for the tests."}),
+    ));
+    settle().await;
+    fixture.touch(false).await;
+    assert_eq!(fixture.calls(), 1);
+
+    publish(call("wait", "wait", json!({"cell_id": "1"})));
+    publish(result(
+        "flow/code-1",
+        "exec_command",
+        json!({"exit_code": 1, "output": "test result: FAILED. 0 passed; 1 failed"}),
+    ));
+    publish(result(
+        "wait",
+        "wait",
+        json!([{"text": "Script completed"}]),
+    ));
+    tokio::time::sleep(INTERVAL + Duration::from_secs(5)).await;
+    fixture.touch(false).await;
+    assert_eq!(fixture.calls(), 2, "the failed test is new evidence");
+    let failed = fixture.last_input()["sessions"][0]["transcript"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["kind"] == "tool" && item["state"] == "failed");
+    assert!(failed, "the second check reads the failure");
+}
+
+/// A check that finds too few sessions once it reads them is skipped, and does not count as
+/// having read the sessions it was started for.
+#[tokio::test(start_paused = true)]
+async fn a_skipped_check_leaves_the_sessions_unread() {
+    let resolutions = Arc::new(Semaphore::new(1));
+    let fixture = fixture(FakeModel {
+        resolve_gate: Some(Arc::clone(&resolutions)),
+        ..FakeModel::default()
+    });
+    fixture.open("s1", "Fix the parser").await;
+    let docs = vec![fixture.user_record("Write the docs")];
+    fixture
+        .open_with("s2", docs.clone(), Draft::default())
+        .await;
+    fixture.touch(false).await;
+    fixture.close("s2").await;
+    resolutions.add_permits(1);
+    settle().await;
+    assert_eq!(fixture.calls(), 0, "one session is never checked");
+    assert_eq!(fixture.state()["running"], false);
+
+    fixture.open_with("s2", docs, Draft::default()).await;
+    resolutions.add_permits(100);
+    fixture.touch(false).await;
+    tokio::time::sleep(INTERVAL + Duration::from_secs(5)).await;
+    assert_eq!(
+        fixture.calls(),
+        1,
+        "the reopened sessions were never checked, so a check is due"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn notes_follow_input_order_and_drop_sessions_that_closed() {
     let gate = Arc::new(Semaphore::new(0));
@@ -522,6 +629,90 @@ async fn figures_must_come_from_what_the_model_read_about_the_session() {
     );
 }
 
+/// Shutdown abandons a check that is still resolving its model, not only one waiting for its
+/// reply.
+#[tokio::test(start_paused = true)]
+async fn shutdown_abandons_a_check_resolving_its_model() {
+    let resolutions = Arc::new(Semaphore::new(1));
+    let fixture = fixture(FakeModel {
+        resolve_gate: Some(Arc::clone(&resolutions)),
+        ..FakeModel::default()
+    });
+    fixture.open("s1", "Fix the parser").await;
+    fixture.open("s2", "Write the docs").await;
+    fixture.touch(false).await;
+    let resolving = Arc::strong_count(&resolutions);
+
+    fixture.shutdown.cancel();
+    settle().await;
+    assert_eq!(
+        Arc::strong_count(&resolutions),
+        resolving - 1,
+        "the pending resolution was dropped"
+    );
+    assert_eq!(fixture.calls(), 0);
+}
+
+/// A reload that enables the monitor or makes its model usable applies at the next scheduling
+/// decision while a browser shows the Monitor, without waiting for its next call.
+#[tokio::test(start_paused = true)]
+async fn a_reload_applies_without_a_browser_call() {
+    let reloaded = fixture(FakeModel::default());
+    reloaded.model.settings.lock().unwrap().enabled = false;
+    reloaded.open("s1", "Fix the parser").await;
+    reloaded.open("s2", "Write the docs").await;
+    assert_eq!(reloaded.touch(false).await["availability"], "disabled");
+
+    reloaded.model.settings.lock().unwrap().enabled = true;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    settle().await;
+    assert_eq!(reloaded.calls(), 1, "the enabled monitor checks");
+    assert_eq!(reloaded.state()["availability"], "ready");
+
+    let repaired = fixture(FakeModel {
+        unavailable: std::sync::Mutex::new(Some("Sol needs OpenAI credentials.".to_owned())),
+        ..FakeModel::default()
+    });
+    repaired.open("s1", "Fix the parser").await;
+    repaired.open("s2", "Write the docs").await;
+    assert_eq!(repaired.touch(false).await["availability"], "unavailable");
+    *repaired.model.unavailable.lock().unwrap() = None;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    settle().await;
+    assert_eq!(repaired.calls(), 1, "the usable model checks");
+}
+
+/// Availability that a browser's call finds changed reaches every browser, even when no check
+/// starts; an unchanged renewal sends nothing.
+#[tokio::test(start_paused = true)]
+async fn availability_changes_reach_every_browser() {
+    let fixture = fixture(FakeModel::default());
+    fixture.open("s1", "Fix the parser").await;
+    fixture.open("s2", "Write the docs").await;
+    let mut subscription = fixture.hub.subscribe().unwrap();
+    fixture.touch(false).await;
+    assert_eq!(fixture.calls(), 1);
+    monitor_events(&mut subscription);
+
+    fixture.model.settings.lock().unwrap().enabled = false;
+    assert_eq!(fixture.touch(false).await["availability"], "disabled");
+    let events = monitor_events(&mut subscription);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["availability"], "disabled");
+    fixture.touch(false).await;
+    assert!(
+        monitor_events(&mut subscription).is_empty(),
+        "a renewal alone changes nothing"
+    );
+
+    fixture.model.settings.lock().unwrap().enabled = true;
+    fixture.touch(false).await;
+    let events = monitor_events(&mut subscription);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["availability"], "ready");
+    assert_eq!(fixture.calls(), 1, "nothing changed, so no check is due");
+}
+
 #[tokio::test(start_paused = true)]
 async fn shutdown_abandons_a_running_check() {
     let gate = Arc::new(Semaphore::new(0));
@@ -541,6 +732,157 @@ async fn shutdown_abandons_a_running_check() {
         waiting - 1,
         "the pending request was dropped"
     );
+}
+
+/// A Code Mode cell with two calls shows them under itself; their commands and outcomes stay
+/// part of what the model reads.
+#[tokio::test(start_paused = true)]
+async fn calls_inside_a_code_mode_cell_reach_the_model() {
+    let fixture = fixture(FakeModel::default());
+    let call = |id: &str, tool: &str, arguments: Value| {
+        fixture.agent_record(
+            AgentEventKind::ToolCall,
+            json!({"call_id": id, "tool": tool, "arguments": arguments}),
+        )
+    };
+    let result = |id: &str, tool: &str, result: Value| {
+        fixture.agent_record(
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": id, "tool": tool, "status": "completed", "duration_ns": 1,
+                "result": result, "structured_result": result, "metadata": null,
+            }),
+        )
+    };
+    let records = vec![
+        fixture.user_record("Make the parser tests pass"),
+        call("cell", "exec", json!("await tools.exec_command()")),
+        call("cell/code-1", "exec_command", json!({"cmd": "cargo test"})),
+        result(
+            "cell/code-1",
+            "exec_command",
+            json!({"exit_code": 101, "output": "test result: FAILED. 40 passed; 1 failed; 0 ignored"}),
+        ),
+        call("cell/code-2", "exec_command", json!({"cmd": "pwd"})),
+        result(
+            "cell/code-2",
+            "exec_command",
+            json!({"exit_code": 0, "output": "/work"}),
+        ),
+        result("cell", "exec", json!([])),
+    ];
+    fixture.open_with("s1", records, Draft::default()).await;
+    let built = fixture
+        .hub
+        .read_sessions(|views| input::build(views, None, 10_000_000));
+    let document: Value = serde_json::from_str(&built.text).unwrap();
+    let tools: Vec<(Value, Value, Value)> = document["sessions"][0]["transcript"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["kind"] == "tool")
+        .map(|item| {
+            (
+                item["summary"].clone(),
+                item["state"].clone(),
+                item["result"].clone(),
+            )
+        })
+        .collect();
+    assert!(
+        tools.contains(&(
+            json!("cargo test"),
+            json!("failed"),
+            json!("exit 101 · 40 passed, 1 failed")
+        )),
+        "{tools:?}"
+    );
+    assert!(
+        tools.contains(&(json!("pwd"), json!("succeeded"), json!("exit 0"))),
+        "{tools:?}"
+    );
+}
+
+/// Long prompts count toward the input's budget like everything else, measured in the bytes the
+/// model receives, while both newest prompts are still kept.
+#[tokio::test(start_paused = true)]
+async fn long_prompts_stay_within_the_input_budget() {
+    let crab = "🦀".repeat(1_500);
+    let ascii = "a".repeat(1_500);
+    for (prompt, messages) in [(crab.as_str(), 0), (ascii.as_str(), 10)] {
+        let fixture = fixture(FakeModel::default());
+        for index in 0..16 {
+            let mut records = vec![
+                fixture.user_record(&format!("first {prompt}")),
+                fixture.user_record(&format!("second {prompt}")),
+            ];
+            for _ in 0..messages {
+                records.push(fixture.assistant_record(&"b".repeat(1_200)));
+            }
+            fixture
+                .open_with(&format!("s{index}"), records, Draft::default())
+                .await;
+        }
+        let built = fixture
+            .hub
+            .read_sessions(|views| input::build(views, None, 10_000_000));
+        assert!(built.text.len() <= 100_000, "{} bytes", built.text.len());
+        let document: Value = serde_json::from_str(&built.text).unwrap();
+        for session in document["sessions"].as_array().unwrap() {
+            let prompts: Vec<&str> = session["transcript"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item["kind"] == "user")
+                .map(|item| item["text"].as_str().unwrap())
+                .collect();
+            assert_eq!(prompts.len(), 2, "both newest prompts are kept");
+            assert!(prompts[0].starts_with("second"));
+            assert!(prompts[1].starts_with("first"));
+        }
+    }
+}
+
+/// Plans and other details count toward a session's budget too: a session with a long plan of
+/// multi-byte steps still fits, and its newest prompts keep useful text.
+#[tokio::test(start_paused = true)]
+async fn long_plans_stay_within_the_input_budget() {
+    let fixture = fixture(FakeModel::default());
+    let steps: Vec<Value> = (0..20)
+        .map(|_| json!({"step": "🦀".repeat(160), "status": "pending"}))
+        .collect();
+    for index in 0..16 {
+        let records = vec![
+            fixture.user_record(&format!("first prompt for session {index}: fix the parser")),
+            fixture.user_record(&format!("second prompt for session {index}: also the docs")),
+            fixture.agent_record(
+                AgentEventKind::ToolCall,
+                json!({"call_id": "plan", "tool": "update_plan", "arguments": {"plan": steps}}),
+            ),
+        ];
+        fixture
+            .open_with(&format!("s{index}"), records, Draft::default())
+            .await;
+    }
+    let built = fixture
+        .hub
+        .read_sessions(|views| input::build(views, None, 10_000_000));
+    assert!(built.text.len() <= 100_000, "{} bytes", built.text.len());
+    let document: Value = serde_json::from_str(&built.text).unwrap();
+    let sessions = document["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 16);
+    for session in sessions {
+        let prompts: Vec<&str> = session["transcript"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["kind"] == "user")
+            .map(|item| item["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(prompts.len(), 2, "{session}");
+        assert!(prompts[0].starts_with("second prompt"), "{prompts:?}");
+        assert!(prompts[1].starts_with("first prompt"), "{prompts:?}");
+    }
 }
 
 #[tokio::test(start_paused = true)]

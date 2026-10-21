@@ -125,6 +125,25 @@ test("a same-session restart snapshot keeps visible text and sends its new revis
   expect(timers.scheduled).toEqual([]);
 });
 
+test("text for a session whose snapshot has not arrived waits for it and leaves the shown session's draft alone", async () => {
+  const { composer, textarea, commands } = harness();
+  composer.show(session("a", 1, "draft-a"));
+  composer.appendTo("b", "for-b");
+  expect(textarea.value).toBe("draft-a");
+
+  composer.show(session("b"));
+  timers.advance(3000);
+  await settle();
+  expect(textarea.value).toBe("for-b");
+  expect(commands).toEqual([{ name: "set_draft", args: { session: "b", text: "for-b" } }]);
+
+  // Text waiting for a session that is not the next one shown is dropped with the switch.
+  composer.appendTo("c", "for-c");
+  composer.show(session("a", 1, "draft-a"));
+  composer.show(session("c"));
+  expect(textarea.value).toBe("");
+});
+
 test("appended review text submits with the server's canonical line endings", async () => {
   for (const newline of ["\r\n", "\r"]) {
     const { composer, form, message, commands, save } = harness();

@@ -121,7 +121,7 @@ saved edits.
 | `subagent_entry` | `{ session, agent, entry: WireEntry }` for the active session; same upsert rule as `entry` |
 | `closed` | `{ session }` |
 | `workspace` | `{ version, checkout }` the working tree of `checkout` (an absolute path) changed; marks that checkout's diff stale |
-| `monitor` | `MonitorState` whenever it changes (a check started, finished, or failed); not part of the connect sequence. See "Monitor" |
+| `monitor` | `MonitorState` whenever it changes (a check started, finished, or failed, or the availability changed), in the order the states were taken; not part of the connect sequence. See "Monitor" |
 
 ```ts
 type SessionSummary = {
@@ -513,7 +513,10 @@ tasks. It has two layers:
 | `POST /api/monitor` | `{ refresh?: boolean }` | `MonitorState`; declares interest and may start a check |
 
 The route sits behind the usual guard (cookie, and `X-Tact: 1`). Malformed bodies are
-`invalid_request`. The `monitor` stream event carries the same state whenever it changes.
+`invalid_request`. The `monitor` stream event carries the same state whenever it changes. POST
+replies and stream events are not versioned together. The browser drops a reply when a stream event
+replaced the state while the request was in flight, but a stream event delayed behind a newer reply
+can briefly show older state until the next event or renewal.
 
 ```ts
 type MonitorState = {
@@ -571,13 +574,22 @@ sessions, so one live session is never checked, even on refresh), and either:
 - the sessions changed since the last check read them and the last check started at least
   `interval_seconds` ago (or none ever ran).
 
-"Changed" compares the live set and, per session, the newest visible entry's id and revision, the
-running state, the queue length, the unread flag, and the subagents' statuses, so time passing alone
-never counts. The server applies the automatic rule every 5 s between calls as well. Only one
-check runs at a time, and a running one is abandoned when the server stops. When no browser shows
-the Monitor, the model is never called. Availability is checked on every call: `disabled` when
+"Changed" compares the live set and, per session, a transcript revision that grows with every
+record applied to the session's transcript (so a change to any entry counts, not only to the newest
+one), the running state, the queue length, the unread flag, and the subagents' statuses, so time
+passing alone never counts. A check counts as having read the sessions only once it asks the model
+about them: one skipped because sessions closed while it started leaves them unread. The server
+applies the automatic rule every 5 s between calls as well. Only one check runs at a time, and a
+running one, whether it is resolving its model or awaiting the reply, is abandoned when the server
+stops. When no browser shows the Monitor, the model is never called. Availability is checked on
+every call and, while a lease is live, on every 5 s tick, so a reload that enables the monitor or
+makes its model usable applies without waiting for the browser: `disabled` when
 `[web.monitor] enabled = false`, `unavailable` when the chosen model has no usable credentials
-or is access-gated (the detail names the model and asks to set `[web.monitor] model`).
+or is access-gated (the detail names the model and asks to set `[web.monitor] model`). A change of
+availability is broadcast to every browser even when no check starts; a renewal that changes
+nothing is not. Because availability is refreshed only on browser requests and on these periodic
+checks, right after a reload a lookup that started under the previous configuration can briefly
+show its status until a lookup of the current configuration completes.
 
 Each check reads the configuration in force when it starts: the terminal loop hands every reloaded
 configuration to the web server, so `enabled`, `model`, `thinking`, and `interval_seconds`
@@ -588,9 +600,13 @@ for Claude models. A model that does not support the effort runs at its catalog 
 The model's input is a JSON document: the time, the previous check's notes (session, attention,
 goal, and health) when the same model made that check (a different model judges afresh), and per session its title, model, workspace, state, unread and draft flags (never the
 draft's text), queue length, turn time, status, plan, subagents, and a transcript tail. The tail
-holds the newest visible entries (no reasoning, tool output only as an exit code, a test summary,
-or one failure line) within a budget of about 10,000 bytes per session and 80,000 overall, and
-always includes the session's two newest prompts. With more than 16 live sessions, the 16 most
+holds the newest visible entries, including the calls a Code Mode cell made (no reasoning, tool
+output only as an exit code, a test summary, or one failure line). Everything about a session
+shares a budget of about 10,000 bytes per session and 80,000 overall, measured as the JSON the
+model receives. The session's two newest prompts are always included and get their share first,
+shortened to at most half of what its fixed fields leave; plan steps (in planned order) and
+subagents may then take up to half of the rest, dropping the ones that do not fit; and the other
+transcript entries fill what remains. With more than 16 live sessions, the 16 most
 recently active are read. Every string has a length limit. Transcripts and subagent lists are newest
 first; plan steps keep their planned order. Each transcript item carries a sequence number `n`,
 from 1 for the oldest item shown to the item count for the newest.
@@ -634,7 +650,8 @@ fails the check:
 - The reply object is the first complete JSON value starting at the first brace, so a fence or
   commentary around it is ignored, and so are stray characters after it (Luna sometimes repeats the
   closing brackets of an otherwise complete reply). Line breaks and other control characters
-  written raw inside strings, as in a multi-line code block, are read as if escaped. Notes for
+  written raw inside strings, as in a multi-line code block, are read as if escaped; one right after
+  a backslash keeps that backslash as a literal one. Notes for
   sessions the input did not describe
   are dropped, a session the reply leaves out simply has no note, and notes are kept in input order.
   Unknown attention levels read as `"ok"`, and an "ok" note carries no reason.
@@ -705,13 +722,15 @@ mobile-first.
   or, while it runs, the monitor's goal or the prompt. A question's options put that answer in the
   reply box when the session is idle and the question is current; they never send it. **Details**
   holds every block in full with the monitor's goal, reason, and suggested message, then the prompt,
-  the full latest reply, the plan, counters, and the model and workspace. Clicking a tile opens the
+  the latest reply as the Monitor received it (its opening and ending when it is long; the chat has
+  the whole message), the plan, counters, and the model and workspace. Clicking a tile opens the
   session's chat. **Reply** (**Steer** while a turn runs) sends a prompt from the tile, and its box
   can insert the monitor's suggestion for editing. The **…** menu opens the session, stops a running
   turn after confirmation, or closes a session that is not running, which moves it to History. A
-  session with an unsent draft offers **Open** instead of Reply, so the draft is never overwritten,
-  and the active session's reply goes to the composer. The Monitor asks for checks and ticks its
-  clocks only while it is on screen.
+  session with an unsent draft offers **Open** instead of Reply, so a draft the Monitor knows about
+  is never overwritten; a draft started elsewhere after the tile was drawn follows the usual rule
+  that the latest write wins. The active session's reply goes to the composer. The Monitor asks for
+  checks and ticks its clocks only while it is on screen.
 - **Transcript.** Prompts and messages render as Markdown with highlighted code and KaTeX math
   (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`, or a `math` fence). A `mermaid` fence renders as a
   diagram; Mermaid loads with the first one, a diagram opens enlarged on click, and one that

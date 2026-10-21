@@ -21,8 +21,13 @@ class FakeResizeObserver {
   observe(target: Element) {
     this.targets.push(target);
   }
-  unobserve() {}
-  disconnect() {}
+  unobserve(target: Element) {
+    const index = this.targets.indexOf(target);
+    if (index >= 0) this.targets.splice(index, 1);
+  }
+  disconnect() {
+    this.targets.length = 0;
+  }
 }
 
 beforeAll(async () => {
@@ -166,7 +171,7 @@ function mount(overrides: Partial<MonitorHost> = {}, apiOverrides: Record<string
     api, store, catalog: () => catalog,
     workspaceToken: (path) => (path === "/work" ? null : "ws2"),
     open: (session) => void calls.push(`open ${session}`),
-    compose: (text) => void calls.push(`compose ${text}`),
+    compose: (session, text) => void calls.push(`compose ${session} ${text}`),
     ...overrides,
   });
   monitor.setVisible(true);
@@ -439,7 +444,7 @@ test("replies write the session's draft and submit that revision; the active ses
   const mine = card("mine").querySelector<HTMLElement>(".card-primary")!;
   expect(text(mine)).toBe("Reply in chat");
   mine.click();
-  expect(calls.at(-1)).toBe("compose ");
+  expect(calls.slice(-2)).toEqual(["open mine", "compose mine "]);
 });
 
 test("changes re-render once per frame, and closed sessions leave", async () => {
@@ -456,6 +461,27 @@ test("changes re-render once per frame, and closed sessions leave", async () => 
   expect(titles(root)).toEqual(["Session ask", "Session mine"]);
 });
 
+test("a card still drawn as the active session opens it before composing, after another session became active", () => {
+  const { store, card, calls } = mount();
+  showNotes(store, { ...askNote, session: "mine" });
+  // Another tab activates "ask"; the Monitor has not redrawn, so "mine" still looks active.
+  store.dispatch({ type: "active", data: { session: "ask" } });
+  card("mine").querySelector<HTMLElement>(".question-option")!.click();
+  card("mine").querySelector<HTMLElement>(".card-primary")!.click();
+  expect(calls).toEqual(["open mine", "compose mine Keep TOML", "open mine", "compose mine "]);
+});
+
+test("a closed session's card stops observing its layout, while the others keep theirs", () => {
+  const { store } = mount();
+  store.dispatch({ type: "closed", data: { session: "busy" } });
+  monitor!.changed();
+  flush();
+  const observers = FakeResizeObserver.observers.filter((observer) => observer.targets.length > 0);
+  // Counts, since a failing comparison of DOM nodes would print the whole document.
+  expect(observers.length).toBe(3);
+  expect(observers.flatMap((observer) => observer.targets).filter((target) => !target.isConnected).length).toBe(0);
+});
+
 test("a reply box left open while its session became the active one sends to the composer, not the shared draft", async () => {
   const { store, card, calls } = mount();
   const ask = card("ask");
@@ -470,7 +496,7 @@ test("a reply box left open while its session became the active one sends to the
   ask.querySelector("textarea")!.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as unknown as Event);
   await Bun.sleep(0);
 
-  expect(calls).toEqual(["compose Keep the TOML loader."]);
+  expect(calls).toEqual(["open ask", "compose ask Keep the TOML loader."]);
   expect(ask.querySelector<HTMLElement>(".card-reply")!.hidden).toBe(true);
 });
 
@@ -575,7 +601,7 @@ test("a question's option opens the reply with the option in it, and sends nothi
   // The active session's draft is the composer's, so the option goes there.
   showNotes(store, { ...askNote, session: "mine" });
   card("mine").querySelector<HTMLElement>(".question-option")!.click();
-  expect(calls).toEqual(["compose Keep TOML"]);
+  expect(calls).toEqual(["open mine", "compose mine Keep TOML"]);
 });
 
 test("a stuck or off-track tile leads with the note's warning or danger text, whatever block the model put first", () => {
@@ -595,6 +621,101 @@ test("a stuck or off-track tile leads with the note's warning or danger text, wh
   // Without a concern, the model's order stands.
   showNotes(store, askNote, { ...askNote, session: "busy", attention: "ok", reason: null, blocks });
   expect(shown()).toEqual(["metric"]);
+});
+
+test("text changed while a reply is being sent stays in the box, whether typed or inserted", async () => {
+  let finish = () => {};
+  const { card } = mount({}, {
+    command: async (name: string) => {
+      if (name === "submit") await new Promise<void>((resolve) => { finish = resolve; });
+      return name === "set_draft" ? { rev: 7 } : {};
+    },
+  });
+  const ask = card("ask");
+  const textarea = ask.querySelector("textarea")!;
+  const reply = ask.querySelector<HTMLElement>(".card-reply")!;
+  const send = async () => {
+    textarea.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as unknown as Event);
+    await Bun.sleep(0);
+  };
+  ask.querySelector<HTMLElement>(".card-primary")!.click();
+  textarea.value = "first";
+  await send();
+  textarea.value = "second, not sent";
+  finish();
+  await Bun.sleep(0);
+  expect([textarea.value, reply.hidden]).toEqual(["second, not sent", false]);
+
+  await send();
+  ask.querySelectorAll<HTMLElement>(".question-option")[1]!.click();
+  finish();
+  await Bun.sleep(0);
+  expect([textarea.value, reply.hidden]).toEqual(["second, not sentSwitch to figment", false]);
+});
+
+test("a send that fails after saving the draft keeps its error until dismissed, then offers Open", async () => {
+  const { store, card } = mount({}, {
+    command: async (name: string) => {
+      if (name === "submit") throw new Error("This command is not available remotely.");
+      return { rev: 7 };
+    },
+  });
+  const ask = card("ask");
+  const reply = ask.querySelector<HTMLElement>(".card-reply")!;
+  const error = ask.querySelector<HTMLElement>(".card-reply-error")!;
+  ask.querySelector<HTMLElement>(".card-primary")!.click();
+  ask.querySelector("textarea")!.value = "/copy 2";
+  ask.querySelector("textarea")!.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as unknown as Event);
+  await Bun.sleep(0);
+  expect(error.hidden).toBe(false);
+
+  // The text it saved now shows as the session's draft.
+  store.dispatch({ type: "live", data: { active: "mine", sessions: store.state.live.map((entry) => entry.id === "ask" ? { ...entry, has_draft: true } : entry) } });
+  monitor!.changed();
+  flush();
+  expect([error.hidden, reply.hidden]).toEqual([false, false]);
+
+  ask.querySelector<HTMLElement>(".cancel-reply")!.click();
+  expect([error.hidden, reply.hidden, text(ask.querySelector(".card-primary"))]).toEqual([true, true, "Open"]);
+});
+
+test("a live message replaced while its card lives is no longer observed", () => {
+  const { store } = mount();
+  showNotes(store, askNote, { ...askNote, session: "busy", attention: "ok", blocks: [{ type: "live", source: "message" }] });
+  for (const message of ["First.", "Second.", "Third."]) changeActivity(store, "busy", { message: { text: message, commentary: false, at_ms: NOW } });
+  const observed = FakeResizeObserver.observers.flatMap((observer) => observer.targets);
+  // Counts, since a failing comparison of DOM nodes would print the whole document.
+  expect(observed.filter((target) => target.isConnected && target.closest(".blocks-list")).length).toBe(2);
+  expect(observed.filter((target) => !target.isConnected).length).toBe(0);
+});
+
+test("a stuck or off-track tile whose blocks report no problem shows the monitor's reason instead", () => {
+  const { store, card } = mount();
+  const busy = card("busy");
+  const blocks = () => [...busy.querySelectorAll<HTMLElement>(".card-blocks:not([hidden]) .block")].map((block) => text(block));
+  const evidence = busy.querySelector<HTMLElement>(".card-evidence")!;
+  const passing = { type: "metric", label: "Tests passing", value: "18", previous: null, tone: "success" } as const;
+  const stuck = (...shown: SessionNote["blocks"]) =>
+    showNotes(store, askNote, { ...askNote, session: "busy", attention: "stuck", reason: "It has rerun the same test six times.", blocks: shown });
+
+  stuck(passing);
+  expect(blocks()).toEqual([]);
+  expect([evidence.hidden, evidence.dataset.kind, text(evidence.querySelector(".evidence-inner"))]).toEqual([false, "reason", "It has rerun the same test six times."]);
+
+  // A failing metric or a failed newest step reports the problem itself, so it leads.
+  stuck(passing, { ...passing, label: "Failing tests", value: "3", tone: "danger" });
+  expect(blocks()).toEqual(["Failing tests3", "Tests passing18"]);
+  stuck(passing, { type: "history", items: [{ action: "Ran the focused tests", outcome: "failed", detail: "1 failed" }] });
+  expect(blocks()[0]).toContain("Ran the focused tests");
+  expect(evidence.hidden).toBe(true);
+
+  // A checklist shows its active item, so a failed one beside it does not explain the concern.
+  const steps = (...states: ("done" | "active" | "failed")[]) =>
+    ({ type: "checklist", title: null, items: states.map((state, index) => ({ label: `Step ${index + 1}`, state })) }) as const;
+  stuck(steps("failed", "active"));
+  expect([blocks(), evidence.dataset.kind]).toEqual([[], "reason"]);
+  stuck(passing, steps("done", "failed"));
+  expect(blocks()[0]).toContain("Step 2");
 });
 
 test("a live tool block that would repeat the call the live line names gives way to the next block, or to the fallback", () => {

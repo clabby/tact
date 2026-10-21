@@ -12,7 +12,8 @@
 //! browser showing the Monitor, the model is never called.
 //!
 //! The state sits behind one synchronous lock that is never held across an await or while the
-//! hub's lock is taken. Every change is broadcast to all streams as a `monitor` event.
+//! hub's lock is taken. Every change is broadcast to all streams as a `monitor` event, under a
+//! separate publication lock taken before either of the others, so events leave in order.
 
 mod blocks;
 mod input;
@@ -63,6 +64,9 @@ pub(super) struct Monitor {
     model: Arc<dyn MonitorModel>,
     shutdown: CancellationToken,
     inner: Mutex<Inner>,
+    /// Serializes taking and publishing Monitor stream snapshots, so stream events leave in the
+    /// order their snapshots were taken. Replies to `POST /api/monitor` are not ordered with them.
+    publication: Mutex<()>,
 }
 
 struct Inner {
@@ -76,7 +80,7 @@ struct Inner {
     check: Option<Check>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum Availability {
     Ready,
     Disabled,
@@ -91,8 +95,8 @@ struct Fingerprint(Vec<SessionMark>);
 #[derive(Debug, Eq, PartialEq)]
 struct SessionMark {
     session: String,
-    /// The newest visible entry's id and revision.
-    newest: Option<(usize, u64)>,
+    /// The session's transcript revision, which changes with any change to any entry.
+    transcript: u64,
     state: SummaryState,
     queued: usize,
     unread: bool,
@@ -178,6 +182,7 @@ impl Monitor {
                 error: None,
                 check: None,
             }),
+            publication: Mutex::new(()),
         });
         tokio::spawn(check_periodically(Arc::downgrade(&monitor), shutdown));
         monitor
@@ -191,13 +196,16 @@ impl Monitor {
     /// Records a browser's interest, starts a check if one is due, and returns the state.
     pub(super) async fn touch(self: &Arc<Self>, refresh: bool) -> MonitorState {
         let availability = self.availability().await;
-        {
-            let mut inner = self.lock();
-            inner.availability = availability;
-            inner.lease_until = Some(Instant::now() + LEASE);
-        }
-        self.consider(refresh);
+        self.lock().lease_until = Some(Instant::now() + LEASE);
+        self.apply_availability(availability, refresh);
         self.state()
+    }
+
+    /// Whether some browser showed the Monitor recently enough to keep it checking.
+    fn leased(&self) -> bool {
+        self.lock()
+            .lease_until
+            .is_some_and(|until| Instant::now() < until)
     }
 
     async fn availability(&self) -> Availability {
@@ -210,12 +218,27 @@ impl Monitor {
         }
     }
 
-    /// Starts a check when the scheduling rules in the module documentation allow one.
-    fn consider(self: &Arc<Self>, refresh: bool) {
+    /// Stores freshly found availability and starts a check if one is due. A change that no
+    /// starting check announces is published on its own, so every browser sees it.
+    fn apply_availability(self: &Arc<Self>, availability: Availability, refresh: bool) {
+        let changed = {
+            let mut inner = self.lock();
+            let changed = inner.availability != availability;
+            inner.availability = availability;
+            changed
+        };
+        if !self.consider(refresh) && changed {
+            self.broadcast();
+        }
+    }
+
+    /// Starts a check when the scheduling rules in the module documentation allow one, and says
+    /// whether it did.
+    fn consider(self: &Arc<Self>, refresh: bool) -> bool {
         let now = Instant::now();
         let settings = self.model.settings();
         if !settings.enabled {
-            return;
+            return false;
         }
         let (fingerprint, live) = self
             .hub
@@ -223,11 +246,11 @@ impl Monitor {
         let previous = {
             let mut inner = self.lock();
             if !matches!(inner.availability, Availability::Ready) {
-                return;
+                return false;
             }
             let leased = inner.lease_until.is_some_and(|until| now < until);
             if inner.running || live < MIN_LIVE_SESSIONS || !leased {
-                return;
+                return false;
             }
             let waited = |at_least: Duration| {
                 inner
@@ -237,15 +260,24 @@ impl Monitor {
             let changed = inner.fingerprint.as_ref() != Some(&fingerprint);
             let due = (refresh && waited(REFRESH_FLOOR)) || (changed && waited(settings.interval));
             if !due {
-                return;
+                return false;
             }
             inner.running = true;
             inner.started_at = Some(now);
-            inner.fingerprint = Some(fingerprint);
             inner.check.clone()
         };
         self.broadcast();
-        tokio::spawn(Arc::clone(self).run_check(previous));
+        // Shutdown abandons the check wherever it waits: resolving its model or awaiting the
+        // reply. A credential read already running on the blocking pool finishes on its own.
+        let check = Arc::clone(self).run_check(previous);
+        let shutdown = self.shutdown.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = shutdown.cancelled() => {}
+                () = check => {}
+            }
+        });
+        true
     }
 
     /// Runs one check with the model the configuration names when it starts, which may differ
@@ -269,17 +301,20 @@ impl Monitor {
         let continued = previous
             .as_ref()
             .filter(|check| check.model == choice.model.as_str());
-        let input = self
-            .hub
-            .read_sessions(|views| input::build(views, continued, as_of_ms));
+        let (input, read) = self.hub.read_sessions(|views| {
+            (
+                input::build(views, continued, as_of_ms),
+                input::fingerprint(views),
+            )
+        });
         let result =
             if input.sessions.len() < MIN_LIVE_SESSIONS {
                 None
             } else {
-                let reply = tokio::select! {
-                    () = self.shutdown.cancelled() => return,
-                    reply = self.model.complete(choice, INSTRUCTIONS, input.text) => reply,
-                };
+                // The sessions count as read once the model is asked about them, so a failed
+                // request is not retried automatically, while a skipped check reads nothing.
+                self.lock().fingerprint = Some(read);
+                let reply = self.model.complete(choice, INSTRUCTIONS, input.text).await;
                 Some(reply.map_err(CheckError::from).and_then(|reply| {
                     reply::parse(&reply, &input.sessions).map_err(CheckError::from)
                 }))
@@ -344,11 +379,17 @@ impl Monitor {
     }
 
     fn broadcast(&self) {
+        let _in_order = self
+            .publication
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         self.hub.broadcast("monitor", &self.state());
     }
 }
 
-/// Applies the automatic rule between browser calls until the server shuts down.
+/// Applies the automatic rule between browser calls until the server shuts down. While a lease
+/// is live, each tick also finds the current availability, so a reload that enables the monitor
+/// or makes its model usable takes effect without waiting for a browser's next call.
 async fn check_periodically(monitor: Weak<Monitor>, shutdown: CancellationToken) {
     let mut ticks = tokio::time::interval(CHECK_PERIOD);
     ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -360,7 +401,14 @@ async fn check_periodically(monitor: Weak<Monitor>, shutdown: CancellationToken)
         let Some(monitor) = monitor.upgrade() else {
             return;
         };
-        monitor.consider(false);
+        if !monitor.leased() {
+            continue;
+        }
+        let availability = tokio::select! {
+            () = shutdown.cancelled() => return,
+            availability = monitor.availability() => availability,
+        };
+        monitor.apply_availability(availability, false);
     }
 }
 

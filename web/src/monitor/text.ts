@@ -22,20 +22,3 @@ export function plainText(markdown: string) {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
-
-/** Characters of a long message kept on the closed card; Details shows all of it. */
-const MESSAGE_PREVIEW = 280;
-
-/**
- * The end of a message, where a closing question or result sits, starting at a line or word
- * boundary. Null when the whole message fits.
- */
-export function messageTail(text: string, limit = MESSAGE_PREVIEW): string | null {
-  const trimmed = text.trim();
-  if (trimmed.length <= limit) return null;
-  const tail = trimmed.slice(-limit);
-  const line = tail.indexOf("\n");
-  if (line >= 0 && line < limit / 2) return `…${tail.slice(line).trimStart()}`;
-  const word = tail.search(/\s/);
-  return `…${(word >= 0 && word < limit / 3 ? tail.slice(word) : tail).trimStart()}`;
-}

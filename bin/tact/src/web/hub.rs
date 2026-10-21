@@ -89,6 +89,8 @@ pub(super) struct TooManyStreams;
 pub(super) struct SessionView<'a> {
     pub(super) summary: SessionSummary,
     pub(super) model: &'a TranscriptModel,
+    /// Grows with every record or message applied to the session's own transcript.
+    pub(super) transcript_revision: u64,
     pub(super) queued: usize,
     pub(super) roster: &'a SubagentRoster,
 }
@@ -113,6 +115,9 @@ struct Live {
     busy: Busy,
     unread: bool,
     last_activity_unix_ms: u64,
+    /// How many records and messages the session's own transcript has applied. Any change to
+    /// any of its entries, not only the newest, comes with one.
+    transcript_revision: u64,
     title: Option<Title>,
     context: Option<ContextBudget>,
     roster: SubagentRoster,
@@ -322,6 +327,7 @@ impl Hub {
             .map(|(live, summary)| SessionView {
                 summary,
                 model: &live.model,
+                transcript_revision: live.transcript_revision,
                 queued: live.queue.len(),
                 roster: &live.roster,
             })
@@ -665,6 +671,7 @@ impl State {
                     closed: CancellationToken::new(),
                     reshaped: false,
                     activity: ActivityCache::default(),
+                    transcript_revision: u64::try_from(records.len()).unwrap_or(u64::MAX),
                 };
                 match self.live_mut(&live.info.id) {
                     Some(existing) => {
@@ -918,6 +925,7 @@ fn apply_message(live: &mut Live, update: AgentMessageUpdate) {
         let change = live
             .model
             .apply_message(MessageSender::Root, update.clone());
+        live.transcript_revision += 1;
         live.activity.invalidate();
         if change.removed.is_some() {
             live.reshaped = true;
@@ -943,6 +951,7 @@ fn apply_message(live: &mut Live, update: AgentMessageUpdate) {
 fn apply_record(live: &mut Live, record: &Arc<TranscriptRecord>) {
     let change = live.model.apply(record);
     live.last_activity_unix_ms = live.last_activity_unix_ms.max(record.recorded_at_unix_ms());
+    live.transcript_revision += 1;
     live.activity.invalidate();
     if change.removed.is_some() {
         live.reshaped = true;
@@ -1129,8 +1138,9 @@ mod tests {
             protocol::{Busy, Draft, Origin, Publication, QueuedPrompt, SessionInfo},
             titles::Title,
             transcript::{
-                LocalEvent, SessionStarted, TranscriptModel, TranscriptRecord, TurnId,
-                UserSubmitted, WorkerTurnAccepted, WorkerTurnFinished,
+                LocalEvent, SessionStarted, ShellFinished, ShellId, ShellStarted, TranscriptModel,
+                TranscriptRecord, TurnId, UserSteered, UserSubmitted, WorkerTurnAccepted,
+                WorkerTurnFinished,
             },
         },
         web::{
@@ -2280,5 +2290,78 @@ mod tests {
         let activity = activity_of(&drain(&mut subscription), "s1");
         assert_eq!(activity["tool"]["name"], "wait", "a failed wait is shown");
         assert_eq!(activity["tool"]["state"], "failed");
+    }
+
+    /// A terminal shell started during a turn keeps running while a steering prompt arrives and the
+    /// agent streams its answer. The history before the prompt cannot change shape meanwhile, so
+    /// it is scanned once rather than on every update.
+    #[tokio::test(start_paused = true)]
+    async fn a_shell_running_across_a_prompt_does_not_rescan_the_history() {
+        let fixture = fixture();
+        fixture.open("s1", Some("Write the docs"));
+        fixture.activate("s1");
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        settle().await;
+        let publish = |record| {
+            fixture.publish(Publication::Record {
+                session: "s1".into(),
+                record,
+            });
+        };
+        let local = |sequence: u64, event| {
+            Arc::new(TranscriptRecord::from_local(sequence, 1_000 + sequence, event).unwrap())
+        };
+
+        publish(agent_record(2, AgentEventKind::RunStarted, json!({})));
+        publish(local(
+            3,
+            LocalEvent::ShellStarted(ShellStarted {
+                id: ShellId::new(1),
+                command: "cargo build".to_owned(),
+                workspace: "/work".into(),
+            }),
+        ));
+        publish(local(
+            4,
+            LocalEvent::UserSteered(UserSteered {
+                text: "Also cover the docs".to_owned(),
+            }),
+        ));
+        for sequence in 5..10 {
+            publish(agent_record(
+                sequence,
+                AgentEventKind::AssistantDelta,
+                json!({"model_call_index": 0, "phase": null, "text": "Working on it. "}),
+            ));
+            settle().await;
+        }
+        let activity = activity_of(&drain(&mut subscription), "s1");
+        assert_eq!(activity["tool"]["state"], "running");
+        let full_scans =
+            |fixture: &Fixture| fixture.hub.state().live("s1").unwrap().activity.full_scans;
+        assert_eq!(
+            full_scans(&fixture),
+            1,
+            "the memo is reused while the shell runs"
+        );
+
+        publish(local(
+            10,
+            LocalEvent::ShellFinished(ShellFinished {
+                id: ShellId::new(1),
+                output: "Finished".to_owned(),
+                exit_code: Some(0),
+                duration_ns: 1,
+                truncated: false,
+                error: None,
+            }),
+        ));
+        settle().await;
+        let activity = activity_of(&drain(&mut subscription), "s1");
+        assert_eq!(activity["tool"]["name"], "exec_command");
+        assert_eq!(
+            activity["tool"]["state"], "succeeded",
+            "its completion still shows"
+        );
     }
 }

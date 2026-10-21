@@ -118,6 +118,10 @@ pub(super) struct ActivityCache {
     /// The newest tool call's projection and the revision it was made from. Summaries and
     /// outcomes read whole patches and outputs, so they are made once per revision.
     tool: Option<(EntryId, u64, ActivityTool)>,
+    /// How often the whole history before the newest prompt was scanned, so tests can tell a
+    /// reused memo from a rescan.
+    #[cfg(test)]
+    pub(super) full_scans: usize,
 }
 
 /// The newest qualifying entries before the prompt `boundary`, for a turn that has not produced
@@ -126,19 +130,21 @@ pub(super) struct ActivityCache {
 /// History before a prompt can still change after the prompt arrives, in three ways:
 ///
 /// - A tool that was running before the prompt changes in place when it ends. Its state is read
-///   through the remembered id, but it can also become a newly visible entry the memo does not
-///   remember: a hidden \`wait\` is shown when it fails.
+///   through the remembered id, but a hidden `wait` can also become a newly visible entry the
+///   memo does not remember: it is shown when it fails.
 /// - A Code Mode cell is hidden in place behind its first call, which
 ///   [`Earlier::still_qualifies`] notices when the memo remembers the cell.
 /// - Entries cross the prompt, which moves it to another position: a cell that started before the
 ///   prompt and makes more calls after it regroups them under itself, even when its finished run
 ///   left it running and it no longer counts as a running tool; old message threads are removed.
 ///
-/// A memo is therefore reused only when no tool before its prompt was running when it was
-/// computed (`settled`), its prompt is still at `boundary_index`, and its entries still qualify.
-/// Otherwise the history before the prompt is scanned again, which reads every entry before it.
-/// Settled history costs one lookup per running tool and nothing more; while a tool before the
-/// prompt runs, or a cell keeps regrouping calls across it, every recomputation rescans.
+/// A memo is therefore reused only when no tool before its prompt that can change the shape of
+/// the history, a Code Mode cell or a hidden `wait`, was running when it was computed
+/// (`settled`), its prompt is still at `boundary_index`, and its entries still qualify. Other
+/// running tools, such as a shell, only change in place. Otherwise the history before the prompt
+/// is scanned again, which reads every entry before it. Settled history costs one lookup per
+/// running tool and nothing more; while a cell or a hidden `wait` before the prompt runs, or a
+/// cell keeps regrouping calls across it, every recomputation rescans.
 struct Earlier {
     boundary: EntryId,
     boundary_index: usize,
@@ -268,9 +274,11 @@ impl ActivityCache {
     fn earlier(&mut self, model: &TranscriptModel, prompt: usize) -> &Earlier {
         let entries = model.entries();
         let boundary = entries[prompt].id;
-        let settled = !model
-            .running_tool_ids()
-            .any(|id| model.index_of(id).is_some_and(|index| index < prompt));
+        let settled = !model.running_tool_ids().any(|id| {
+            model
+                .index_of(id)
+                .is_some_and(|index| index < prompt && changes_shape(&entries[index]))
+        });
         let remembered = self
             .earlier
             .take()
@@ -287,10 +295,14 @@ impl ActivityCache {
                 })
             })
             .filter(|earlier| earlier.still_qualifies(model));
-        self.earlier.insert(
-            remembered
-                .unwrap_or_else(|| Earlier::scan(&entries[..prompt], prompt, boundary, settled)),
-        )
+        let earlier = remembered.unwrap_or_else(|| {
+            #[cfg(test)]
+            {
+                self.full_scans += 1;
+            }
+            Earlier::scan(&entries[..prompt], prompt, boundary, settled)
+        });
+        self.earlier.insert(earlier)
     }
 
     fn tool(&mut self, entry: &TranscriptEntry) -> Option<ActivityTool> {
@@ -396,6 +408,14 @@ fn top_level_tool(entry: &TranscriptEntry) -> Option<&ToolEntry> {
 
 fn is_plan(entry: &TranscriptEntry) -> bool {
     matches!(&entry.kind, EntryKind::Tool(tool) if tool.name == "update_plan")
+}
+
+/// A running tool whose next records can show, hide, or move entries before a prompt rather than
+/// only change its own state: a Code Mode cell, which regroups its calls (whether or not it is
+/// itself one of a cell's calls), and a hidden `wait`, which is shown when it fails.
+fn changes_shape(entry: &TranscriptEntry) -> bool {
+    matches!(&entry.kind, EntryKind::Tool(tool)
+        if tool.name == "exec" || (entry.hidden && tool.name == "wait"))
 }
 
 /// Progress through an `update_plan` call's steps; `None` when its arguments hold no plan.

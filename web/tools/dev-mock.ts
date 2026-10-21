@@ -229,7 +229,8 @@ class MockSession {
     const tools = visible.filter(isTool);
     const tool = tools.at(-1);
     const turnTools = visible.slice(promptIndex + 1).filter(isTool);
-    const planCall = [...tools].reverse().find((entry) => entry.name === "update_plan");
+    // The plan may be updated inside a Code Mode cell, so it is found among all calls.
+    const planCall = [...visible].reverse().find((entry) => entry.kind === "tool" && entry.name === "update_plan");
     const plan = planCall && (this.details.get(planCall.id)?.arguments as { plan?: { step: string; status: string }[] } | undefined)?.plan;
     const newest = visible.at(-1);
     const clip = (text: string, limit: number) => (text.length > limit ? `${text.slice(0, limit - 1)}…` : text);
@@ -311,8 +312,6 @@ export class MockTact {
   private monitorState: MonitorState = {
     availability: "ready", detail: null, running: false, error: null, interval_seconds: 120, check: null,
   };
-  private checkStarted = 0;
-  private checkInput = "";
 
   constructor(seed = true) {
     if (seed) this.seed();
@@ -690,32 +689,25 @@ export class MockTact {
   }
 
   /**
-   * Imitates POST /api/monitor: while at least two sessions are live, a check starts when none
-   * ever ran, when a refresh asks for one at least 10 s after the last, or when the sessions
-   * changed and the interval has passed.
+   * Imitates POST /api/monitor with a simpler policy than the server's: while at least two
+   * sessions are live and no check runs, one starts when none has run yet or when a refresh asks
+   * for one. Unlike the server, the mock never checks again on its own.
    */
   monitor(refresh: boolean): MonitorState {
     const state = this.monitorState;
-    const since = Date.now() - this.checkStarted;
-    const changed = this.checkFingerprint() !== this.checkInput;
-    const due = state.check === null || (refresh ? since >= 10_000 : changed && since >= state.interval_seconds * 1000);
+    const due = state.check === null || refresh;
     if (state.availability === "ready" && !state.running && monitorAvailable(this.sessions.size) && due) this.runCheck();
     return structuredClone(state);
   }
 
-  /** What a check reads, without anything that changes merely because time passes. */
-  private checkFingerprint() {
-    return JSON.stringify([...this.sessions.values()].map((session) => [
-      session.id, session.entries.length, session.running, session.queue.length, session.unread,
-      session.subagents.agents.map((agent) => agent.status.state),
-    ]));
-  }
-
+  /**
+   * Reads every live session now, as of `as_of_ms`, and publishes the notes after the simulated
+   * model call, without the sessions closed meanwhile.
+   */
   private runCheck() {
     const state = this.monitorState;
     const asOf = Date.now();
-    this.checkStarted = asOf;
-    this.checkInput = this.checkFingerprint();
+    const notes = [...this.sessions.values()].map((session) => mockNote(session));
     state.running = true;
     this.emit("monitor", state);
     setTimeout(() => {
@@ -725,7 +717,7 @@ export class MockTact {
         as_of_ms: asOf,
         generated_at_ms: Date.now(),
         model: "luna",
-        sessions: [...this.sessions.values()].map((session) => mockNote(session)),
+        sessions: notes.filter((note) => this.sessions.has(note.session)),
       };
       this.emit("monitor", state);
     }, CHECK_MS * this.pace);
@@ -1107,6 +1099,7 @@ export class MockTact {
     });
     shell("jj st", 0, "Working copy changes:\nM bin/tact/src/tui/app.rs\n", 1);
     shell("cargo check -p tact", 0, "    Checking tact v0.7.0 (/Users/dev/src/tact/bin/tact)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.84s\n", 10);
+    const firstPlan = add(tool("update_plan", "1/4 done", { duration_ns: 1_000_000, has_detail: true }), 2);
     // A Code Mode cell that only reads stays routine and folds with the commands around it.
     const reads = add(tool("exec", "2 tools", { duration_ns: 120_000_000, child_count: 2 }), 2);
     for (const path of ["bin/tact/src/tui/app.rs", "bin/tact/src/tui/event_loop.rs"]) add(tool("exec_command", `sed -n 1,160p ${path}`, { duration_ns: 30_000_000 }), 1, reads.id);
@@ -1129,7 +1122,9 @@ export class MockTact {
     add({ kind: "assistant", text: "One test failed: the draft echo arrived before the acknowledgement. I'll make the reply wait for the loop to apply the command.", complete: true, commentary: false }, 10);
     const send = add(tool("send_agent_message", "me → #2", { duration_ns: 3_000_000, has_detail: true }), 3);
     const sessionMessage = add(tool("message_session", "me → 9f3c1a7e", { duration_ns: 2_000_000, has_detail: true }), 3);
-    const plan = add(tool("update_plan", "2/4 done", { duration_ns: 1_000_000, has_detail: true }), 3);
+    // The newest plan comes from inside a Code Mode cell, which the activity's plan must still find.
+    const planning = add(tool("exec", "1 tool", { duration_ns: 2_000_000, child_count: 1 }), 3);
+    const plan = add(tool("update_plan", "2/4 done", { duration_ns: 1_000_000, has_detail: true }), 1, planning.id);
     add({ kind: "session_message", from_session: "4be07d21-8c19-47a3-b5d2-0e6f91a3c8d7", text: "I rebased onto main and the bridge tests pass. Please re-run the ordering suite on your side and tell me if the `draft echo` still races the acknowledgement." }, 5);
     add(directedThread(2, THREAD_SCHEMA), 20);
     add(directedThread(3, THREAD_FAILED), 20);
@@ -1141,6 +1136,18 @@ export class MockTact {
     add({ kind: "turn_completed", duration_ns: 1_402_000_000_000 }, 2);
     add({ kind: "effort_changed", to: "high" }, 60);
     add({ kind: "context_compacted", duration_ns: 3_100_000_000 }, 30);
+    detail(firstPlan, {
+      arguments: {
+        plan: [
+          { step: "Poll web requests next to terminal input", status: "completed" },
+          { step: "Apply each command with its keypress effect", status: "in_progress" },
+          { step: "Make the reply wait for the loop to apply the command", status: "pending" },
+          { step: "Document the stream events", status: "pending" },
+        ],
+      },
+      result: { output: "Plan updated" },
+      metadata: null,
+    });
     detail(plan, {
       arguments: {
         explanation: "The bridge test fails, so the reply fix comes before the docs.",

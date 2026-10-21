@@ -42,7 +42,8 @@ export type LayoutAction =
   | { type: "resize"; width: number }
   | { type: "toggle-drawer"; open?: boolean }
   | { type: "toggle-sidebar" }
-  | { type: "view"; view: View }
+  /** Shows `view`; the Monitor only while `liveSessions` lets it exist. */
+  | { type: "view"; view: View; liveSessions: number }
   /** The number of live sessions changed. */
   | { type: "live"; count: number }
   | { type: "escape" };
@@ -68,7 +69,9 @@ export function layoutReducer(layout: Layout, action: LayoutAction): Layout {
         ? { ...layout, sidebarCollapsed: !layout.sidebarCollapsed }
         : { ...layout, drawerOpen: !layout.drawerOpen };
     case "view":
-      return action.view === layout.view ? layout : { ...layout, view: action.view, drawerOpen: false };
+      // A command offered while the Monitor existed may run after a session closed.
+      if (action.view === layout.view || (action.view === "monitor" && !monitorAvailable(action.liveSessions))) return layout;
+      return { ...layout, view: action.view, drawerOpen: false };
     case "live":
       // A Monitor left with too few live sessions gives way to the chat.
       return layout.view === "monitor" && !monitorAvailable(action.count) ? { ...layout, view: "chat" } : layout;
