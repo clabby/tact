@@ -12,13 +12,15 @@ import { showFileViewer } from "./viewer/file-viewer";
 import { setAttentionBadge } from "./shell/favicon";
 import { effortColor, modelColor } from "./core/format";
 import { glyph } from "./ui/glyphs";
-import { layoutReducer, loadLayout, type Layout, type LayoutAction, type View } from "./shell/layout";
+import { layoutReducer, loadLayout, offersMonitor, type Layout, type LayoutAction, type View } from "./shell/layout";
 import { openConfigEditor, openContextDiagnostics, openMemories, openPhoneLink, openReflect } from "./shell/features";
 import { openSubagents, type SubagentsView } from "./chat/subagents";
 import { formatAge } from "./core/format";
 import { Palette, type PaletteCommand } from "./ui/palette";
 import { PromptRail } from "./chat/prompt-rail-view";
 import { mountReviewPanel } from "./review/review-panel";
+import { Monitor } from "./monitor/monitor";
+import { monitorCounts } from "./monitor/attention";
 import { Sidebar } from "./shell/sidebar";
 import { openSessionRename } from "./shell/session-rename";
 import { SessionTitles } from "./shell/session-title";
@@ -36,6 +38,8 @@ const root = document.getElementById("app")!;
 const SIDEBAR_KEY = "tact.web.sidebar";
 /** How often the footer re-reads sibling instances so their running counts stay current. */
 const INSTANCE_REFRESH_MS = 5000;
+/** How often the Monitor item re-counts between events, so a session that falls quiet is counted. */
+const MONITOR_ITEM_REFRESH_MS = 30_000;
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 
 /** The full-window message shown when this browser has no valid login. */
@@ -68,6 +72,7 @@ class App {
   private readonly composer: Composer;
   private readonly rail: PromptRail;
   private readonly sidebar: Sidebar;
+  private readonly monitor: Monitor;
   private readonly stream: StreamClient;
   private readonly shell: HTMLElement;
   private layout: Layout;
@@ -103,7 +108,7 @@ class App {
         <main class="main">
           <header class="chat-header">
             <button type="button" class="icon-button menu-button" aria-label="Toggle sidebar" title="Toggle sidebar">${glyph("sidebar")}</button>
-            <div class="chat-title"><h1>Tact</h1><div class="chat-sub"><span class="model-dot"></span><span class="chat-model"></span><span class="chat-effort"></span><span class="chat-workspace" hidden></span></div></div>
+            <div class="chat-title"><h1>Tact</h1><div class="chat-sub"><span class="model-dot"></span><span class="chat-model"></span><span class="chat-effort"></span><span class="chat-workspace" hidden></span><span class="monitor-sub"></span></div></div>
             <nav class="segmented view-tabs" role="tablist" aria-label="View">
               <button type="button" class="segment" role="tab" id="tab-chat" aria-controls="view-chat" data-view="chat">Chat</button>
               <button type="button" class="segment" role="tab" id="tab-review" aria-controls="view-review" data-view="review">Review<span class="tab-count" hidden></span></button>
@@ -121,6 +126,7 @@ class App {
           <section class="view review-view" id="view-review" role="tabpanel" aria-labelledby="tab-review" hidden>
             <div class="panel-body"></div>
           </section>
+          <section class="view monitor-view" id="view-monitor" aria-label="Monitor" hidden></section>
         </main>
       </div>`;
     this.shell = root.querySelector(".app")!;
@@ -166,11 +172,24 @@ class App {
       api,
       catalog: () => this.catalog,
       navigated: () => this.dispatch({ type: "toggle-drawer", open: false }),
+      openMonitor: () => this.showView("monitor"),
+      showChat: () => this.showView("chat"),
       renameSession: (session) => this.renameSession(session),
       setTheme: (choice) => this.theme.set(choice),
       themeChoice: () => this.theme.choice,
       resolvedTheme: () => this.theme.current,
       workspaceToken: (workspace) => this.workspaceToken(workspace),
+    });
+    this.monitor = new Monitor(root.querySelector("#view-monitor")!, {
+      api,
+      store: this.store,
+      catalog: () => this.catalog,
+      workspaceToken: (workspace) => this.workspaceToken(workspace),
+      open: (session) => this.openSession(session),
+      compose: (session, text) => {
+        if (text) this.composer.appendTo(session, text);
+        else this.composer.focus();
+      },
     });
     this.stream = new StreamClient({
       url: "./api/stream",
@@ -219,6 +238,7 @@ class App {
     }).catch(() => {});
     this.refreshInstances();
     setInterval(() => this.refreshInstances(), INSTANCE_REFRESH_MS);
+    setInterval(() => this.renderMonitorItem(), MONITOR_ITEM_REFRESH_MS);
     this.pendingLink = linkTarget(location.hash);
     addEventListener("hashchange", () => {
       this.pendingLink = linkTarget(location.hash);
@@ -249,10 +269,13 @@ class App {
           break;
         case "live": {
           this.sidebar.setLive(state.live, state.active);
+          this.dispatch({ type: "live", count: state.live.length });
           this.sidebar.renderFooter(state.connection, this.instances);
           this.composer.statusChanged();
           this.composer.settingsChanged();
           this.renderHeader();
+          this.renderMonitorItem();
+          this.monitor.changed();
           this.openLink();
           const running = this.store.anyRunning();
           if (running !== this.wasRunning) {
@@ -261,6 +284,11 @@ class App {
           }
           break;
         }
+        case "activity":
+        case "monitor":
+          this.renderMonitorItem();
+          this.monitor.changed();
+          break;
         case "history":
           void this.sidebar.refreshHistory();
           void this.palette.refresh();
@@ -447,6 +475,10 @@ class App {
   }
 
   private renderHeader() {
+    if (this.layout.view === "monitor") {
+      this.renderMonitorHeader();
+      return;
+    }
     const session = this.store.state.session;
     const title = session?.title || (session ? "New chat" : "Tact");
     this.headerTitle.render(root.querySelector(".chat-title h1")!, session?.id ?? "", title, session?.titlePending ?? false);
@@ -473,6 +505,28 @@ class App {
     setAttentionBadge(unread > 0 || this.finishedUnseen);
   }
 
+  /** The header over the Monitor names it and counts the live and running sessions. */
+  private renderMonitorHeader() {
+    const { live } = this.store.state;
+    this.headerTitle.render(root.querySelector(".chat-title h1")!, "", "Monitor", false);
+    const running = live.filter((summary) => summary.state === "running").length;
+    root.querySelector(".monitor-sub")!.textContent = [`${live.length} live`, running ? `${running} running` : ""].filter(Boolean).join(" · ");
+    const unread = live.filter((summary) => summary.unread).length;
+    document.title = `${unread ? `(${unread}) ` : ""}Monitor · Tact`;
+    setAttentionBadge(unread > 0 || this.finishedUnseen);
+  }
+
+  private renderMonitorItem() {
+    const { live, activity, monitor } = this.store.state;
+    this.sidebar.setMonitor({ ...monitorCounts(live, activity, monitor?.check ?? null, Date.now()), current: this.layout.view === "monitor" });
+  }
+
+  /** Makes `session` the active session and shows its chat, even when it already is the active one. */
+  private openSession(session: string) {
+    this.showView("chat");
+    if (session !== this.store.state.active) this.command("activate", { session });
+  }
+
   private renderConnection() {
     const banner = root.querySelector<HTMLElement>(".connection-banner")!;
     const connection = this.store.state.connection;
@@ -489,6 +543,9 @@ class App {
     this.applyLayout();
     if (!viewChanged) return;
     this.review?.setVisible?.(next.view === "review");
+    this.monitor.setVisible(next.view === "monitor");
+    this.renderHeader();
+    this.renderMonitorItem();
     if (next.view === "chat") this.composer.focus();
   }
 
@@ -506,11 +563,12 @@ class App {
     }
     root.querySelector<HTMLElement>("#view-chat")!.hidden = view !== "chat";
     root.querySelector<HTMLElement>("#view-review")!.hidden = view !== "review";
+    root.querySelector<HTMLElement>("#view-monitor")!.hidden = view !== "monitor";
     root.querySelector<HTMLElement>(".sidebar")!.toggleAttribute("inert", viewport === "desktop" ? sidebarCollapsed : !drawerOpen);
   }
 
   private showView(view: View) {
-    this.dispatch({ type: "view", view });
+    this.dispatch({ type: "view", view, liveSessions: this.store.state.live.length });
   }
 
   private ensureReview() {
@@ -573,7 +631,7 @@ class App {
         this.dispatch({ type: "toggle-sidebar" });
       } else if (mod && event.key === ".") {
         event.preventDefault();
-        this.showView(this.layout.view === "review" ? "chat" : "review");
+        this.showView(this.layout.view === "chat" ? "review" : "chat");
       } else if (mod && event.key.toLowerCase() === "f" && !event.shiftKey && !event.altKey && !keepsBrowserFind(event.target)) {
         if (this.find()) event.preventDefault();
       } else if (mod && event.key.toLowerCase() === "k") {
@@ -596,7 +654,7 @@ class App {
   private escape() {
     if (this.layout.drawerOpen) {
       this.dispatch({ type: "escape" });
-    } else if (!this.activeRunning()) {
+    } else if (this.layout.view === "monitor" || !this.activeRunning()) {
       this.composer.disarmInterrupt();
     } else if (this.composer.interruptArmed) {
       this.composer.interrupt();
@@ -662,7 +720,11 @@ class App {
    */
   private find() {
     if (this.layout.view === "review") return this.review?.openSearch() ?? false;
-    if (this.store.state.session) this.findBar.open();
+    if (this.store.state.session) {
+      // The find bar searches the transcript, so the Monitor gives way to the chat first.
+      if (this.layout.view === "monitor") this.showView("chat");
+      this.findBar.open();
+    }
     return true;
   }
 
@@ -674,15 +736,16 @@ class App {
 
   private registerCommands() {
     const palette = this.palette;
+    // While the Monitor is shown, the active session is one more place to go.
     palette.register(() => this.store.state.live
-      .filter((summary) => summary.id !== this.store.state.active)
+      .filter((summary) => summary.id !== this.store.state.active || this.layout.view === "monitor")
       .map((summary): PaletteCommand => ({
         id: `activate:${summary.id}`,
         title: summary.title || "New chat",
         group: "Live sessions",
         icon: summary.state === "running" ? "circle" : "message",
         hint: summary.state === "running" ? "running" : summary.unread ? "unread" : "",
-        run: () => this.command("activate", { session: summary.id }),
+        run: () => this.openSession(summary.id),
       })));
     palette.register(() => [
       { id: "new", title: "New chat", group: "Sessions", icon: "plus", run: () => void this.sidebar.newChat() },
@@ -769,7 +832,11 @@ class App {
       { id: "reload", title: "Reload configuration", group: "Tact", icon: "refresh", keywords: "config", run: () => {
         void this.api.command("reload_config").then(() => toast("Configuration reloaded."), (error) => toast(describeError(error), "danger"));
       } },
-      { id: "view", title: this.layout.view === "review" ? "Show chat" : "Show review", group: "View", icon: this.layout.view === "review" ? "message" : "panel", keywords: "diff changes overview", hint: isMac ? "⌘." : "Ctrl .", run: () => this.showView(this.layout.view === "review" ? "chat" : "review") },
+      { id: "view", title: this.layout.view === "chat" ? "Show review" : "Show chat", group: "View", icon: this.layout.view === "chat" ? "panel" : "message", keywords: "diff changes overview", hint: isMac ? "⌘." : "Ctrl .", run: () => this.showView(this.layout.view === "chat" ? "review" : "chat") },
+      ...(offersMonitor(this.layout, this.store.state.live.length) ? [{
+        id: "monitor", title: "Monitor", group: "View", icon: "gauge" as const, keywords: "sessions dashboard attention tasks",
+        run: () => this.showView("monitor"),
+      }] : []),
       { id: "sidebar", title: "Toggle sidebar", group: "View", icon: "sidebar", hint: isMac ? "⌘B" : "Ctrl B", run: () => this.dispatch({ type: "toggle-sidebar" }) },
       { id: "composer", title: "Focus composer", group: "View", icon: "pencil", hint: "/", run: () => this.composer.focus() },
       { id: "find", title: this.layout.view === "review" ? "Find in changes" : "Find in transcript", group: "View", icon: "search", keywords: "search", hint: isMac ? "⌘F" : "Ctrl F", run: () => this.find() },

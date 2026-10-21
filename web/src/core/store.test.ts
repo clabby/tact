@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { initialState, reduce, type AppState } from "./store";
-import type { SessionSnapshot, StreamEvent, WireEntry } from "./wire";
+import type { MonitorState, SessionActivity, SessionSnapshot, StreamEvent, WireEntry } from "./wire";
 
 function snapshot(session: string, entries: WireEntry[] = []): SessionSnapshot {
   return {
@@ -153,4 +153,43 @@ test("context, roster, and settings events update the session", () => {
     subagents: { max_subagents: 2, agents: [] },
     model: "opus-5.5", effort: "max", reasoningMode: "pro", speed: "fast",
   });
+});
+const activity = (session: string, fields: Partial<SessionActivity> = {}): SessionActivity => ({
+  session, status: null, turn_elapsed_ns: null, prompt: null, message: null, tool: null,
+  turn: { tools: 0, failed: 0, patches: 0 }, plan: null, error: null, agents: { running: 0, total: 0 }, queued: 0, context: null,
+  ...fields,
+});
+
+test("activity replaces every session's activity and anchors running turns to the arrival time", () => {
+  const state = connected();
+
+  expect(reduce(state, { type: "activity", data: { sessions: [activity("a", { turn_elapsed_ns: 4e9 }), activity("b")] } }, 10_000))
+    .toEqual([{ type: "activity" }]);
+  expect(state.activity.get("a")).toMatchObject({ session: "a", turnStartedAt: 6_000 });
+  expect(state.activity.get("b")!.turnStartedAt).toBeNull();
+
+  reduce(state, { type: "activity", data: { sessions: [activity("b", { queued: 2 })] } });
+  expect([...state.activity.keys()]).toEqual(["b"]);
+  expect(state.activity.get("b")!.queued).toBe(2);
+});
+
+test("closing a session drops its activity", () => {
+  const state = connected({ type: "activity", data: { sessions: [activity("a"), activity("b")] } });
+
+  expect(reduce(state, { type: "closed", data: { session: "b" } })).toEqual([{ type: "live" }, { type: "activity" }]);
+  expect([...state.activity.keys()]).toEqual(["a"]);
+  expect(reduce(state, { type: "closed", data: { session: "z" } })).toEqual([{ type: "live" }]);
+});
+
+test("monitor state is replaced whole", () => {
+  const state = initialState();
+  const monitor: MonitorState = {
+    availability: "ready", detail: null, running: true, error: null, interval_seconds: 120, check: null,
+  };
+
+  expect(reduce(state, { type: "monitor", data: monitor })).toEqual([{ type: "monitor" }]);
+  expect(state.monitor).toBe(monitor);
+  const disabled = { ...monitor, availability: "disabled" as const, running: false, detail: "Turned off." };
+  reduce(state, { type: "monitor", data: disabled });
+  expect(state.monitor).toBe(disabled);
 });

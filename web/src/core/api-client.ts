@@ -4,6 +4,7 @@ import type {
   Commands,
   Instance,
   LocalDocument,
+  MonitorState,
   Queries,
   QueryName,
   SiblingInstance,
@@ -98,6 +99,15 @@ export class ApiClient {
 
   instances(options?: RequestOptions) {
     return this.get<{ instances: SiblingInstance[] }>("instances", options);
+  }
+
+  /**
+   * Declares that this tab shows the Monitor, which keeps the monitor model checking the sessions
+   * for a while, and returns its state. `refresh` asks for a check now rather than when the
+   * sessions change.
+   */
+  monitor(refresh = false) {
+    return this.post<MonitorState>("monitor", { refresh });
   }
 
   /** One entry's full tool detail; `agent` addresses a subagent's transcript. */

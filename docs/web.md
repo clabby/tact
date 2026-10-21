@@ -29,6 +29,17 @@ similar) and give Tact its address (`web.public_url`). See "Remote access".
   another device is first wanted),
   `max_live_sessions = 8`. `public_url` and `tailscale` are mutually exclusive: setting both is a
   configuration error. `--web=false` (`TACT_WEB`) disables the server.
+- Config `[web.monitor]`: `enabled = true` (the monitor model checks the sessions while a browser
+  shows the Monitor and at least two sessions are live), `model = ""` and `thinking = ""`, which work like `[agent] model` and
+  `[agent] thinking`: any model id and effort those accept, and empty means Tact's default model
+  (`[agent] model` after command-line overrides) with `[agent] thinking`. An explicit model
+  without an explicit thinking runs at that model's catalog default effort. `interval_seconds = 120`
+  is the shortest time between automatic checks, at least 10. An unknown model or effort, or an
+  interval under 10, is a configuration error. A model whose credentials are missing, or an
+  access-gated model such as Mythos, leaves the monitor unavailable at runtime instead, with a
+  sentence naming the model. Reloading the configuration applies the whole section to the next
+  check. Checks cost what the chosen model costs, so set a smaller model here to keep them cheap,
+  or a fast one with a short interval to check more often. See "Monitor".
 - Machine token: `$TACT_HOME/web/token` (0600, 32 CSPRNG bytes, base64url). Registry:
   `$TACT_HOME/web/instances/<pid>.json` (pid, port, workspace, started_at), removed on exit; readers
   tolerate stale files. Assets: `$TACT_HOME/web/assets/v<version>` (bundle id
@@ -82,11 +93,12 @@ size before reading it. Reads also stop at the size limit if a file grows during
 ## Stream
 
 One SSE stream per tab, following the shared active session. On connect it emits `hello`, `live`,
-`active`, and a `snapshot` of the active session; reconnect repeats this (no replay). Each event is
-`event: <name>` with a JSON `data`, serialized once and shared by every stream. Keep-alive comment
-every 15 s. Entry events are coalesced to the TUI's frame interval. A tab that connects between
-two coalesced deliveries can receive an `entry` its snapshot already holds; the upsert rule makes
-that harmless.
+`activity`, `active`, and a `snapshot` of the active session; reconnect repeats this (no replay).
+Each event is `event: <name>` with a JSON `data`, serialized once and shared by every stream.
+Keep-alive comment every 15 s. Entry events are coalesced to the TUI's frame interval. A tab that
+connects between two coalesced deliveries can receive an `entry` its snapshot already holds; the
+upsert rule makes that harmless. Likewise, a tab that connects while the other tabs hold an older
+activity list receives the list again at the next delivery.
 
 Draft text in snapshots and `draft` events is sent in full because clients use it to synchronize
 saved edits.
@@ -95,6 +107,7 @@ saved edits.
 | :-- | :-- |
 | `hello` | `{ protocol_version, client_hint }` |
 | `live` | `{ active: string \| null, sessions: SessionSummary[] }` on connect and whenever any summary changes |
+| `activity` | `{ sessions: SessionActivity[] }`, every live session in the order of `live`, on connect and whenever any session's activity changes; closed sessions leave the list |
 | `active` | `{ session }`, always followed by a `snapshot` |
 | `snapshot` | `SessionSnapshot` |
 | `entry` | `{ session, entry: WireEntry }` upsert by `(id, revision)`; clients drop anything older than what they hold |
@@ -108,6 +121,7 @@ saved edits.
 | `subagent_entry` | `{ session, agent, entry: WireEntry }` for the active session; same upsert rule as `entry` |
 | `closed` | `{ session }` |
 | `workspace` | `{ version, checkout }` the working tree of `checkout` (an absolute path) changed; marks that checkout's diff stale |
+| `monitor` | `MonitorState` whenever it changes (a check started, finished, or failed, or the availability changed), in the order the states were taken; not part of the connect sequence. See "Monitor" |
 
 ```ts
 type SessionSummary = {
@@ -118,6 +132,29 @@ type SessionSummary = {
   unread: boolean;            // finished or errored while not active
   has_draft: boolean;
   last_activity_unix_ms: number;
+};
+// What a session is doing now, for the Monitor. Computed from the projection the server already
+// holds for every live session; recomputed only when a publication touched that session.
+type SessionActivity = {
+  session: string;
+  status: TransientStatus | null;  // as in the snapshot
+  turn_elapsed_ns: number | null;  // how long the oldest running turn has run, as of this event;
+                                   // count on with a monotonic clock. Time passing alone sends no event
+  prompt: { text: string; at_ms: number | null } | null;  // newest visible prompt, at most 600 characters
+  // Newest complete visible assistant message; a message still streaming is not reported. Over
+  // 1,800 characters it is cut to its first 1,200 and last 500, joined by "\n…\n".
+  message: { text: string; commentary: boolean; at_ms: number | null } | null;
+  // Newest visible top-level tool call (a Code Mode cell with several calls counts as one).
+  tool: { name: string; summary: string; state: "running" | "succeeded" | "failed";
+          at_ms: number | null; outcome: ToolOutcome | null } | null;  // summary and outcome as in WireEntry
+  turn: { tools: number; failed: number; patches: number };  // top-level calls since the newest prompt
+                                   // (the whole transcript without one); patches: succeeded apply_patch calls
+  plan: { done: number; total: number; current: string | null } | null;  // newest update_plan call
+  error: string | null;            // the transient error, else the newest visible entry when it is an error;
+                                   // at most 600 characters
+  agents: { running: number; total: number };  // running counts pending and running subagents
+  queued: number;                  // prompts waiting in the queue
+  context: { active_tokens: number; window_tokens: number } | null;
 };
 type SessionSnapshot = {
   session: string; title: string; title_pending: boolean; model: string; workspace: string; effort: Effort;
@@ -456,18 +493,244 @@ and range are still usable.
 | `invalid_checkout` | 400 | no | yes | The checkout is not in an accepted repository family |
 | `failed` | 500 | yes | yes | The server failed independently of the request |
 
+## Monitor
+
+The Monitor shows every live session of this process at once, to help the developer manage open
+tasks. It has two layers:
+
+- The `activity` stream event, which the server derives from the projections it already holds
+  (see "Stream"). It costs no model calls.
+- The **monitor** model (`bin/tact/src/web/monitor`), which periodically asks the model set by
+  `[web.monitor]` (Tact's default model unless set) to **check** all live sessions. For each
+  session it writes a note: the goal the agent is pursuing, up to four status blocks it composes
+  from a typed vocabulary to show status and progress in the form that fits the work, an attention
+  level with its evidence, and an optional message to steer or unblock the agent. It calls the
+  model directly, without tools, an agent, or a session worker, through the same helper as the
+  title generator (`core::direct`).
+
+| Endpoint | Body | Response |
+| :-- | :-- | :-- |
+| `POST /api/monitor` | `{ refresh?: boolean }` | `MonitorState`; declares interest and may start a check |
+
+The route sits behind the usual guard (cookie, and `X-Tact: 1`). Malformed bodies are
+`invalid_request`. The `monitor` stream event carries the same state whenever it changes. POST
+replies and stream events are not versioned together. The browser drops a reply when a stream event
+replaced the state while the request was in flight, but a stream event delayed behind a newer reply
+can briefly show older state until the next event or renewal.
+
+```ts
+type MonitorState = {
+  availability: "ready" | "disabled" | "unavailable";
+  detail: string | null;          // why it is disabled or unavailable, as a sentence; null when ready
+  running: boolean;               // the model is checking the sessions
+  error: string | null;           // the last check's failure, cleared by the next success
+  interval_seconds: number;
+  check: MonitorCheck | null;     // the last successful check, or null before the first
+};
+type MonitorCheck = {
+  as_of_ms: number;               // when the sessions were read
+  generated_at_ms: number;        // when the model's reply arrived
+  model: string;                  // model id, labelled through the models catalog
+  sessions: SessionNote[];        // notes for sessions that are still live, in input order
+};
+type Attention = "needs_input" | "stuck" | "off_track" | "ready" | "ok";
+type SessionNote = {
+  session: string; attention: Attention;
+  goal: string | null;            // the task the agent is pursuing, at most 100 characters;
+                                  // null only when the session has no task yet
+  health: number | null;          // 0-100 integer: how well the work is going toward the goal;
+                                  // null when there is no task yet
+  previous_health: number | null; // this session's health in the previous successful check,
+                                  // filled in by the server (null when there is none)
+  blocks: StatusBlock[];          // composed by the model, most important first, at most 4
+  reason: string | null;          // the evidence, at most 300 characters; null when attention is "ok"
+  suggestion: string | null;      // at most 600 characters, written to the agent
+};
+type Tone = "neutral" | "success" | "warning" | "danger";
+type StatusBlock =
+  | { type: "text"; text: string; tone: Tone }   // a finding, blocker, risk, or result; text <= 240
+  | { type: "progress"; label: string; done: number; total: number; unit: string | null }
+                                  // integers, 0 <= done <= total, 0 < total <= 1,000,000; label <= 60, unit <= 20
+  | { type: "metric"; label: string; value: string; previous: string | null; tone: Tone }
+                                  // label <= 60; value and previous are short figures ("0", "42 ms",
+                                  // "3/3") of at most 24 characters
+  | { type: "checklist"; title: string | null;   // a planned sequence in planned order; title <= 60
+      items: { label: string; state: "done" | "active" | "pending" | "failed" | "skipped" }[] } // 1-8 items, label <= 100
+  | { type: "history";            // recent steps, newest first, 1-4 items
+      items: { action: string; outcome: "worked" | "failed" | "running" | "unclear"; detail: string | null }[] }
+                                  // action <= 100, detail <= 120
+  | { type: "question"; text: string; options: string[] }  // text <= 300, at most 5 options of <= 80
+  | { type: "code"; label: string | null; text: string }   // label <= 40, text <= 240 and at most 4 lines
+  | { type: "live"; source: "message" | "plan" | "tool" | "prompt" | "agents" | "error" };
+                                  // the browser fills it from the session's live data
+```
+
+Scheduling. The browser calls `POST /api/monitor` when the Monitor becomes visible and every 20 s
+while it stays visible; each call holds a 60 s lease. While a lease is live, a check starts when
+the model is available, none is running, at least two sessions are live (the Monitor compares
+sessions, so one live session is never checked, even on refresh), and either:
+
+- the call asked for `refresh` and the last check started at least 10 s ago, or
+- the sessions changed since the last check read them and the last check started at least
+  `interval_seconds` ago (or none ever ran).
+
+"Changed" compares the live set and, per session, a transcript revision that grows with every
+record applied to the session's transcript (so a change to any entry counts, not only to the newest
+one), the running state, the queue length, the unread flag, and the subagents' statuses, so time
+passing alone never counts. A check counts as having read the sessions only once it asks the model
+about them: one skipped because sessions closed while it started leaves them unread. The server
+applies the automatic rule every 5 s between calls as well. Only one check runs at a time, and a
+running one, whether it is resolving its model or awaiting the reply, is abandoned when the server
+stops. When no browser shows the Monitor, the model is never called. Availability is checked on
+every call and, while a lease is live, on every 5 s tick, so a reload that enables the monitor or
+makes its model usable applies without waiting for the browser: `disabled` when
+`[web.monitor] enabled = false`, `unavailable` when the chosen model has no usable credentials
+or is access-gated (the detail names the model and asks to set `[web.monitor] model`). A change of
+availability is broadcast to every browser even when no check starts; a renewal that changes
+nothing is not. Because availability is refreshed only on browser requests and on these periodic
+checks, right after a reload a lookup that started under the previous configuration can briefly
+show its status until a lookup of the current configuration completes.
+
+Each check reads the configuration in force when it starts: the terminal loop hands every reloaded
+configuration to the web server, so `enabled`, `model`, `thinking`, and `interval_seconds`
+apply from the next scheduling decision and check without a restart. The request uses the chosen
+effort as sessions do: the reasoning effort for OpenAI models, and adaptive thinking at that effort
+for Claude models. A model that does not support the effort runs at its catalog default.
+
+The model's input is a JSON document: the time, the previous check's notes (session, attention,
+goal, and health) when the same model made that check (a different model judges afresh), and per session its title, model, workspace, state, unread and draft flags (never the
+draft's text), queue length, turn time, status, plan, subagents, and a transcript tail. The tail
+holds the newest visible entries, including the calls a Code Mode cell made (no reasoning, tool
+output only as an exit code, a test summary, or one failure line). Everything about a session
+shares a budget of about 10,000 bytes per session and 80,000 overall, measured as the JSON the
+model receives. The session's two newest prompts are always included and get their share first,
+shortened to at most half of what its fixed fields leave; plan steps (in planned order) and
+subagents may then take up to half of the rest, dropping the ones that do not fit; and the other
+transcript entries fill what remains. With more than 16 live sessions, the 16 most
+recently active are read. Every string has a length limit. Transcripts and subagent lists are newest
+first; plan steps keep their planned order. Each transcript item carries a sequence number `n`,
+from 1 for the oldest item shown to the item count for the newest.
+
+The reply must be one JSON object, `{ sessions: [...] }`. The instructions describe every block
+type with examples by kind of work (a metric of failing tests, progress through a migration, a
+question with the agent's options, a live tool for a long command, a checklist or live plan, a
+warning text for a risk) and require every input session exactly once, even with little to say
+(attention "ok", no blocks, the goal from the prompt). Blocks must not restate the title, goal, or
+reason, every figure must come from the input, and each history step cites as `at` the `n` of the
+newest transcript item it covers. A history step's outcome is whether that step's own result
+succeeded (a test run that failed stays "failed" even when a later step fixed it), and a question
+keeps the agent's options in the order and wording it offered them, each only the choice itself
+without the agent's explanation of it.
+
+Health is separate from attention: a session can be going well and still wait on an answer. Health
+measures progress toward the goal, not activity and not whether a run finished. The instructions
+use these bands: 90-100 when the goal is achieved or verified; 70-89 for normal progress without
+unresolved problems; 40-69 for slow or uncertain work, minor failures being handled, retries, or a
+finished run that honestly reports the goal blocked or impossible (lower in that band when nothing
+useful came of it); 20-39 for repeated failures, a loop, scope drift, or a risky approach; and 0-19
+for work that is still flailing, broken, or off track with no path forward. A report that the goal
+was not achieved is never 90-100, and such a run is `needs_input` rather than `ready`. A session
+waiting on the developer is scored on its progress so far: sound work with a sensible question at
+the right point is 70-89. Each check scores health independently from the current evidence; the
+previous score is context for continuity only, kept when the new score is within 10 points of it
+and the evidence has not changed. The middle of a band is preferred when unsure, and only a session
+with no task, or one that has just started with no evidence of progress yet, has no score. A note
+must be consistent: a warning or danger block, or a concern in the reason, shows in its attention
+and health, and when attention is `stuck` or `off_track` the first block explains the concern
+rather than a success-looking metric or text. Changing production code or expected values only to
+make a test pass (special-casing the test, weakening assertions, editing tests the developer said
+not to touch, or behavior that contradicts the task) is `off_track` with a health of 20-39 even
+when the suite passes, and the reason says what to check. The server keeps a health only when it is
+a number that rounds to an integer from 0 to 100 (otherwise null) and sets `previous_health`
+itself from the previous successful check, whichever model made it.
+
+The server reads the reply leniently and validates each block on its own, so one bad block never
+fails the check:
+
+- The reply object is the first complete JSON value starting at the first brace, so a fence or
+  commentary around it is ignored, and so are stray characters after it (Luna sometimes repeats the
+  closing brackets of an otherwise complete reply). Line breaks and other control characters
+  written raw inside strings, as in a multi-line code block, are read as if escaped; one right after
+  a backslash keeps that backslash as a literal one. Notes for
+  sessions the input did not describe
+  are dropped, a session the reply leaves out simply has no note, and notes are kept in input order.
+  Unknown attention levels read as `"ok"`, and an "ok" note carries no reason.
+- Unknown or malformed blocks are dropped and the first 4 valid ones kept; a missing or malformed
+  block list is empty. Strings are trimmed and cut to the limits above. An unknown tone reads as
+  `"neutral"`, an unknown checklist state as `"pending"`, and an unknown history outcome as
+  `"unclear"`. Required text that is empty, a progress block outside its bounds or with
+  non-integers, a checklist or history without items, and an unknown live source drop the block.
+  Empty question options are dropped, and the rest are ordered by where each first appears in the
+  agent's newest message (options it does not contain follow in the model's order). Code is cut to
+  its first 4 lines. A metric value or previous value longer than 24 characters, or neither text
+  nor a number, drops the block rather than being cut.
+- A progress or metric block is dropped when any run of digits in its `done`, `total`,
+  `value`, or `previous` is not a run of digits in what the model read about that session
+  (excluding the transcript items' sequence numbers), so it cannot present an invented figure.
+- Models do not reliably keep the requested order, so history steps are sorted newest first by
+  `at` (ties keep the model's order); steps whose `at` is missing or not one of the session's
+  sequence numbers follow in the model's order, and the first 4 are kept. `at` is not sent to
+  browsers.
+
+Anything else fails the check with "The monitor's reply could not be read: <reason>." The reason
+names the failure without repeating the reply, which may quote session content: the reply was
+empty, it held no JSON object, its JSON ends early, its JSON is invalid at a given line and column,
+or its object has no sessions list; each with the reply's length in characters where it helps.
+
+Data handling. The monitor sends excerpts of every live session's transcript (prompts, messages,
+tool summaries, errors, plans) to its own model, which may belong to a different provider than a
+session's model, as session titles already do. Turn it off with `[web.monitor] enabled = false`,
+or choose its model with `model`. Its instructions tell the model that all session content is data
+to assess, never instructions to follow.
+
+
 ## UI
 
 The web UI is chat first. Its styling takes the palette and rhythm of the TUI theme and is
 mobile-first.
 
-- **Sidebar.** **+ New chat**, **Live** sessions with state markers (pulsing running, idle, accent
-  unread, pencil draft), **History** with search, and an instance switcher. Live sessions are
-  ordered by recent activity; **Pin to top** in a row's menu keeps a session above the rest
-  (remembered per browser). On desktops the sidebar folds away (header button or Cmd/Ctrl B,
-  remembered per browser); on narrower windows it is a drawer.
+- **Sidebar.** **+ New chat**, the **Monitor** item, **Live** sessions with state markers (pulsing
+  running, idle, accent unread, pencil draft), **History** with search, and an instance switcher.
+  Live sessions are ordered by recent activity; **Pin to top** in a row's menu keeps a session
+  above the rest (remembered per browser). On desktops the sidebar folds away (header button or
+  Cmd/Ctrl B, remembered per browser); on narrower windows it is a drawer.
 - **Tabs.** **Chat** holds the transcript and the shared composer. **Review** holds the Pierre
-  diffs, live while the agent edits, and an **Overview** sub-tab. Cmd/Ctrl . switches between them.
+  diffs, live while the agent edits, and an **Overview** sub-tab. Cmd/Ctrl . switches between them,
+  and from the Monitor it returns to Chat.
+- **Monitor.** While at least two sessions are live, the sidebar item (or the **Monitor** palette
+  command) replaces the chat with a dashboard of every live session of this process: one grid of
+  compact tiles that fills the window, with the sessions that need you first, then those working,
+  then idle ones, each group newest first; the toolbar's **Order** switches to **Health**, which
+  puts the sessions going worst first. The item sits above the session list, outside its scrolling,
+  and counts the sessions that need you and those running; when fewer than two sessions remain live,
+  it disappears and the view returns to the chat. A toolbar filters the tiles (**All**, **Needs
+  you**, **Working**, **Idle**, each with its count) and shows when the monitor model last checked
+  the sessions and which model it is, with a refresh button. A session needs you when it failed, the
+  monitor reads it as waiting on you, stuck, or off track, it has a reply nobody has read (**New
+  reply**), it is retrying, or its running turn has shown no activity for 10 minutes with no tool
+  call or subagent in flight. Every tile has the same frame: its title, one badge, and a gauge of
+  the monitor's health score (0 to 100, how well the work is going, with an arrow when it moved by
+  10 or more since the previous check), what the session is doing now with the turn's duration or
+  the time since its last activity, and its actions. Between them, the monitor chooses how to show
+  the session's status from a set of blocks: a sentence, a progress bar, a measurement with its
+  previous value, a checklist, its latest steps newest first with whether each worked, a question
+  with the agent's options, a short literal such as a command, or live data that updates in real
+  time (the last message, the plan, the call in flight, the prompt, subagents, or the error). A
+  model block written before the session's latest activity is marked **earlier**. A session's error
+  always takes the tile's body, and without a current note the tile shows one piece of evidence
+  chosen by its state: the end of its last message when it is idle (where a question to you sits),
+  or, while it runs, the monitor's goal or the prompt. A question's options put that answer in the
+  reply box when the session is idle and the question is current; they never send it. **Details**
+  holds every block in full with the monitor's goal, reason, and suggested message, then the prompt,
+  the latest reply as the Monitor received it (its opening and ending when it is long; the chat has
+  the whole message), the plan, counters, and the model and workspace. Clicking a tile opens the
+  session's chat. **Reply** (**Steer** while a turn runs) sends a prompt from the tile, and its box
+  can insert the monitor's suggestion for editing. The **…** menu opens the session, stops a running
+  turn after confirmation, or closes a session that is not running, which moves it to History. A
+  session with an unsent draft offers **Open** instead of Reply, so a draft the Monitor knows about
+  is never overwritten; a draft started elsewhere after the tile was drawn follows the usual rule
+  that the latest write wins. The active session's reply goes to the composer. The Monitor asks for
+  checks and ticks its clocks only while it is on screen.
 - **Transcript.** Prompts and messages render as Markdown with highlighted code and KaTeX math
   (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`, or a `math` fence). A `mermaid` fence renders as a
   diagram; Mermaid loads with the first one, a diagram opens enlarged on click, and one that

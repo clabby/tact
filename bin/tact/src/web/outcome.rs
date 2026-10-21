@@ -12,7 +12,7 @@ const TAIL_LINE_CHARS: usize = 200;
 
 /// How a finished command-like tool ended: its exit code, its last output lines, and a test or
 /// build summary when the output contains a recognisable one.
-#[derive(Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(super) struct ToolOutcome {
     pub(super) exit_code: Option<i64>,
     pub(super) tail: Vec<String>,

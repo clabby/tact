@@ -4,11 +4,13 @@
 //! is made by the terminal event loop and reaches the server through [`bridge`]. See
 //! `docs/web.md` for the architecture and the wire protocol.
 
+mod activity;
 mod api;
 mod assets;
 pub(crate) mod bridge;
 mod files;
 mod hub;
+mod monitor;
 mod outcome;
 mod registry;
 mod review;
@@ -27,6 +29,7 @@ use api::{AppState, PublicOrigin};
 use assets::AssetStore;
 pub(crate) use assets::{Located, WebAssets};
 use hub::Hub;
+use monitor::{ConfiguredModel, Monitor, MonitorModel};
 use registry::{InstanceRecord, Registration, RegistryError};
 use review::{BridgeAgent, ReviewRegistry};
 use std::{
@@ -39,7 +42,10 @@ use std::{
 use tailscale::Tailnet;
 use thiserror::Error;
 use token::{MachineToken, TokenError};
-use tokio::{net::TcpListener, sync::mpsc::UnboundedSender};
+use tokio::{
+    net::TcpListener,
+    sync::{mpsc::UnboundedSender, watch},
+};
 use tokio_util::sync::CancellationToken;
 use workspaces::Workspaces;
 
@@ -67,14 +73,19 @@ enum StartError {
 /// Starts the web server for this process and reports its readiness through `end.status`.
 ///
 /// Startup failure only sets [`bridge::WebStatus::Unavailable`]; it never reaches the terminal.
-/// The server runs until `shutdown` is cancelled.
+/// The server runs until `shutdown` is cancelled. Where it listens and how it is exposed are read
+/// once from `config` at startup; the monitor follows every configuration the terminal loop sends.
 pub(crate) fn spawn(
-    config: &Config,
+    config: watch::Receiver<Config>,
     workspace: &Path,
     end: bridge::WebEnd,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    let settings = Settings::new(config, workspace);
+    let settings = Settings::new(
+        &config.borrow(),
+        workspace,
+        Arc::new(ConfiguredModel::new(config.clone())),
+    );
     tokio::spawn(async move {
         let bridge::WebEnd {
             publications,
@@ -121,6 +132,7 @@ struct Settings {
     /// The Tact home directory; the web state lives in its `web` subdirectory.
     home: PathBuf,
     workspace: PathBuf,
+    monitor: Arc<dyn MonitorModel>,
 }
 
 /// How the server is reached from other devices.
@@ -135,7 +147,7 @@ enum Exposure {
 }
 
 impl Settings {
-    fn new(config: &Config, workspace: &Path) -> Self {
+    fn new(config: &Config, workspace: &Path, monitor: Arc<dyn MonitorModel>) -> Self {
         let web = config.web();
         Self {
             enabled: web.enabled(),
@@ -148,6 +160,7 @@ impl Settings {
             },
             home: config.path().parent().unwrap_or(Path::new(".")).to_owned(),
             workspace: workspace.to_owned(),
+            monitor,
         }
     }
 }
@@ -235,6 +248,7 @@ impl Server {
             Arc::new(BridgeAgent::new(channels.auxiliary)),
             shutdown.clone(),
         );
+        let monitor = Monitor::new(hub.clone(), settings.monitor, shutdown.clone());
         let state = Arc::new(AppState {
             token,
             hub,
@@ -251,7 +265,10 @@ impl Server {
                 .map_err(StartError::Client)?,
             shutdown: shutdown.clone(),
         });
-        let app = api::router(state, review::router(review));
+        let app = api::router(
+            state,
+            review::router(review).merge(monitor::router(monitor)),
+        );
         Ok(Self {
             listener,
             app,
@@ -309,8 +326,10 @@ fn reachable_host(bind: IpAddr) -> IpAddr {
 #[cfg(test)]
 mod tests {
     use super::{
-        Channels, Exposure, Server, Settings, StartError, bind, bridge, hub::Hub, registry,
-        testing::sse_event,
+        Channels, Exposure, Server, Settings, StartError, bind, bridge,
+        hub::Hub,
+        registry,
+        testing::{disabled_monitor, sse_event},
     };
     use std::{
         fs,
@@ -348,6 +367,7 @@ mod tests {
                 exposure: Exposure::Local,
                 home: home.path().to_owned(),
                 workspace: workspace.path().to_owned(),
+                monitor: disabled_monitor(),
             },
             hub,
             Channels {
@@ -409,6 +429,7 @@ mod tests {
                 exposure: Exposure::PublicUrl("https://tact.example.net".to_owned()),
                 home: home.path().to_owned(),
                 workspace: home.path().to_owned(),
+                monitor: disabled_monitor(),
             },
             hub,
             Channels {
@@ -438,6 +459,7 @@ mod tests {
                 exposure: Exposure::Local,
                 home: ".".into(),
                 workspace: ".".into(),
+                monitor: disabled_monitor(),
             },
             hub,
             Channels {

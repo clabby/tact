@@ -1,0 +1,298 @@
+/*
+ * The Monitor: a toolbar, then one grid of tiles, one per live session, the sessions that need
+ * the user first. A card's tone (danger, warning, accent, success, muted) follows its concern and
+ * colours its edge, badge, and marker the same way everywhere.
+ */
+.monitor-view { background: var(--bg); border-top: 1px solid var(--line); }
+.monitor-scroller { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-gutter: stable; }
+.monitor { display: flex; flex-direction: column; gap: var(--space-4); padding: var(--space-4) var(--space-6) var(--space-8); }
+.app[data-viewport="phone"] .monitor { gap: var(--space-4); padding: var(--space-3) var(--space-3) calc(var(--space-6) + var(--safe-bottom)); }
+
+.monitor-card, .card-chip, .card-live, .monitor-status {
+  --tone: var(--muted); --tone-soft: var(--surface-active);
+}
+:is(.monitor-card, .card-chip, .card-live, .monitor-status)[data-tone="danger"] { --tone: var(--danger); --tone-soft: var(--danger-soft); }
+:is(.monitor-card, .card-chip, .card-live, .monitor-status)[data-tone="warning"] { --tone: var(--warning); --tone-soft: var(--warning-soft); }
+:is(.monitor-card, .card-chip, .card-live, .monitor-status)[data-tone="accent"] { --tone: var(--accent); --tone-soft: var(--accent-soft); }
+:is(.monitor-card, .card-chip, .card-live, .monitor-status)[data-tone="success"] { --tone: var(--success); --tone-soft: var(--success-soft); }
+
+.card-link {
+  flex: none; padding: 2px 4px; border: 0; border-radius: var(--radius-sm); background: none;
+  color: var(--accent); font-size: var(--text-sm); font-weight: 550; white-space: nowrap;
+}
+.card-link:hover { background: var(--accent-soft); }
+.card-action {
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  height: max(28px, var(--touch)); padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-md);
+  background: var(--surface); color: var(--text); font-size: var(--text-sm); font-weight: 550; white-space: nowrap;
+}
+.card-action:hover { background: var(--surface-hover); }
+.card-action .glyph { width: 14px; height: 14px; color: var(--muted); }
+
+/* Toolbar: the filter and the order on the left, the monitor model's status on the right. */
+.monitor-toolbar { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+.monitor-filter .segment { gap: 6px; }
+.filter-count { color: var(--faint); font-weight: 500; font-variant-numeric: tabular-nums; }
+.monitor-filter .segment[data-filter="needs"][data-empty="false"] .filter-count { color: var(--accent); font-weight: 650; }
+.monitor-order { display: flex; flex: none; align-items: center; gap: var(--space-2); }
+.monitor-order-label { color: var(--faint); font-size: var(--text-sm); }
+.monitor-status { display: flex; align-items: center; gap: var(--space-2); min-width: 0; margin-left: auto; color: var(--faint); font-size: var(--text-sm); }
+.monitor-status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.monitor-status:not([data-tone="muted"]) .monitor-status-text { color: var(--tone); }
+.monitor-spinner { color: var(--accent); }
+.app[data-viewport="phone"] .monitor-toolbar { flex-wrap: wrap; gap: var(--space-2); }
+.app[data-viewport="phone"] .monitor-filter { display: flex; width: 100%; }
+.app[data-viewport="phone"] .monitor-filter .segment { flex: 1; padding: 0 var(--space-1); }
+/*
+ * The order and the status share the second row when the status fits beside it on one line;
+ * otherwise the status takes a row of its own. A failure's text may wrap there, so none of it is cut off.
+ */
+.app[data-viewport="phone"] .monitor-status { flex: 1 1 auto; justify-content: flex-end; }
+.app[data-viewport="phone"] .monitor-status:not([data-tone="muted"]) .monitor-status-text { white-space: normal; }
+
+/*
+ * Cards: tracks of about 320-380 px fill the width at any mix of states, and each card keeps its
+ * own height instead of stretching to the tallest in its row.
+ */
+.monitor-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: var(--space-3); align-items: start; }
+.monitor-empty { margin: var(--space-6) 0; color: var(--faint); text-align: center; }
+
+.monitor-card {
+  position: relative; display: flex; flex-direction: column; gap: var(--space-2); min-width: 0;
+  padding: var(--space-3) var(--space-3) 10px var(--space-4); border: 1px solid var(--line); border-radius: var(--radius-lg);
+  background: var(--surface); box-shadow: var(--shadow-1); cursor: pointer;
+}
+.monitor-card:hover { border-color: var(--line-strong); }
+.monitor-card:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+@media (prefers-reduced-motion: no-preference) {
+  .monitor-card { transition: border-color var(--duration-fast), box-shadow var(--duration-fast); }
+}
+/* A concern marks the card's leading edge in its tone; working and idle cards stay plain. */
+.monitor-card:not([data-concern="working"], [data-concern="idle"])::before {
+  content: ""; position: absolute; top: var(--space-3); bottom: var(--space-3); left: -1px; width: 3px; border-radius: 0 3px 3px 0; background: var(--tone);
+}
+.monitor-card[data-concern="error"], .monitor-card[data-concern="needs_input"] { border-color: color-mix(in srgb, var(--tone) 35%, var(--line)); }
+
+.card-head { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.card-marker { display: grid; place-items: center; width: 12px; height: 12px; flex: none; }
+.card-marker::before { content: ""; width: 8px; height: 8px; border: 1.5px solid var(--faint); border-radius: 50%; box-sizing: border-box; }
+.monitor-card[data-state="running"] .card-marker { color: var(--accent); }
+.monitor-card[data-state="running"] .card-marker::before { display: none; }
+.card-marker .sphere { display: block; }
+.monitor-card[data-concern="error"] .card-marker::before { border: 0; background: var(--danger); }
+.monitor-card:is([data-concern="unread"], [data-concern="needs_input"]) .card-marker::before { border: 0; background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.card-title { flex: 1; min-width: 0; margin: 0; overflow: hidden; font-size: var(--text-base); font-weight: 600; letter-spacing: -.005em; text-overflow: ellipsis; white-space: nowrap; }
+.card-badge { flex: none; padding: 1px 8px; border-radius: var(--radius-pill); background: var(--tone-soft); color: var(--tone); font-size: var(--text-xs); font-weight: 650; line-height: 18px; white-space: nowrap; }
+
+/*
+ * The health gauge: five short segments, filled from the left up to the score's band and coloured
+ * by it, at the end of the header so the gauges line up down a column of tiles. A trend mark sits
+ * before the segments, which keeps them aligned whether or not a tile has one.
+ */
+.card-health { --tone: var(--muted); display: inline-flex; flex: none; align-items: center; gap: 3px; cursor: help; }
+.card-health[data-tone="success"] { --tone: var(--success); }
+.card-health[data-tone="warning"] { --tone: var(--warning); }
+.card-health[data-tone="danger"] { --tone: var(--danger); }
+.card-health.earlier { opacity: .62; }
+.health-bar { display: inline-flex; gap: 2px; }
+.health-bar > span { width: 5px; height: 10px; border-radius: 1.5px; background: var(--surface-active); }
+.card-health[data-segments="1"] .health-bar > span:nth-child(-n + 1),
+.card-health[data-segments="2"] .health-bar > span:nth-child(-n + 2),
+.card-health[data-segments="3"] .health-bar > span:nth-child(-n + 3),
+.card-health[data-segments="4"] .health-bar > span:nth-child(-n + 4),
+.card-health[data-segments="5"] .health-bar > span { background: var(--tone); }
+.health-trend { display: grid; place-items: center; width: 11px; color: var(--tone); }
+.health-trend .glyph { width: 11px; height: 11px; stroke-width: 2.4; }
+
+.card-live { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; margin: 0; font-size: var(--text-md); }
+.card-now { display: flex; flex: 1; align-items: baseline; gap: 6px; min-width: 0; overflow: hidden; font-weight: 550; }
+.card-now-text { flex: none; white-space: nowrap; }
+.card-live:is([data-tone="danger"], [data-tone="warning"]) .card-now-text { color: var(--tone); }
+.card-live.idle .card-now-text { color: var(--muted); font-weight: 450; }
+.card-now-code { min-width: 0; overflow: hidden; padding: 1px 5px; border-radius: 4px; background: var(--code-bg); color: var(--code-text); font: 500 var(--text-sm)/1.45 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.card-now-detail { min-width: 0; overflow: hidden; color: var(--muted); font-weight: 450; text-overflow: ellipsis; white-space: nowrap; }
+.card-now-detail::before { content: "· "; color: var(--faint); }
+.card-time { flex: none; margin-left: auto; color: var(--faint); font-size: var(--text-sm); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/*
+ * The one piece of evidence: a mark column (outcome, error, the monitor's mark) beside at most
+ * three lines. A reply keeps its last lines, where its question or result sits: the text is pinned
+ * to the bottom of the box, and a cut-off reply fades its top line, so the cut is visible while
+ * every line stays whole. Everything else keeps its first lines.
+ */
+.card-evidence { display: grid; grid-template-columns: 14px minmax(0, 1fr); column-gap: 6px; min-width: 0; font-size: var(--text-md); line-height: 1.5; }
+.card-evidence[data-kind="message"] { grid-template-columns: minmax(0, 1fr); }
+.card-evidence[data-kind="message"] .evidence-mark { display: none; }
+.card-evidence.earlier .evidence-body, .card-evidence.earlier .evidence-mark { opacity: .62; }
+.evidence-mark { display: grid; place-items: center; height: 1.5em; color: var(--faint); }
+.evidence-mark .glyph { width: 13px; height: 13px; stroke-width: 2.1; }
+.card-evidence:is([data-kind="error"], [data-kind="failed"], [data-outcome="failed"]) .evidence-mark { color: var(--danger); }
+.card-evidence:is([data-kind="reason"], [data-kind="goal"]) .evidence-mark { color: var(--accent); }
+.card-evidence[data-outcome="worked"] .evidence-mark { color: var(--success); }
+.evidence-body { min-width: 0; }
+.evidence-text { margin: 0; overflow-wrap: anywhere; }
+.evidence-inner { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.card-evidence[data-kind="error"] .evidence-text { color: var(--danger); }
+.card-evidence[data-kind="prompt"] .evidence-text { color: var(--muted); }
+.card-evidence[data-kind="prompt"] .evidence-inner { -webkit-line-clamp: 1; }
+.card-evidence[data-kind="message"] .evidence-text { display: flex; flex-direction: column; justify-content: flex-end; max-height: calc(3 * 1.5em); overflow: hidden; white-space: pre-line; }
+/* The text keeps its full height inside the box, so its overflow above the box can be measured. */
+.card-evidence[data-kind="message"] .evidence-inner { display: block; flex: none; }
+.card-evidence.commentary .evidence-text { color: var(--muted); font-style: italic; }
+.card-evidence[data-kind="message"].clipped .evidence-text {
+  -webkit-mask-image: linear-gradient(to bottom, rgb(0 0 0 / .3), #000 1.5em); mask-image: linear-gradient(to bottom, rgb(0 0 0 / .3), #000 1.5em);
+}
+.evidence-meta { display: flex; align-items: center; gap: 4px; color: var(--faint); font-size: var(--text-xs); }
+/* The monitor's mark beside the age of what it said. */
+.evidence-source { display: grid; color: var(--accent); }
+.evidence-source .glyph { width: 11px; height: 11px; }
+
+.card-foot { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.card-facts { display: flex; flex: 1; align-items: center; gap: 6px; min-width: 0; overflow: hidden; color: var(--faint); font-size: var(--text-xs); }
+.card-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-workspace { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-workspace::before { content: "·"; margin-right: 6px; }
+.card-tags { display: flex; flex: none; gap: 4px; }
+.card-tags:empty { display: none; }
+.card-foot .icon-button { width: max(28px, var(--touch)); height: max(28px, var(--touch)); }
+.card-foot .icon-button .glyph { width: 16px; height: 16px; }
+/* Three dots carry far less ink than a chevron at the same stroke, so they are drawn heavier. */
+.card-more-actions .glyph { stroke-width: 3.6; }
+.card-details-toggle .glyph { transition: transform var(--duration-fast); }
+.card-details-toggle[aria-expanded="true"] .glyph { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .card-details-toggle .glyph { transition: none; } }
+
+/*
+ * The monitor's blocks. Closed, a block takes one to three lines and the body shows one block, or
+ * two single-line ones; in Details every block shows in full. Marks follow the card tones.
+ */
+.card-blocks { display: grid; gap: 4px; min-width: 0; }
+/* An earlier note dims what the model said; live blocks show current data and stay at full strength. */
+.card-blocks.earlier .block:not([data-block^="live-"]) { opacity: .62; }
+.blocks-list, .details-blocks { display: grid; gap: 6px; min-width: 0; }
+.block { min-width: 0; margin: 0; font-size: var(--text-md); line-height: 1.5; overflow-wrap: anywhere; }
+.details-blocks .block { font-size: var(--text-sm); }
+.block-label { color: var(--muted); }
+.block-count { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.block-detail { margin-left: 6px; color: var(--faint); }
+.block-mark { display: grid; flex: none; place-items: center; width: 14px; height: 1.5em; color: var(--faint); }
+.block-mark .glyph { width: 13px; height: 13px; stroke-width: 2.1; }
+.block-error[data-form="compact"] .block-error-text,
+.block-text[data-form="compact"] .block-text-body { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+
+/* A toned sentence keeps the text colour, so it does not compete with the badge; its mark carries the tone. */
+.block-text:not([data-tone="neutral"]) { display: grid; grid-template-columns: 14px minmax(0, 1fr); column-gap: 6px; align-items: start; }
+.block-text[data-tone="success"] > .block-mark { color: var(--success); }
+.block-text[data-tone="warning"] > .block-mark { color: var(--warning); }
+.block-text[data-tone="danger"] > .block-mark { color: var(--danger); }
+
+.block-progress { display: flex; align-items: center; gap: var(--space-2); }
+.block-progress .block-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.block-bar { flex: 1 1 64px; min-width: 40px; height: 6px; overflow: hidden; border-radius: 3px; background: var(--surface-active); }
+.block-bar-fill { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+
+.block-metric { display: flex; align-items: baseline; gap: var(--space-2); white-space: nowrap; }
+.block-metric .block-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.metric-value { flex: none; font-weight: 650; font-variant-numeric: tabular-nums; }
+.block-metric[data-tone="success"] .metric-value { color: var(--success); }
+.block-metric[data-tone="warning"] .metric-value { color: var(--warning); }
+.block-metric[data-tone="danger"] .metric-value { color: var(--danger); }
+.metric-was { flex: none; color: var(--faint); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+
+/* Rows led by a mark: steps, the newest tool, checklist items, the prompt, agents, and errors. */
+:is(.block-step, .block-tool, .block-item, .block-prompt, .block-agents, .block-error) { display: grid; grid-template-columns: 14px minmax(0, 1fr); column-gap: 6px; align-items: start; }
+.block-checklist-line { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.checklist-current { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.block-checklist-line .block-label { flex: none; }
+.block-step[data-form="compact"] .block-step-body { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+:is(.block-step, .block-tool)[data-outcome="worked"] > .block-mark,
+:is(.block-item, .block-checklist-line)[data-state="done"] > .block-mark { color: var(--success); }
+:is(.block-step, .block-tool)[data-outcome="failed"] > .block-mark,
+:is(.block-item, .block-checklist-line)[data-state="failed"] > .block-mark { color: var(--danger); }
+:is(.block-step, .block-tool)[data-outcome="failed"] .block-detail { color: var(--danger); }
+:is(.block-step, .block-tool)[data-outcome="running"] > .block-mark::before,
+:is(.block-item, .block-checklist-line)[data-state="active"] > .block-mark::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+:is(.block-item, .block-checklist-line)[data-state="pending"] > .block-mark::before { content: ""; width: 7px; height: 7px; border: 1.5px solid var(--faint); border-radius: 50%; box-sizing: border-box; }
+.block-item[data-state="skipped"] .block-item-text { color: var(--faint); text-decoration: line-through; }
+.block-title { margin: 0 0 2px; font-weight: 600; }
+.block-items, .block-steps { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+
+.block-tool .block-step-body { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.block-tool .block-detail { flex: none; margin-left: 0; }
+.tool-command { min-width: 0; overflow: hidden; padding: 0 5px; border-radius: 4px; background: var(--code-bg); color: var(--code-text); font: 500 var(--text-sm)/1.6 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.block-tool[data-form="full"] .tool-command { white-space: pre-wrap; overflow-wrap: anywhere; }
+.block-prompt, .block-agents { color: var(--muted); }
+.block-prompt[data-form="compact"] .block-prompt-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.block-prompt[data-form="full"] .block-prompt-text { white-space: pre-wrap; }
+.block-error { color: var(--danger); }
+.block-error > .block-mark { color: var(--danger); }
+
+.block-question .question-text { margin: 0; font-weight: 550; }
+.block-question[data-form="compact"] .question-text { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.question-options { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.question-option {
+  max-width: 100%; overflow: hidden; padding: 1px 9px; border: 1px solid var(--line-strong); border-radius: var(--radius-pill);
+  background: var(--surface); color: var(--text); font-size: var(--text-sm); line-height: 1.5; text-overflow: ellipsis; white-space: nowrap;
+}
+.question-option:hover { border-color: var(--accent); color: var(--accent); }
+/* Options of a question the agent is no longer waiting on: shown for the record, not offered. */
+.question-choice { max-width: 100%; overflow: hidden; padding: 1px 9px; border-radius: var(--radius-pill); background: var(--surface-active); color: var(--muted); font-size: var(--text-sm); line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
+
+.block-code { display: grid; gap: 2px; }
+.block-code .block-label { font-size: var(--text-xs); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.code-text { margin: 0; padding: 4px 8px; overflow: hidden; border-radius: var(--radius-sm); background: var(--code-bg); color: var(--code-text); font: 500 var(--text-sm)/1.5 var(--font-mono); }
+.code-line { display: block; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+.block-code[data-form="full"] .code-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* A live reply keeps its last lines, like the reply evidence, with the same cut-off sliver. */
+.block-message .clip-box { display: flex; flex-direction: column; justify-content: flex-end; max-height: calc(3 * 1.5em); margin: 0; overflow: hidden; white-space: pre-line; }
+.block-message .clip-inner { display: block; flex: none; }
+.block-message .clip-box.clipped {
+  max-height: calc(3.6 * 1.5em);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 1.1em); mask-image: linear-gradient(to bottom, transparent, #000 1.1em);
+}
+.block-message.commentary { color: var(--muted); font-style: italic; }
+.block-message-full { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; white-space: pre-wrap; }
+.block-plan { display: grid; gap: 2px; }
+.plan-current { margin: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.block-plan[data-form="full"] .plan-current { white-space: normal; }
+
+/* Details: everything the closed card leaves out, in place. */
+.card-details { display: grid; gap: var(--space-2); padding-top: var(--space-2); border-top: 1px solid var(--line); font-size: var(--text-sm); cursor: auto; }
+.details-monitor { display: grid; gap: 4px; padding: var(--space-2) 10px; border-radius: var(--radius-md); background: var(--surface-sunken); }
+:root[data-theme="dark"] .details-monitor { background: var(--surface-raised); }
+.details-monitor.earlier { opacity: .62; }
+.details-goal { display: flex; align-items: baseline; gap: 6px; margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.note-mark { display: grid; flex: none; align-self: center; color: var(--accent); }
+.note-mark .glyph { width: 13px; height: 13px; }
+.details-checked { margin: 0; color: var(--faint); font-size: var(--text-xs); }
+.note-earlier { display: none; margin-right: 6px; padding: 0 6px; border-radius: var(--radius-pill); background: var(--surface-active); color: var(--muted); font-weight: 550; }
+.details-monitor.earlier .note-earlier { display: inline-block; }
+.details-reason { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.details-suggestion { margin: 0; padding-left: var(--space-2); border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); color: var(--muted); font-style: italic; overflow-wrap: anywhere; }
+.details-part h4 { margin: 0 0 2px; color: var(--faint); font-size: var(--text-xs); font-weight: 600; letter-spacing: .05em; text-transform: uppercase; }
+.details-part p { margin: 0; max-height: 240px; overflow-y: auto; overscroll-behavior: contain; white-space: pre-wrap; overflow-wrap: anywhere; }
+.details-line { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.app[data-viewport="phone"] .monitor-card { padding: var(--space-3); }
+
+.card-chip { padding: 0 7px; border-radius: var(--radius-pill); background: var(--tone-soft); color: var(--tone); font-size: var(--text-xs); font-weight: 550; line-height: 18px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.card-chip[data-tone="muted"] { color: var(--muted); }
+
+/* The column is the card's width, so a long hint or reply never widens the tile. */
+.card-reply { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; container-type: inline-size; cursor: auto; }
+.card-reply textarea {
+  display: block; width: 100%; min-height: 56px; max-height: 160px; resize: none; padding: var(--space-2) 10px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-md); outline: 0; background: var(--surface); font-size: var(--text-md); line-height: 1.45;
+}
+.card-reply textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.app[data-viewport="phone"] .card-reply textarea { font-size: var(--text-lg); }
+.card-reply-error { margin: 0; color: var(--danger); font-size: var(--text-sm); }
+/* The key hint only appears where it fits whole; on a very narrow tile the buttons wrap. */
+.card-reply-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px var(--space-2); }
+.card-reply-hint { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--faint); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.card-reply-bar .card-link { color: var(--muted); }
+.card-reply-bar .insert-suggestion { color: var(--accent); }
+.card-send { height: max(28px, var(--touch)); padding: 0 var(--space-3); border: 0; border-radius: var(--radius-md); background: var(--accent-strong); color: #fff; font-size: var(--text-sm); font-weight: 600; }
+.card-send:disabled { opacity: .6; }
+@container (max-width: 460px) { .card-reply-hint { visibility: hidden; } }
+@media (pointer: coarse) { .card-reply-hint { visibility: hidden; } }

@@ -40,7 +40,7 @@ index 82a06c1..90c03be 100644
 `;
 
 const reviewBootstrapBase = {
-  protocol_version: 10,
+  protocol_version: 11,
   generation: 1,
   title: "Review feature/review-workflow",
   repository: "tact",
