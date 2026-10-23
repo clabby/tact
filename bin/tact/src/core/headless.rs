@@ -10,7 +10,7 @@ use super::ConfiguredAgent;
 #[cfg(feature = "harbor-evals")]
 use super::orchestration::OrchestrationRecorder;
 use crate::app::{config::Config, error::Result, hook};
-use nanocode::{NanocodexError, TurnControl};
+use nanocode::{NanocodeError, TurnControl};
 #[cfg(feature = "harbor-evals")]
 use serde::Serialize;
 #[cfg(feature = "harbor-evals")]
@@ -38,14 +38,14 @@ pub(super) enum RunOutcome {
 enum Cancellation {
     NotRequested,
     Requested,
-    Failed(NanocodexError),
+    Failed(NanocodeError),
 }
 
 impl Cancellation {
     async fn request(control: &TurnControl) -> Self {
         match control.cancel().await {
             Ok(()) => Self::Requested,
-            Err(NanocodexError::TurnNotCancellable) => Self::NotRequested,
+            Err(NanocodeError::TurnNotCancellable) => Self::NotRequested,
             Err(error) => Self::Failed(error),
         }
     }
@@ -120,7 +120,7 @@ impl SettledTurn {
             Cancellation::NotRequested => false,
         };
         match self.turn {
-            Err(NanocodexError::TurnCancelled) if cancelled => {}
+            Err(NanocodeError::TurnCancelled) if cancelled => {}
             Err(error) => return Err(error.into()),
             Ok(()) => {}
         }

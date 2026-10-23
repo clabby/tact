@@ -114,10 +114,13 @@ impl FromStr for HarnessModel {
     type Err = &'static str;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if let Some(model) = Model::known(value) {
+            return Ok(Self::Codex(model));
+        }
         value
-            .parse::<Model>()
-            .map(Self::Codex)
-            .or_else(|_| value.parse::<ClaudeModel>().map(Self::Claude))
+            .parse::<ClaudeModel>()
+            .map(Self::Claude)
+            .or_else(|error| value.parse::<Model>().map(Self::Codex).map_err(|_| error))
     }
 }
 

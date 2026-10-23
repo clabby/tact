@@ -682,7 +682,7 @@ mod tests {
         test_support::recording_agent,
     };
     use nanocode::{
-        Model as CodexModel, NanocodexError, ReasoningMode, Thinking, Tool,
+        Model as CodexModel, NanocodeError, ReasoningMode, Thinking, Tool,
         tools::contract::{ToolContext, ToolError, ToolInput, ToolOutput},
     };
     use serde_json::{Value, json, value::to_raw_value};
@@ -716,7 +716,7 @@ mod tests {
                     Speed::Standard,
                     move |context: AgentContext, _| {
                         captured.send(context.model).unwrap();
-                        Err(NanocodexError::InvalidRequest(
+                        Err(NanocodeError::InvalidRequest(
                             "stop after capture".to_owned(),
                         ))
                     },
@@ -785,7 +785,7 @@ mod tests {
                     captured
                         .send((context.model, context.thinking, speed))
                         .unwrap();
-                    Err(NanocodexError::InvalidRequest(
+                    Err(NanocodeError::InvalidRequest(
                         "stop after capture".to_owned(),
                     ))
                 },

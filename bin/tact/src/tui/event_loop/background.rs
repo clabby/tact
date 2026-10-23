@@ -78,7 +78,7 @@ pub(super) enum TaskOutput {
     Editor(std::result::Result<EditorCompletion, ExternalEditorError>),
     Effort(Result<EffortUpdate>),
     Speed(Result<SpeedUpdate>),
-    NewSession(NewSession),
+    NewSession(Box<NewSession>),
     SessionList {
         pane: PaneId,
         sessions: Result<Vec<SessionSummary>>,
@@ -191,7 +191,7 @@ impl EventLoop {
             TaskOutput::Editor(completion) => self.on_editor_closed(completion)?,
             TaskOutput::Effort(update) => self.on_effort_persisted(update?)?,
             TaskOutput::Speed(update) => self.on_speed_persisted(update?)?,
-            TaskOutput::NewSession(session) => self.on_new_session_configured(session)?,
+            TaskOutput::NewSession(session) => self.on_new_session_configured(*session)?,
             TaskOutput::SessionList { pane, sessions } => self.on_sessions_listed(pane, sessions),
             TaskOutput::SessionSearch {
                 pane,

@@ -6,7 +6,7 @@
 
 use super::model::{AgentId, AgentStatus, MessageId, MessagePriority};
 use crate::HarnessModel as Model;
-use nanocode::{NanocodexError, ReasoningMode, Thinking};
+use nanocode::{NanocodeError, ReasoningMode, Thinking};
 use std::fmt;
 use thiserror::Error;
 use tokio::task::JoinError;
@@ -22,7 +22,7 @@ pub(crate) enum SubagentError {
     Spawn(#[from] SpawnError),
     /// The application factory or the child session itself rejected the request.
     #[error(transparent)]
-    Agent(#[from] NanocodexError),
+    Agent(#[from] NanocodeError),
     /// The supplied output schema is not a valid JSON Schema.
     #[error("invalid output_schema: {0}")]
     InvalidSchema(#[source] Box<jsonschema::ValidationError<'static>>),
@@ -127,7 +127,7 @@ pub(crate) enum SubagentError {
         /// The recipient.
         agent: AgentId,
         /// The steering failure.
-        source: NanocodexError,
+        source: NanocodeError,
     },
     /// The runtime was dropped before it recorded a message's admission.
     #[error("subagent runtime stopped before admitting the message")]
@@ -150,7 +150,7 @@ pub(crate) enum SubagentError {
         /// The agent whose turn failed to start.
         agent: AgentId,
         /// The session failure.
-        source: NanocodexError,
+        source: NanocodeError,
     },
     /// The child session refused to cancel its active turn.
     #[error("could not stop agent {agent}: {source}")]
@@ -158,7 +158,7 @@ pub(crate) enum SubagentError {
         /// The agent whose turn could not be cancelled.
         agent: AgentId,
         /// The session failure.
-        source: NanocodexError,
+        source: NanocodeError,
     },
     /// The child session failed to shut down cleanly.
     #[error("could not close agent {agent}: {source}")]
@@ -166,7 +166,7 @@ pub(crate) enum SubagentError {
         /// The agent that failed to shut down.
         agent: AgentId,
         /// The session failure.
-        source: NanocodexError,
+        source: NanocodeError,
     },
     /// A bounded shutdown phase exceeded its deadline.
     #[error("timed out {0}")]
