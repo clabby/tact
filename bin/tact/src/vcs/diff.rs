@@ -7,8 +7,11 @@
 use crate::vcs::{Checkout, FilePatch, VcsError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::HashSet,
+    fs::{self, Metadata},
     path::{Path, PathBuf},
     process::{Output, Stdio},
     sync::Arc,
@@ -32,6 +35,11 @@ enum PatchHookPhase {
 }
 
 const MAX_DIFF_BYTES: usize = 32 * 1024 * 1024;
+/// The largest untracked file a review shows. Untracked files are whatever collects in a checkout
+/// outside `.gitignore`, such as build outputs and benchmark data, and git reads a file in full to
+/// diff it. A larger file is listed without its content, the way git treats files above
+/// `core.bigFileThreshold` as binary.
+const MAX_UNTRACKED_FILE_BYTES: u64 = 1024 * 1024;
 const FULL_CONTEXT: &str = "--unified=2147483647";
 
 /// An interval between two review targets, as indices into [`ReviewContext::range_targets`].
@@ -84,7 +92,8 @@ pub struct ReviewContext {
 /// The change across one review range.
 #[derive(Clone, Serialize)]
 pub struct DiffSnapshot {
-    /// A `git diff` patch with full file context, untracked files included.
+    /// A `git diff` patch with full file context, untracked files included. An untracked file too
+    /// large to review appears as a binary file without content.
     pub patch: String,
     #[serde(skip)]
     pub overview: OverviewContext,
@@ -601,7 +610,7 @@ async fn committed_patch(
         arguments.push(FULL_CONTEXT);
     }
     arguments.extend([base, head, "--"]);
-    let output = git_output_limited(root, arguments, MAX_DIFF_BYTES, 0).await?;
+    let output = git_output_limited(root, arguments, MAX_DIFF_BYTES).await?;
     ensure_success(output.status, &output.stderr)?;
     Ok(String::from_utf8(output.stdout)?)
 }
@@ -623,6 +632,14 @@ async fn append_untracked_files(
         if Checkout::is_bookkeeping(path) {
             continue;
         }
+        // A file that cannot be inspected is left to git, which reports why it cannot be read.
+        let oversized = fs::symlink_metadata(root.work_tree().join(path))
+            .ok()
+            .filter(|metadata| metadata.is_file() && metadata.len() > MAX_UNTRACKED_FILE_BYTES);
+        if let Some(metadata) = oversized {
+            patch.push_str(&omitted_file_patch(path, &metadata));
+            continue;
+        }
         let mut arguments = vec![
             "diff",
             "--binary",
@@ -635,19 +652,50 @@ async fn append_untracked_files(
             arguments.push(FULL_CONTEXT);
         }
         arguments.extend(["--", null_device(), path]);
-        let output = git_output_limited(
-            root,
-            arguments,
-            MAX_DIFF_BYTES.saturating_sub(patch.len()),
-            patch.len(),
-        )
-        .await?;
+        let output =
+            git_output_limited(root, arguments, MAX_DIFF_BYTES.saturating_sub(patch.len())).await?;
         if output.status.code() != Some(1) && !output.status.success() {
             ensure_success(output.status, &output.stderr)?;
         }
         patch.push_str(&String::from_utf8(output.stdout)?);
     }
     Ok(())
+}
+
+/// The patch section that lists a new file without its content, as `git diff` describes a new
+/// binary file when it leaves the data out.
+fn omitted_file_patch(path: &str, metadata: &Metadata) -> String {
+    // Git C-quotes a name that contains a control character, a quote, a backslash, or a byte
+    // outside ASCII.
+    let quote = |name: String| {
+        let mut escaped = String::with_capacity(name.len());
+        for byte in name.bytes() {
+            match byte {
+                0x07 => escaped.push_str("\\a"),
+                0x08 => escaped.push_str("\\b"),
+                b'\t' => escaped.push_str("\\t"),
+                b'\n' => escaped.push_str("\\n"),
+                0x0b => escaped.push_str("\\v"),
+                0x0c => escaped.push_str("\\f"),
+                b'\r' => escaped.push_str("\\r"),
+                b'"' => escaped.push_str("\\\""),
+                b'\\' => escaped.push_str("\\\\"),
+                0x20..=0x7e => escaped.push(char::from(byte)),
+                _ => escaped.push_str(&format!("\\{byte:03o}")),
+            }
+        }
+        if escaped == name {
+            name
+        } else {
+            format!("\"{escaped}\"")
+        }
+    };
+    let old = quote(format!("a/{path}"));
+    let new = quote(format!("b/{path}"));
+    format!(
+        "diff --git {old} {new}\nnew file mode {}\nBinary files /dev/null and {new} differ\n",
+        regular_file_mode(metadata)
+    )
 }
 
 async fn working_tree_patch(
@@ -671,7 +719,7 @@ async fn working_tree_patch(
         arguments.push(FULL_CONTEXT);
     }
     arguments.extend([base, "--"]);
-    let output = git_output_limited(root, arguments, MAX_DIFF_BYTES, 0).await?;
+    let output = git_output_limited(root, arguments, MAX_DIFF_BYTES).await?;
     ensure_success(output.status, &output.stderr)?;
     let mut patch = String::from_utf8(output.stdout)?;
     append_untracked_files(root, &mut patch, full_context).await?;
@@ -705,7 +753,6 @@ async fn git_output_limited<I, S>(
     root: &Checkout,
     arguments: I,
     limit: usize,
-    used: usize,
 ) -> Result<Output, VcsError>
 where
     I: IntoIterator<Item = S>,
@@ -735,7 +782,6 @@ where
         let _ = child.wait().await;
         stderr_task.abort();
         return Err(VcsError::TooLarge {
-            actual: used.saturating_add(output.len()),
             maximum: MAX_DIFF_BYTES,
         });
     }
@@ -771,11 +817,27 @@ const fn null_device() -> &'static str {
     "NUL"
 }
 
+/// The mode git records for a regular file, which is executable when its owner may execute it.
+#[cfg(unix)]
+fn regular_file_mode(metadata: &Metadata) -> &'static str {
+    if metadata.permissions().mode() & 0o100 == 0 {
+        "100644"
+    } else {
+        "100755"
+    }
+}
+
+#[cfg(windows)]
+fn regular_file_mode(_metadata: &Metadata) -> &'static str {
+    "100644"
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DiffSnapshot, OverviewContext, OverviewRange, PATCH_HOOK, PATCH_HOOK_SERIAL, PatchHook,
-        PatchHookPhase, PatchSide, ReviewContext, ReviewRange, ReviewTargetKind, WorkspaceVersion,
+        DiffSnapshot, MAX_UNTRACKED_FILE_BYTES, OverviewContext, OverviewRange, PATCH_HOOK,
+        PATCH_HOOK_SERIAL, PatchHook, PatchHookPhase, PatchSide, ReviewContext, ReviewRange,
+        ReviewTargetKind, WorkspaceVersion,
     };
     use crate::vcs::{
         Checkout, FilePatch, VcsError,
@@ -785,10 +847,13 @@ mod tests {
             repository_with_initial_branch, run,
         },
     };
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::{
         collections::BTreeSet,
         fs,
         path::Path,
+        process::Command,
         sync::{
             Arc, MutexGuard,
             atomic::{AtomicUsize, Ordering},
@@ -897,6 +962,81 @@ mod tests {
                 .iter()
                 .any(|file| file.new_path.as_deref() == Some("renamed.txt") && file.binary),
             "{files:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn untracked_files_too_large_to_review_are_listed_without_content() {
+        let repository = repository();
+        let limit = usize::try_from(MAX_UNTRACKED_FILE_BYTES).unwrap();
+        let write = |name: &str, size: usize| {
+            fs::write(repository.path().join(name), "x".repeat(size)).unwrap();
+        };
+        write("at-limit.txt", limit);
+        write("over-limit.txt", limit + 1);
+
+        let context = ReviewContext::load(repository.path()).await.unwrap();
+        let snapshot = context.collect(context.uncommitted_range()).await.unwrap();
+        let files = FilePatch::parse_all(&snapshot.patch);
+
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| (file.path(), file.old_path.is_none(), file.binary))
+                .collect::<Vec<_>>(),
+            [
+                (Some("at-limit.txt"), true, false),
+                (Some("over-limit.txt"), true, true),
+            ]
+        );
+        assert!(files[1].hunks.is_empty());
+        assert!(snapshot.patch.len() < limit + 1024);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn untracked_files_listed_without_content_are_named_as_git_names_them() {
+        let repository = repository();
+        let name = "tab\t\"quoted\" back\\slash \u{e9}.bin";
+        let path = repository.path().join(name);
+        let size = usize::try_from(MAX_UNTRACKED_FILE_BYTES).unwrap() + 1;
+        fs::write(&path, vec![0; size]).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let context = ReviewContext::load(repository.path()).await.unwrap();
+        let snapshot = context.collect(context.uncommitted_range()).await.unwrap();
+        let files = FilePatch::parse_all(&snapshot.patch);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path(), Some(name));
+        assert!(files[0].binary);
+
+        // Git describes a small binary file with the same name and mode in the same lines, plus
+        // the object ids it hashed.
+        fs::write(&path, [0]).unwrap();
+        let output = Command::new("git")
+            .args([
+                "-c",
+                "core.quotePath=true",
+                "diff",
+                "--no-ext-diff",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                "--no-index",
+                "--",
+                "/dev/null",
+                name,
+            ])
+            .current_dir(repository.path())
+            .output()
+            .unwrap();
+        let git_patch = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            snapshot.patch,
+            git_patch
+                .lines()
+                .filter(|line| !line.starts_with("index "))
+                .map(|line| format!("{line}\n"))
+                .collect::<String>()
         );
     }
 

@@ -39,8 +39,8 @@ pub enum VcsError {
     /// could be taken.
     #[error("workspace kept changing while the review snapshot was collected")]
     WorkspaceChangedDuringSnapshot,
-    #[error("review diff is {actual} bytes, exceeding the {maximum}-byte limit")]
-    TooLarge { actual: usize, maximum: usize },
+    #[error("review diff exceeds the {maximum}-byte limit")]
+    TooLarge { maximum: usize },
     #[error("git output was not valid UTF-8: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
     #[error("git returned a path that is not valid UTF-8: {0}")]
