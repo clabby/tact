@@ -205,17 +205,6 @@ pub(crate) enum SpawnError {
         /// The parent's actual mode.
         parent: ReasoningMode,
     },
-    /// The child would run a higher Codex tier than its parent.
-    #[error("subagent model {requested} exceeds parent model {parent}")]
-    ModelExceedsParent {
-        /// The requested child model.
-        requested: Model,
-        /// The parent's model.
-        parent: Model,
-    },
-    /// The calling root session runs a model outside the supported roster.
-    #[error(transparent)]
-    CallerModel(#[from] crate::UnsupportedModel),
     /// The requested model is outside this runtime's roster.
     #[error("subagent model {0} is not offered in this session")]
     ModelNotOffered(Model),
