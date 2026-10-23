@@ -32,7 +32,7 @@ use super::{
 use crate::app::config::{ReasoningEffort, Speed};
 use futures_util::future::join_all;
 use nanocode::{
-    Agent, AgentEvents, ForkRequest, NanocodexError, TurnControl,
+    Agent, AgentEvents, ForkRequest, NanocodeError, TurnControl,
     agent::input::{Prompt, PromptInput, UserInput},
 };
 use nanocode_backend_codex::ErrorExt;
@@ -155,7 +155,7 @@ pub(crate) enum WorkerError {
     #[error("turn task stopped unexpectedly: {0}")]
     TurnTaskStopped(JoinError),
     #[error(transparent)]
-    Agent(#[from] NanocodexError),
+    Agent(#[from] NanocodeError),
 }
 
 pub(crate) enum WorkerEvent {
@@ -201,7 +201,7 @@ pub(crate) enum WorkerEvent {
     TurnsCancelled {
         pane: PaneId,
         count: usize,
-        error: Option<NanocodexError>,
+        error: Option<NanocodeError>,
     },
     ForkOpened {
         pane: PaneId,
@@ -216,15 +216,15 @@ pub(crate) enum WorkerEvent {
     ThinkingUpdated {
         pane: PaneId,
         effort: ReasoningEffort,
-        result: Result<(), NanocodexError>,
+        result: Result<(), NanocodeError>,
     },
     SpeedUpdated {
         pane: PaneId,
         speed: Speed,
-        result: Result<(), NanocodexError>,
+        result: Result<(), NanocodeError>,
     },
     Stopped {
-        error: Option<NanocodexError>,
+        error: Option<NanocodeError>,
     },
 }
 
@@ -258,11 +258,11 @@ impl Updates {
     }
 }
 
-type TurnResult = Result<CompletedTurn, NanocodexError>;
+type TurnResult = Result<CompletedTurn, NanocodeError>;
 
 struct CompletedCompaction {
     pane: PaneId,
-    result: Result<Box<AgentSnapshot>, NanocodexError>,
+    result: Result<Box<AgentSnapshot>, NanocodeError>,
     duration_ns: u64,
 }
 
@@ -282,7 +282,7 @@ struct FinishedTurn {
 
 async fn complete_turn(
     agent: &Agent,
-    result: Result<nanocode::agent::TurnResult, NanocodexError>,
+    result: Result<nanocode::agent::TurnResult, NanocodeError>,
     claude: bool,
     auxiliary: bool,
     pane: PaneId,
@@ -552,7 +552,7 @@ struct IsolatedAgent {
 }
 
 impl IsolatedAgent {
-    async fn create(parent: &Agent, context: AuxiliaryContext) -> Result<Self, NanocodexError> {
+    async fn create(parent: &Agent, context: AuxiliaryContext) -> Result<Self, NanocodeError> {
         let (agent, mut events) = match context {
             AuxiliaryContext::Clean => parent.spawn().await?,
             AuxiliaryContext::CurrentConversation => parent.fork(ForkRequest::latest()).await?,
@@ -728,7 +728,7 @@ impl ActiveTurns {
                     updates.publish(WorkerEvent::SteerAdmitted { pane, queue_id });
                     return false;
                 }
-                Err(NanocodexError::TurnNotSteerable) => {}
+                Err(NanocodeError::TurnNotSteerable) => {}
                 Err(error) => {
                     updates.publish(WorkerEvent::SteerFailed {
                         pane,
@@ -804,7 +804,7 @@ impl ActiveTurns {
 
     /// Cancels the pane's turns, or every turn when `pane` is absent. Returns how many turns
     /// accepted cancellation and the first unexpected cancellation error.
-    async fn cancel(&mut self, pane: Option<PaneId>) -> (usize, Option<NanocodexError>) {
+    async fn cancel(&mut self, pane: Option<PaneId>) -> (usize, Option<NanocodeError>) {
         let pending = self
             .controls
             .iter()
@@ -819,7 +819,7 @@ impl ActiveTurns {
                     self.cancelled.insert(key);
                     count += 1;
                 }
-                Err(NanocodexError::TurnNotCancellable) => {}
+                Err(NanocodeError::TurnNotCancellable) => {}
                 Err(error) => {
                     first_error.get_or_insert(error);
                 }
@@ -860,7 +860,7 @@ impl ActiveTurns {
             TurnPurpose::Conversation => {
                 let (error, snapshot, terminal_stop) = match result {
                     Ok(completed) => (None, completed.snapshot, None),
-                    Err(NanocodexError::TurnCancelled) if requested_cancellation => {
+                    Err(NanocodeError::TurnCancelled) if requested_cancellation => {
                         (None, None, None)
                     }
                     Err(error) => {
@@ -880,7 +880,7 @@ impl ActiveTurns {
             TurnPurpose::Auxiliary(completion) => {
                 let result = match result {
                     Ok(completed) => Ok(completed.final_message),
-                    Err(NanocodexError::TurnCancelled) if requested_cancellation => {
+                    Err(NanocodeError::TurnCancelled) if requested_cancellation => {
                         Err(AuxiliaryError::Cancelled)
                     }
                     Err(error) => Err(AuxiliaryError::Failed(error.to_string())),
@@ -891,13 +891,13 @@ impl ActiveTurns {
     }
 }
 
-fn terminal_stop_reason(error: &NanocodexError) -> Option<TerminalStopReason> {
-    if let NanocodexError::Shutdown(source) = error {
+fn terminal_stop_reason(error: &NanocodeError) -> Option<TerminalStopReason> {
+    if let NanocodeError::Shutdown(source) = error {
         return terminal_stop_reason(source);
     }
     (matches!(
         error,
-        NanocodexError::CompactionFailed {
+        NanocodeError::CompactionFailed {
             requires_session_stop: true,
             ..
         }
@@ -1274,10 +1274,10 @@ impl Worker {
     }
 
     /// Setting changes report agent errors, so worker rejections use the agent's equivalents.
-    fn setting_error(error: WorkerError) -> NanocodexError {
+    fn setting_error(error: WorkerError) -> NanocodeError {
         match error {
-            WorkerError::PaneUnavailable => NanocodexError::AgentStopped,
-            error => NanocodexError::InvalidRequest(error.to_string()),
+            WorkerError::PaneUnavailable => NanocodeError::AgentStopped,
+            error => NanocodeError::InvalidRequest(error.to_string()),
         }
     }
 
@@ -1372,7 +1372,7 @@ mod tests {
         },
     };
     use nanocode::{
-        Agent, AgentEvents, Model as CodexModel, NanocodexError, OpenAi, ReasoningMode, Thinking,
+        Agent, AgentEvents, Model as CodexModel, NanocodeError, OpenAi, ReasoningMode, Thinking,
         agent::input::{Prompt, PromptInput, UserInput},
         oai::{
             ResponseError,
@@ -1423,6 +1423,11 @@ mod tests {
                 responses::{ResponseItem, ResponseItemId},
                 tower::{CompactionOutput, ResponsePipelineStats, ResponsesOutput},
             };
+            if matches!(request.kind(), ResponsesAttemptKind::Connect) {
+                return Box::pin(std::future::ready(Ok(ResponsesServiceResponse::new(
+                    ResponsesOutput::Connected,
+                ))));
+            }
             assert!(matches!(request.kind(), ResponsesAttemptKind::Compaction));
             let (send, receive) = oneshot::channel();
             self.requests.send(send).unwrap();
@@ -1751,6 +1756,11 @@ mod tests {
         }
 
         fn call(&mut self, request: ResponsesAttempt) -> Self::Future {
+            if matches!(request.kind(), ResponsesAttemptKind::Connect) {
+                return Box::pin(std::future::ready(Ok(ResponsesServiceResponse::new(
+                    nanocode::oai::tower::ResponsesOutput::Connected,
+                ))));
+            }
             let (release, released) = oneshot::channel();
             if !matches!(request.kind(), ResponsesAttemptKind::Warmup) {
                 self.0
@@ -2337,7 +2347,7 @@ mod tests {
         ];
         for (source, stopped) in cases {
             let error =
-                NanocodexError::from(ResponseError::from(ResponsesServiceError::from(source)));
+                NanocodeError::from(ResponseError::from(ResponsesServiceError::from(source)));
             let (updates, mut received) = mpsc::unbounded_channel();
             ActiveTurns::default().finish(
                 Ok(FinishedTurn {
@@ -2384,9 +2394,11 @@ mod tests {
             Poll::Ready(Ok(()))
         }
 
-        fn call(&mut self, _request: ResponsesAttempt) -> Self::Future {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            self.called.notify_one();
+        fn call(&mut self, request: ResponsesAttempt) -> Self::Future {
+            if !matches!(request.kind(), ResponsesAttemptKind::Connect) {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.called.notify_one();
+            }
             pending()
         }
     }
@@ -3030,7 +3042,7 @@ mod tests {
         let fork_unavailable: fn(&WorkerError) -> bool = |error| {
             matches!(
                 error,
-                WorkerError::Agent(NanocodexError::ForkBeforeCompletedTurn)
+                WorkerError::Agent(NanocodeError::ForkBeforeCompletedTurn)
             )
         };
         let parent_unavailable: fn(&WorkerError) -> bool =

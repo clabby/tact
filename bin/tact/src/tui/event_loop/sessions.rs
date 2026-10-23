@@ -177,12 +177,12 @@ impl EventLoop {
     ) {
         self.input = None;
         self.tasks.spawn_blocking(TaskKind::NewSession, move || {
-            TaskOutput::NewSession(NewSession {
+            TaskOutput::NewSession(Box::new(NewSession {
                 pane,
                 settings,
                 draft_reset,
                 configured: configure(settings),
-            })
+            }))
         });
     }
 

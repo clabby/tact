@@ -26,7 +26,7 @@ use crate::{
     turn::TurnSlot,
 };
 pub(crate) use messaging::DelegationChange;
-use nanocode::{Agent, AgentEvents, NanocodexError, ReasoningMode, Thinking};
+use nanocode::{Agent, AgentEvents, NanocodeError, ReasoningMode, Thinking};
 use policy::{reasoning_mode_exceeds, thinking_rank};
 use serde_json::Value;
 pub(crate) use state::{AgentDirectoryEntry, AgentSummary};
@@ -59,7 +59,7 @@ struct AgentFactory {
 }
 
 type AgentBuilder =
-    dyn Fn(AgentContext, Speed) -> Result<(Agent, AgentEvents), NanocodexError> + Send + Sync;
+    dyn Fn(AgentContext, Speed) -> Result<(Agent, AgentEvents), NanocodeError> + Send + Sync;
 
 #[derive(Clone, Copy)]
 struct AgentSettings {
@@ -116,9 +116,9 @@ impl Registry {
         max_reasoning_mode: ReasoningMode,
         speed: Speed,
         factory: F,
-    ) -> Result<(), NanocodexError>
+    ) -> Result<(), NanocodeError>
     where
-        F: Fn(AgentContext, Speed) -> Result<(Agent, AgentEvents), NanocodexError>
+        F: Fn(AgentContext, Speed) -> Result<(Agent, AgentEvents), NanocodeError>
             + Send
             + Sync
             + 'static,
@@ -133,7 +133,7 @@ impl Registry {
                 }),
             })
             .map_err(|_| {
-                NanocodexError::InvalidRequest("subagent factory is already configured".to_owned())
+                NanocodeError::InvalidRequest("subagent factory is already configured".to_owned())
             })
     }
 
@@ -396,7 +396,7 @@ impl Registry {
             } else {
                 match result {
                     Ok(_) => complete_session(session, submitted_output),
-                    Err(NanocodexError::TurnCancelled) => AgentStatus::Interrupted,
+                    Err(NanocodeError::TurnCancelled) => AgentStatus::Interrupted,
                     Err(error) => AgentStatus::Failed {
                         error: error.to_string(),
                     },
@@ -554,20 +554,20 @@ impl Subagents {
     /// is bounded by the live `max_thinking` cap. `max_reasoning_mode` is the root session's
     /// actual mode: Pro children are admitted only when it is Pro, and the context's mode is
     /// already resolved to standard for models without Pro support. A runtime accepts exactly
-    /// one factory; a second call returns [`NanocodexError::InvalidRequest`].
+    /// one factory; a second call returns [`NanocodeError::InvalidRequest`].
     ///
     /// # Errors
     ///
-    /// Returns [`NanocodexError::InvalidRequest`] if a factory is already configured.
+    /// Returns [`NanocodeError::InvalidRequest`] if a factory is already configured.
     pub fn set_agent_factory<F>(
         &self,
         max_thinking: Thinking,
         max_reasoning_mode: ReasoningMode,
         speed: Speed,
         factory: F,
-    ) -> Result<(), NanocodexError>
+    ) -> Result<(), NanocodeError>
     where
-        F: Fn(AgentContext, Speed) -> Result<(Agent, AgentEvents), NanocodexError>
+        F: Fn(AgentContext, Speed) -> Result<(Agent, AgentEvents), NanocodeError>
             + Send
             + Sync
             + 'static,

@@ -16,7 +16,7 @@ use crate::{
     search::{fuzzy_score, rank},
 };
 use nanocode::{
-    HarnessFamily, Lineage, Model as CodexModel, NanocodexError, ServiceTier, SessionCheckpoint,
+    HarnessFamily, Lineage, Model as CodexModel, NanocodeError, ServiceTier, SessionCheckpoint,
     Thinking,
 };
 use serde::{Deserialize, Serialize};
@@ -312,12 +312,12 @@ impl AgentSnapshot {
     }
 
     /// The checkpointed model, restricted to Tact's supported roster.
-    pub(crate) fn model(&self) -> Result<Model, NanocodexError> {
+    pub(crate) fn model(&self) -> Result<Model, NanocodeError> {
         tact_subagents::parse_model(self.0.model().as_str())
             .ok()
             .filter(|model| model.family() == self.0.family())
             .ok_or_else(|| {
-                NanocodexError::InvalidCheckpoint(format!(
+                NanocodeError::InvalidCheckpoint(format!(
                     "checkpoint uses unsupported model {}",
                     self.0.model()
                 ))
@@ -328,8 +328,8 @@ impl AgentSnapshot {
         &self,
         model: Model,
         session_id: Option<&str>,
-    ) -> Result<(), NanocodexError> {
-        let invalid = |reason: &str| Err(NanocodexError::InvalidCheckpoint(reason.into()));
+    ) -> Result<(), NanocodeError> {
+        let invalid = |reason: &str| Err(NanocodeError::InvalidCheckpoint(reason.into()));
         match (self.model()?, model) {
             (Model::Claude(_), Model::Codex(_)) => {
                 invalid("cannot restore a Claude checkpoint with Codex")
@@ -396,8 +396,8 @@ struct LegacyCodexSnapshot {
 
 impl LegacySnapshot {
     /// Wraps the provider-native state in a unified root-session checkpoint.
-    fn upgrade(self, session_id: &str) -> Result<AgentSnapshot, NanocodexError> {
-        let invalid = |reason: String| NanocodexError::InvalidCheckpoint(reason);
+    fn upgrade(self, session_id: &str) -> Result<AgentSnapshot, NanocodeError> {
+        let invalid = |reason: String| NanocodeError::InvalidCheckpoint(reason);
         let checkpoint = match self {
             Self::Claude(snapshot) => {
                 let payload = serde_json::from_str(&snapshot.payload)
@@ -495,7 +495,7 @@ pub(crate) enum SessionError {
     LegacyCheckpoint {
         session_id: String,
         #[source]
-        source: NanocodexError,
+        source: NanocodeError,
     },
     #[error("session transcript has no workspace metadata")]
     MissingWorkspace,

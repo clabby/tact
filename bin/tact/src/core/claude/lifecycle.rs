@@ -68,7 +68,7 @@ impl State {
     async fn submit(self: Arc<Self>, request: BackendPrompt) -> Result<BackendTurn> {
         let mut active = self.active.lock().await;
         if self.stopped.load(Ordering::Acquire) {
-            return Err(NanocodexError::AgentStopped);
+            return Err(NanocodeError::AgentStopped);
         }
         if active.is_some() {
             return Err(invalid("Claude already has an active turn"));
@@ -125,7 +125,7 @@ impl State {
         Ok(BackendTurn {
             request_id: Some(id),
             result: Box::pin(
-                async move { result_rx.await.unwrap_or(Err(NanocodexError::TurnStopped)) },
+                async move { result_rx.await.unwrap_or(Err(NanocodeError::TurnStopped)) },
             ),
         })
     }
@@ -209,13 +209,13 @@ impl State {
             .as_ref()
             .filter(|active| active.key == key)
             .cloned()
-            .ok_or(NanocodexError::TurnNotCancellable)
+            .ok_or(NanocodeError::TurnNotCancellable)
     }
 
     async fn idle(&self) -> Result<tokio::sync::MutexGuard<'_, Option<Active>>> {
         let active = self.active.lock().await;
         if self.stopped.load(Ordering::Acquire) {
-            return Err(NanocodexError::AgentStopped);
+            return Err(NanocodeError::AgentStopped);
         }
         if active.is_some() {
             return Err(invalid("Claude operation requires an idle agent"));
@@ -323,7 +323,7 @@ impl LifecycleBackend for Driver {
         Box::pin(async move {
             let _admission = state.active.lock().await;
             if state.stopped.load(Ordering::Acquire) {
-                return Err(NanocodexError::AgentStopped);
+                return Err(NanocodeError::AgentStopped);
             }
             state.native.set_fast_mode(enabled).await?;
             state.fast_mode.store(enabled, Ordering::Release);
@@ -363,7 +363,7 @@ impl LifecycleBackend for Driver {
         Box::pin(async move {
             let _admission = state.active.lock().await;
             if state.stopped.load(Ordering::Acquire) {
-                return Err(NanocodexError::AgentStopped);
+                return Err(NanocodeError::AgentStopped);
             }
             let spawn = state
                 .spawn

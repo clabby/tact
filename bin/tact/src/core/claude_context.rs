@@ -8,7 +8,7 @@
 //! omits configured instructions.
 
 use chrono::Utc;
-use nanocode::NanocodexError;
+use nanocode::NanocodeError;
 use std::{
     env,
     fs::{self, File},
@@ -23,7 +23,7 @@ const CANDIDATES: [&str; 2] = ["AGENTS.override.md", "AGENTS.md"];
 #[derive(Debug, Error)]
 pub(super) enum ContextError {
     #[error(transparent)]
-    Workspace(NanocodexError),
+    Workspace(NanocodeError),
     #[error("could not load instructions at {}: {source}", path.display())]
     Read {
         path: PathBuf,
@@ -32,7 +32,7 @@ pub(super) enum ContextError {
     },
 }
 
-impl From<ContextError> for NanocodexError {
+impl From<ContextError> for NanocodeError {
     fn from(error: ContextError) -> Self {
         match error {
             ContextError::Workspace(error) => error,
@@ -62,18 +62,18 @@ impl ProjectContext {
     /// Loads workspace instructions before a fresh Claude conversation is persisted.
     pub(super) fn load(workspace: &Path, codex_home: Option<&Path>) -> Result<Self, ContextError> {
         let workspace = fs::canonicalize(workspace).map_err(|source| {
-            ContextError::Workspace(NanocodexError::ResolveWorkspace {
+            ContextError::Workspace(NanocodeError::ResolveWorkspace {
                 path: workspace.to_owned(),
                 source,
             })
         })?;
         if !workspace.is_dir() {
             return Err(ContextError::Workspace(
-                NanocodexError::WorkspaceNotDirectory { path: workspace },
+                NanocodeError::WorkspaceNotDirectory { path: workspace },
             ));
         }
         let Some(cwd) = workspace.to_str().map(str::to_owned) else {
-            return Err(ContextError::Workspace(NanocodexError::WorkspaceNotUtf8 {
+            return Err(ContextError::Workspace(NanocodeError::WorkspaceNotUtf8 {
                 path: workspace,
             }));
         };

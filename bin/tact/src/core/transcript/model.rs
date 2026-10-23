@@ -595,6 +595,8 @@ impl TranscriptModel {
             }
             AgentEventKind::ApiEvent
             | AgentEventKind::RunSteered
+            | AgentEventKind::ToolNotification
+            | AgentEventKind::ToolInputDelta
             | AgentEventKind::ModelAttemptStarted => Ok(false),
         };
         let activity_changed = previous_activity != self.transient;
@@ -1421,7 +1423,9 @@ const fn visibility(kind: AgentEventKind) -> EventVisibility {
         | AgentEventKind::ModelWarmupCompleted
         | AgentEventKind::ModelCallCompleted
         | AgentEventKind::ModelAttemptStarted
-        | AgentEventKind::ModelConnectionCompleted => EventVisibility::StateOnly,
+        | AgentEventKind::ModelConnectionCompleted
+        | AgentEventKind::ToolNotification
+        | AgentEventKind::ToolInputDelta => EventVisibility::StateOnly,
     }
 }
 

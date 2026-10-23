@@ -17,7 +17,7 @@ pub(crate) use config::{
 };
 use miette::Diagnostic;
 use nanocode::{
-    NanocodexError,
+    NanocodeError,
     oai::{OpenAiError, events::EventError},
     tools::mcp::McpBuildError,
 };
@@ -31,7 +31,7 @@ pub(crate) type AuthResult<T> = StdResult<T, AuthError>;
 #[derive(Debug, Diagnostic, Error)]
 pub(crate) enum Error {
     #[error(transparent)]
-    Agent(#[from] NanocodexError),
+    Agent(#[from] NanocodeError),
     #[error(transparent)]
     Auth(#[from] AuthError),
     #[error(transparent)]

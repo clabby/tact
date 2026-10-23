@@ -24,7 +24,7 @@ use crate::app::{
 };
 use async_trait::async_trait;
 use nanocode::{
-    Agent, AgentEvents, Model as CodexModel, NanocodexError, OpenAi, Tools,
+    Agent, AgentEvents, Model as CodexModel, NanocodeError, OpenAi, Tools,
     claude::{ANTHROPIC_MESSAGES_URL, ClaudeClient},
     oai::{
         OpenAiError,
@@ -60,7 +60,7 @@ pub(super) enum AgentBuildError {
     HttpClient(#[from] reqwest::Error),
 }
 
-impl From<AgentBuildError> for NanocodexError {
+impl From<AgentBuildError> for NanocodeError {
     fn from(error: AgentBuildError) -> Self {
         Self::InvalidRequest(error.to_string())
     }
@@ -141,7 +141,7 @@ impl AgentRecipe {
             .instructions(spec.instructions)
             .tools_factory(move |_| tools());
         if let Some(home) = self.config.codex_home() {
-            builder = builder.codex_home(home);
+            builder = builder.nanocode_home(home);
         }
         if let Some(id) = spec.session_id {
             builder = builder.session_id(id.parse::<SessionId>().map_err(AgentBuildError::from)?);

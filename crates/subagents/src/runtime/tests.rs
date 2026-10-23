@@ -12,7 +12,7 @@ use crate::{
     output::OutputContract,
     test_support::{PendingService, pending_agent},
 };
-use nanocode::{Agent, Model as CodexModel, NanocodexError, OpenAi, ReasoningMode, Thinking};
+use nanocode::{Agent, Model as CodexModel, NanocodeError, OpenAi, ReasoningMode, Thinking};
 use serde_json::json;
 use std::{
     sync::{Arc, Mutex},
@@ -90,7 +90,7 @@ fn agent_factory_enforces_thinking_cap() {
             Speed::Standard,
             move |context: AgentContext, speed| {
                 *captured.lock().unwrap() = Some((context.model, context.thinking, speed));
-                Err(NanocodexError::InvalidRequest(
+                Err(NanocodeError::InvalidRequest(
                     "stop after capture".to_owned(),
                 ))
             },
@@ -151,7 +151,7 @@ async fn registered_parent_caps_and_turn_context_follow_its_descriptor() {
                 captured
                     .send((context.model, context.thinking, speed))
                     .unwrap();
-                Err(NanocodexError::InvalidRequest(
+                Err(NanocodeError::InvalidRequest(
                     "stop after capture".to_owned(),
                 ))
             },
@@ -367,7 +367,7 @@ async fn runtime_owned_agent_factory_does_not_keep_the_runtime_alive() {
             Speed::Standard,
             move |_, _| {
                 let _ = &factory_weak;
-                Err(NanocodexError::InvalidRequest("unused factory".to_owned()))
+                Err(NanocodeError::InvalidRequest("unused factory".to_owned()))
             },
         )
         .unwrap();
@@ -612,8 +612,8 @@ async fn agent_directory_keeps_results_after_reuse_and_close() {
     );
 
     for error in [
-        NanocodexError::TurnCancelled,
-        NanocodexError::InvalidRequest("failed follow-up".to_owned()),
+        NanocodeError::TurnCancelled,
+        NanocodeError::InvalidRequest("failed follow-up".to_owned()),
     ] {
         registry
             .harness_turn_started("main", reservation.id)

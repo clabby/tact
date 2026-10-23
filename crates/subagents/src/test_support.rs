@@ -40,6 +40,11 @@ impl Service<ResponsesAttempt> for PendingService {
     }
 
     fn call(&mut self, request: ResponsesAttempt) -> Self::Future {
+        if matches!(request.kind(), ResponsesAttemptKind::Connect) {
+            return Either::Left(ready(Ok(ResponsesServiceResponse::new(
+                ResponsesOutput::Connected,
+            ))));
+        }
         if self.prompts.is_some() && matches!(request.kind(), ResponsesAttemptKind::Warmup) {
             return Either::Left(ready(Ok(ResponsesServiceResponse::new(
                 ResponsesOutput::Warmup(serde_json::from_value(json!({ "id": "warmup" })).unwrap()),

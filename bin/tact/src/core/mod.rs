@@ -45,7 +45,7 @@ use crate::{
     },
 };
 pub(crate) use instructions::{IMAGE_RENDERING_INSTRUCTIONS, MEMORY_REVIEW_CHECKPOINT};
-use nanocode::{Agent, AgentEvents, NanocodexError, ReasoningMode as NativeReasoningMode, Tools};
+use nanocode::{Agent, AgentEvents, NanocodeError, ReasoningMode as NativeReasoningMode, Tools};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -99,7 +99,7 @@ impl ConfiguredAgent {
         session_id: Option<&str>,
         resume: Option<ResumeState>,
     ) -> Result<Self> {
-        crate::app::model::parse(model.as_str()).map_err(NanocodexError::InvalidRequest)?;
+        crate::app::model::parse(model.as_str()).map_err(NanocodeError::InvalidRequest)?;
         config.claude().ensure_model_enabled(model)?;
         let agent_config = config.agent();
         let workspace = Self::resolve_workspace(agent_config.workspace())?;
@@ -186,7 +186,7 @@ fn base_tools(config: &Config) -> Result<Tools> {
     if let Some(mcp) = mcp_provider(config)? {
         tools = tools.provider(mcp);
     }
-    Ok(tools.build().map_err(NanocodexError::from)?)
+    Ok(tools.build().map_err(NanocodeError::from)?)
 }
 
 pub(crate) async fn set_speed(
@@ -348,8 +348,13 @@ mod tests {
             Poll::Ready(Ok(()))
         }
 
-        fn call(&mut self, _request: ResponsesAttempt) -> Self::Future {
-            self.called.notify_one();
+        fn call(&mut self, request: ResponsesAttempt) -> Self::Future {
+            if !matches!(
+                request.kind(),
+                nanocode::oai::tower::ResponsesAttemptKind::Connect
+            ) {
+                self.called.notify_one();
+            }
             pending()
         }
     }

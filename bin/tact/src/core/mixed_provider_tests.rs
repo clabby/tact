@@ -12,7 +12,7 @@ use axum::{
     routing::{any, post},
 };
 use nanocode::{
-    Agent, AgentEvents, ClaudeModel, Model as CodexModel, NanocodexError, OpenAi, ReasoningMode,
+    Agent, AgentEvents, ClaudeModel, Model as CodexModel, NanocodeError, OpenAi, ReasoningMode,
     Thinking, Tools,
     agent::SpawnOptions,
     oai::{
@@ -104,6 +104,11 @@ impl Service<ResponsesAttempt> for Script {
             }
         );
         assert_eq!(request.thinking(), Thinking::Medium);
+        if matches!(request.kind(), ResponsesAttemptKind::Connect) {
+            return ready(Ok(ResponsesServiceResponse::new(
+                ResponsesOutput::Connected,
+            )));
+        }
         if matches!(request.kind(), ResponsesAttemptKind::Warmup) {
             return ready(Ok(ResponsesServiceResponse::new(ResponsesOutput::Warmup(
                 WarmupResponse {
@@ -146,6 +151,7 @@ impl Service<ResponsesAttempt> for Script {
                 time_to_first_event_ns: 0,
                 time_to_first_output_ns: None,
                 pipeline_stats: ResponsePipelineStats::default(),
+                timing: Default::default(),
             }),
         )))
     }
@@ -242,7 +248,7 @@ fn build_agent(
     recipe: &Arc<AgentRecipe>,
     codex: Script,
     speed: Speed,
-) -> Result<(Agent, AgentEvents), NanocodexError> {
+) -> Result<(Agent, AgentEvents), NanocodeError> {
     let AgentContext {
         model,
         thinking,
@@ -255,7 +261,7 @@ fn build_agent(
         let openai = OpenAi::builder("fixture-token")
             .service(move || service.clone())
             .build()
-            .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
+            .map_err(|error| NanocodeError::InvalidRequest(error.to_string()))?;
         Agent::builder(openai)
             .model(model)
             .thinking(thinking)
