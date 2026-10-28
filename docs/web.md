@@ -305,7 +305,7 @@ once a turn started (`invalid_request`). A session has started when its snapshot
 | Query | Args | Reply |
 | :-- | :-- | :-- |
 | `models` | none | `ModelCatalog` |
-| `history` | `query?, cursor?` | `{ sessions: PersistedSession[], next_cursor: string \| null }` (resumable persisted sessions of the focused session's repository, any of its checkouts, newest first, pages of 50) |
+| `history` | `query?, cursor?, scope?` | `{ sessions: PersistedSession[], next_cursor: string \| null }` (resumable persisted sessions newest first, pages of 50. `scope` is `"repository"` (default) for any checkout of the focused session's repository, or `"workspace"` for the focused session's workspace only) |
 | `files` | `query?` | `{ paths: string[] }` (at most 50; directories end in `/`) |
 | `skills` | `query?` | `{ skills: { name, description }[] }` |
 | `recent_prompts` | `session, scope?: "global" \| "current_session", query?` | `{ prompts: { text, recorded_at_unix_ms, session_id, workspace }[] }` |
