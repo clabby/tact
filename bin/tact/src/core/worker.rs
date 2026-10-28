@@ -1566,6 +1566,7 @@ mod tests {
                 status: 400,
                 body: "synthetic compaction failure".to_owned(),
                 retry_after: None,
+                should_retry: None,
             }))
             .unwrap();
         assert!(matches!(
@@ -1614,7 +1615,7 @@ mod tests {
             .unwrap();
         commands.send(WorkerCommand::Compact(PaneId::Main)).unwrap();
         timeout(Duration::from_secs(5), receive.recv()).await.unwrap().unwrap().send(Err(ResponsesError::HttpRejected {
-            status: 403, body: r#"{"error":{"code":"misalignment_policy_violation","message":"conversation stopped"}}"#.to_owned(), retry_after: None,
+            status: 403, body: r#"{"error":{"code":"misalignment_policy_violation","message":"conversation stopped"}}"#.to_owned(), retry_after: None, should_retry: None,
         })).unwrap();
         let WorkerEvent::CompactionFinished {
             result,
@@ -1782,6 +1783,7 @@ mod tests {
                         status: 400,
                         body: "test request completed".to_owned(),
                         retry_after: None,
+                        should_retry: None,
                     },
                 )))
             })
@@ -2333,6 +2335,7 @@ mod tests {
                     status: 403,
                     body: violation.to_owned(),
                     retry_after: None,
+                    should_retry: None,
                 },
                 true,
             ),
