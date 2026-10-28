@@ -20,7 +20,7 @@ use crate::{
     },
     tui::components::AppEvent,
 };
-use nanocode::NanocodexError;
+use nanocode::NanocodeError;
 use std::collections::HashSet;
 use tokio::sync::mpsc;
 
@@ -34,7 +34,7 @@ enum WorkerState {
     Running,
     /// The worker reported that it stopped, with the error that stopped it, or its event channel
     /// closed.
-    Stopped(Option<NanocodexError>),
+    Stopped(Option<NanocodeError>),
 }
 
 impl WorkerLink {
@@ -60,14 +60,14 @@ impl WorkerLink {
         matches!(self.state, WorkerState::Running)
     }
 
-    pub(super) fn error(&self) -> Option<&NanocodexError> {
+    pub(super) fn error(&self) -> Option<&NanocodeError> {
         match &self.state {
             WorkerState::Stopped(error) => error.as_ref(),
             WorkerState::Running => None,
         }
     }
 
-    pub(super) fn take_error(&mut self) -> Option<NanocodexError> {
+    pub(super) fn take_error(&mut self) -> Option<NanocodeError> {
         match &mut self.state {
             WorkerState::Stopped(error) => error.take(),
             WorkerState::Running => None,
@@ -198,7 +198,7 @@ impl EventLoop {
     }
 
     /// Records the worker's stop in every pane that has a transcript.
-    fn on_worker_stopped(&mut self, error: Option<NanocodexError>) -> Result<()> {
+    fn on_worker_stopped(&mut self, error: Option<NanocodeError>) -> Result<()> {
         let panes = self
             .panes
             .runtimes()
@@ -374,7 +374,7 @@ impl EventLoop {
         &mut self,
         pane: PaneId,
         count: usize,
-        error: Option<NanocodexError>,
+        error: Option<NanocodeError>,
     ) -> Result<()> {
         let Some(runtime) = self.panes.get_mut(pane) else {
             return Ok(());

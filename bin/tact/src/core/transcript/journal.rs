@@ -1057,7 +1057,7 @@ mod tests {
             )
             .unwrap();
         let metadata =
-            &serde_json::from_str::<Value>(&payload).unwrap()["nanocodex_session"]["metadata"];
+            &serde_json::from_str::<Value>(&payload).unwrap()["nanocode_session"]["metadata"];
         assert_eq!(metadata["tact.effort"], json!("high"));
         assert_eq!(metadata["tact.application_version"], json!("test"));
     }

@@ -7,7 +7,7 @@ use super::{
     output::completion_instructions,
     runtime::{DelegationChange, Registry},
 };
-use nanocode::{Agent, NanocodexError, TurnControl};
+use nanocode::{Agent, NanocodeError, TurnControl};
 use std::{collections::VecDeque, sync::Weak};
 use tokio::{
     sync::{mpsc, oneshot, watch},
@@ -330,7 +330,7 @@ impl Harness {
                     .await;
                     return;
                 }
-                Err(NanocodexError::TurnNotSteerable | NanocodexError::TurnStopped) => {
+                Err(NanocodeError::TurnNotSteerable | NanocodeError::TurnStopped) => {
                     self.rollback_delegation(delegation).await;
                 }
                 Err(source) => {
@@ -567,7 +567,7 @@ impl Harness {
         let cancellation = active.control.cancel().await;
         self.finish_active().await;
         match cancellation {
-            Ok(()) | Err(NanocodexError::TurnNotCancellable) => Ok(()),
+            Ok(()) | Err(NanocodeError::TurnNotCancellable) => Ok(()),
             Err(source) => Err(SubagentError::StopTurn {
                 agent: self.id,
                 source,
@@ -596,7 +596,7 @@ impl Harness {
         result: Result<nanocode::agent::Result<nanocode::TurnResult>, JoinError>,
     ) {
         let result = result.unwrap_or_else(|error| {
-            Err(NanocodexError::InvalidRequest(format!(
+            Err(NanocodeError::InvalidRequest(format!(
                 "subagent turn task failed: {error}"
             )))
         });

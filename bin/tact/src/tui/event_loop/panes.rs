@@ -684,7 +684,7 @@ impl Panes {
     /// Records in every journal how its session ended at shutdown and closes the journals.
     pub(super) fn close_journals(
         &mut self,
-        worker_error: Option<&nanocode::NanocodexError>,
+        worker_error: Option<&nanocode::NanocodeError>,
     ) -> Result<()> {
         let outcome = if worker_error.is_some() {
             SessionOutcome::Failed

@@ -552,13 +552,34 @@ fn read_state(
             |row| {
                 Ok(StoredState {
                     revision: from_sql_u64(row.get(0)?),
-                    payload: Some(row.get(1)?),
+                    payload: Some(renamed_checkpoint(row.get(1)?)),
                 })
             },
         )
         .optional()
         .map_err(|source| query(path, source))?
         .unwrap_or_default())
+}
+
+/// Renames the top-level checkpoint keys of a state saved before nanocode dropped its
+/// `nanocodex_` prefix, which nanocode no longer reads. The next commit stores the new names.
+fn renamed_checkpoint(payload: String) -> String {
+    const RENAMED: [(&str, &str); 2] = [
+        ("nanocodex_durable_state", "nanocode_durable_state"),
+        ("nanocodex_session", "nanocode_session"),
+    ];
+    if !payload.starts_with("{\"nanocodex_durable_state\":") {
+        return payload;
+    }
+    let Ok(serde_json::Value::Object(mut checkpoint)) = serde_json::from_str(&payload) else {
+        return payload;
+    };
+    for (legacy, current) in RENAMED {
+        if let Some(value) = checkpoint.remove(legacy) {
+            checkpoint.insert(current.to_owned(), value);
+        }
+    }
+    serde_json::Value::Object(checkpoint).to_string()
 }
 
 fn check_owner(
@@ -754,7 +775,7 @@ fn uncertain(path: &Path) -> impl Fn(rusqlite::Error) -> StoreError + '_ {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventSequence, schema_exists};
+    use super::{EventSequence, renamed_checkpoint, schema_exists};
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
         core::{
@@ -980,5 +1001,23 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(indexed, ["first", "reply", "second"]);
+    }
+    #[test]
+    fn checkpoints_saved_under_the_nanocodex_names_load_under_the_nanocode_names() {
+        let legacy = json!({
+            "nanocodex_durable_state": {"revision": 3},
+            "nanocodex_session": {"metadata": {"tact.effort": "high"}},
+        })
+        .to_string();
+        let renamed: serde_json::Value = serde_json::from_str(&renamed_checkpoint(legacy)).unwrap();
+        assert_eq!(
+            renamed,
+            json!({
+                "nanocode_durable_state": {"revision": 3},
+                "nanocode_session": {"metadata": {"tact.effort": "high"}},
+            })
+        );
+        let current = json!({"nanocode_durable_state": {"text": "nanocodex_session"}}).to_string();
+        assert_eq!(renamed_checkpoint(current.clone()), current);
     }
 }

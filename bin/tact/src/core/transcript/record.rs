@@ -581,6 +581,8 @@ const fn agent_kind_name(kind: AgentEventKind) -> &'static str {
         AgentEventKind::RunFailed => "run.failed",
         AgentEventKind::ToolCall => "tool.call",
         AgentEventKind::ToolResult => "tool.result",
+        AgentEventKind::ToolNotification => "tool.notification",
+        AgentEventKind::ToolInputDelta => "tool.input.delta",
         AgentEventKind::ModelWarmupStarted => "model.warmup.started",
         AgentEventKind::ModelWarmupCompleted => "model.warmup.completed",
         AgentEventKind::ModelWarmupFailed => "model.warmup.failed",

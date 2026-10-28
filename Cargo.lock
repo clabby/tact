@@ -177,6 +177,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrayvec"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
 name = "ashpd"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -535,6 +541,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "bindgen"
+version = "0.72.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+dependencies = [
+ "bitflags 2.13.1",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.10.5",
+ "log",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash",
+ "shlex 1.3.0",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -586,6 +612,19 @@ dependencies = [
  "radium",
  "tap",
  "wyz",
+]
+
+[[package]]
+name = "blake3"
+version = "1.8.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d9e454fc11f76977dc803893aff6304ed33d6a26efae8696573bea74baa27ae"
+dependencies = [
+ "arrayvec",
+ "cc",
+ "cfg-if",
+ "constant_time_eq",
+ "cpufeatures 0.3.0",
 ]
 
 [[package]]
@@ -642,16 +681,6 @@ checksum = "3a32acac15fe1967bc3986b2a6347dffc965602354ea6f450ad07e8bfd253583"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
-]
-
-[[package]]
-name = "bstr"
-version = "1.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
-dependencies = [
- "memchr",
- "serde_core",
 ]
 
 [[package]]
@@ -728,7 +757,16 @@ dependencies = [
  "find-msvc-tools",
  "jobserver",
  "libc",
- "shlex",
+ "shlex 2.0.1",
+]
+
+[[package]]
+name = "cexpr"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
+dependencies = [
+ "nom",
 ]
 
 [[package]]
@@ -798,6 +836,17 @@ checksum = "57663b653d948a338bfb3eeba9bb2fd5fcfaecb9e199e87e1eda4d9e8b240fd9"
 dependencies = [
  "ciborium-io",
  "half",
+]
+
+[[package]]
+name = "clang-sys"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
+dependencies = [
+ "glob",
+ "libc",
+ "libloading",
 ]
 
 [[package]]
@@ -1006,10 +1055,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "constant_time_eq"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
+
+[[package]]
 name = "convert_case"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "convert_case"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1af709f1f33454bf52eadfc8c78b3b9ef9cb26fb54d16dc9cd9a7299f899fd1b"
 dependencies = [
  "unicode-segmentation",
 ]
@@ -1243,7 +1307,7 @@ version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "799a97264921d8623a957f6c3b9011f3b5492f557bbb7a5a19b7fa6d06ba8dcb"
 dependencies = [
- "convert_case",
+ "convert_case 0.10.0",
  "proc-macro2",
  "quote",
  "rustc_version",
@@ -1733,19 +1797,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
-name = "globset"
-version = "0.4.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07c34a9410465b45bd9787443bc7370f37735bad04b0f0cd57ff1a3186c98988"
-dependencies = [
- "aho-corasick",
- "bstr",
- "log",
- "regex-automata",
- "regex-syntax",
-]
-
-[[package]]
 name = "gloo-timers"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2084,22 +2135,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ignore"
-version = "0.4.33"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00b69833ed729dc5aa7d19541d96d6cf8e9137194207a04916d658e43168402f"
-dependencies = [
- "crossbeam-deque",
- "globset",
- "log",
- "memchr",
- "regex-automata",
- "same-file",
- "walkdir",
- "winapi-util",
-]
-
-[[package]]
 name = "image"
 version = "0.25.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2395,6 +2430,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2593,21 +2638,22 @@ dependencies = [
 [[package]]
 name = "nanocode"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "nanocode-agent",
  "nanocode-agent-host",
  "nanocode-backend-claude",
  "nanocode-backend-codex",
  "nanocode-code-mode",
- "nanocode-cua",
  "nanocode-durability",
  "nanocode-home",
  "nanocode-platform",
+ "nanocode-process-contracts",
  "nanocode-store-jsonl",
  "nanocode-subagents",
  "nanocode-tool-runtime",
  "nanocode-tools",
+ "nix 0.31.3",
  "serde_json",
  "tokio",
 ]
@@ -2615,8 +2661,11 @@ dependencies = [
 [[package]]
 name = "nanocode-agent"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
+ "arc-swap",
+ "blake3",
+ "futures-util",
  "nanocode-agent-config",
  "nanocode-agent-core",
  "nanocode-durability",
@@ -2624,8 +2673,11 @@ dependencies = [
  "nanocode-platform",
  "nanocode-process-contracts",
  "nanocode-subagents",
+ "nanocode-sync",
  "nanocode-tool-contracts",
  "nanocode-tool-host",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -2633,7 +2685,7 @@ dependencies = [
 [[package]]
 name = "nanocode-agent-config"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "nanocode-agent-core",
  "nanocode-durability",
@@ -2646,34 +2698,37 @@ dependencies = [
 [[package]]
 name = "nanocode-agent-core"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
+ "arc-swap",
  "futures-util",
  "nanocode-agent-types",
  "nanocode-home",
  "nanocode-platform",
+ "nanocode-sync",
  "nanocode-tool-contracts",
  "nanocode-types",
  "serde",
  "serde_json",
+ "tokio",
  "uuid",
 ]
 
 [[package]]
 name = "nanocode-agent-host"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "async-trait",
  "nanocode-agent",
  "nanocode-agent-core",
- "nanocode-cua",
  "nanocode-durability",
  "nanocode-home",
  "nanocode-platform",
  "nanocode-process",
  "nanocode-process-contracts",
  "nanocode-store-jsonl",
+ "nanocode-sync",
  "nanocode-tool-contracts",
  "nanocode-tool-host",
  "nanocode-tool-runtime",
@@ -2685,7 +2740,7 @@ dependencies = [
 [[package]]
 name = "nanocode-agent-types"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "nanocode-tool-contracts",
  "nanocode-types-core",
@@ -2697,8 +2752,9 @@ dependencies = [
 [[package]]
 name = "nanocode-audio"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
+ "arc-swap",
  "base64",
  "base64-simd",
  "sha1 0.11.0",
@@ -2708,7 +2764,7 @@ dependencies = [
 [[package]]
 name = "nanocode-backend-claude"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "async-trait",
  "base64",
@@ -2724,10 +2780,12 @@ dependencies = [
  "nanocode-code-mode",
  "nanocode-durability",
  "nanocode-home",
+ "nanocode-http",
  "nanocode-media",
  "nanocode-platform",
  "nanocode-process",
  "nanocode-process-contracts",
+ "nanocode-sync",
  "nanocode-tool-contracts",
  "nanocode-tool-host",
  "nanocode-tools",
@@ -2742,9 +2800,11 @@ dependencies = [
 [[package]]
 name = "nanocode-backend-claude-client"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
+ "arc-swap",
  "base64",
+ "blake3",
  "futures-util",
  "http",
  "httpdate",
@@ -2753,6 +2813,7 @@ dependencies = [
  "nanocode-home",
  "nanocode-http",
  "nanocode-platform",
+ "nanocode-sync",
  "nanocode-tls",
  "reqwest",
  "serde",
@@ -2770,20 +2831,17 @@ dependencies = [
 [[package]]
 name = "nanocode-backend-claude-tools"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "base64",
- "globset",
- "ignore",
  "image",
  "nanocode-home",
+ "nanocode-sync",
  "nanocode-tools",
  "nix 0.31.3",
- "regex",
  "schemars",
  "serde",
  "serde_json",
- "serde_yaml_ng",
  "tempfile",
  "tokio",
 ]
@@ -2791,13 +2849,15 @@ dependencies = [
 [[package]]
 name = "nanocode-backend-codex"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "base64",
  "base64-simd",
  "chrono",
  "futures-util",
+ "http",
  "iana-time-zone",
  "image",
  "nanocode-agent-config",
@@ -2806,10 +2866,12 @@ dependencies = [
  "nanocode-code-mode",
  "nanocode-durability",
  "nanocode-home",
+ "nanocode-http",
  "nanocode-media",
  "nanocode-platform",
  "nanocode-process",
  "nanocode-process-contracts",
+ "nanocode-sync",
  "nanocode-tls",
  "nanocode-tool-contracts",
  "nanocode-tool-host",
@@ -2831,10 +2893,11 @@ dependencies = [
 [[package]]
 name = "nanocode-backend-codex-client"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "arc-swap",
  "base64",
+ "flate2",
  "futures-util",
  "getrandom 0.4.3",
  "http",
@@ -2844,7 +2907,9 @@ dependencies = [
  "nanocode-agent-types",
  "nanocode-audio",
  "nanocode-home",
+ "nanocode-http",
  "nanocode-platform",
+ "nanocode-sync",
  "nanocode-tls",
  "nanocode-types",
  "reqwest",
@@ -2853,21 +2918,26 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite 0.30.0",
  "tower",
  "tracing",
  "url",
  "uuid",
+ "zstd",
 ]
 
 [[package]]
 name = "nanocode-code-mode"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
+ "blake3",
  "futures-util",
  "nanocode-code-mode-engine",
  "nanocode-media",
+ "nanocode-platform",
+ "nanocode-sync",
  "nanocode-tool-contracts",
  "nanocode-tools",
  "nanocode-types-core",
@@ -2880,10 +2950,12 @@ dependencies = [
 [[package]]
 name = "nanocode-code-mode-engine"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "base64",
  "base64-simd",
+ "nanocode-platform",
+ "nanocode-sync",
  "nanocode-tool-contracts",
  "rquickjs",
  "serde",
@@ -2893,30 +2965,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "nanocode-cua"
-version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
-dependencies = [
- "async-trait",
- "base64",
- "base64-simd",
- "libc",
- "nanocode-tool-contracts",
- "nanocode-types",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tokio",
-]
-
-[[package]]
 name = "nanocode-durability"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
+ "arc-swap",
+ "futures-util",
  "nanocode-agent-core",
  "nanocode-durability-core",
  "nanocode-platform",
+ "nanocode-sync",
  "serde",
  "serde_json",
  "tokio",
@@ -2927,9 +2985,12 @@ dependencies = [
 [[package]]
 name = "nanocode-durability-core"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
+ "base64",
+ "blake3",
  "nanocode-platform",
+ "nanocode-sync",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2940,7 +3001,7 @@ dependencies = [
 [[package]]
 name = "nanocode-home"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "nix 0.31.3",
  "serde",
@@ -2950,9 +3011,10 @@ dependencies = [
 [[package]]
 name = "nanocode-http"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "brotli-decompressor",
+ "flate2",
  "futures-util",
  "http",
  "nanocode-zstd",
@@ -2962,14 +3024,16 @@ dependencies = [
 [[package]]
 name = "nanocode-image"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
+ "arc-swap",
  "base64",
  "base64-simd",
  "crc32fast",
  "image",
  "image-webp",
  "memchr",
+ "nanocode-durability-core",
  "nanocode-types-core",
  "png 0.17.16",
  "sha1 0.11.0",
@@ -2981,11 +3045,13 @@ dependencies = [
 [[package]]
 name = "nanocode-mcp"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
+ "arc-swap",
  "base64",
  "futures-channel",
  "memchr",
+ "nanocode-sync",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2996,16 +3062,20 @@ dependencies = [
 [[package]]
 name = "nanocode-mcp-http"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "futures-util",
  "getrandom 0.4.3",
  "http",
  "nanocode-http",
  "nanocode-mcp",
+ "nanocode-platform",
+ "nanocode-sync",
  "nanocode-tls",
  "reqwest",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -3015,15 +3085,18 @@ dependencies = [
 [[package]]
 name = "nanocode-mcp-tools"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "async-trait",
  "futures-util",
  "http",
  "nanocode-home",
+ "nanocode-http",
  "nanocode-mcp",
  "nanocode-mcp-http",
+ "nanocode-platform",
  "nanocode-process",
+ "nanocode-sync",
  "nanocode-tls",
  "nanocode-tool-provider",
  "nanocode-tools",
@@ -3040,7 +3113,7 @@ dependencies = [
 [[package]]
 name = "nanocode-media"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "nanocode-audio",
  "nanocode-image",
@@ -3049,7 +3122,7 @@ dependencies = [
 [[package]]
 name = "nanocode-platform"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "getrandom 0.4.3",
  "tokio",
@@ -3059,11 +3132,12 @@ dependencies = [
 [[package]]
 name = "nanocode-process"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "getrandom 0.4.3",
  "nanocode-home",
  "nanocode-process-contracts",
+ "nanocode-sync",
  "nix 0.31.3",
  "portable-pty",
  "rustix 1.1.4",
@@ -3075,16 +3149,17 @@ dependencies = [
 [[package]]
 name = "nanocode-process-contracts"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "nanocode-home",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "nanocode-schema"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "appendlist",
  "base64",
@@ -3102,9 +3177,10 @@ dependencies = [
 [[package]]
 name = "nanocode-store-jsonl"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "nanocode-durability-core",
+ "nix 0.31.3",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3116,26 +3192,41 @@ dependencies = [
 [[package]]
 name = "nanocode-subagents"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "async-trait",
  "futures-util",
  "nanocode-agent-core",
+ "nanocode-durability-core",
  "nanocode-platform",
  "nanocode-schema",
+ "nanocode-sync",
  "nanocode-tool-contracts",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "tokio",
  "tracing",
 ]
 
 [[package]]
+name = "nanocode-sync"
+version = "0.6.7"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
+dependencies = [
+ "arc-swap",
+ "crossbeam-utils",
+ "futures-util",
+ "nanocode-platform",
+ "tokio",
+]
+
+[[package]]
 name = "nanocode-tls"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
+ "arc-swap",
+ "nanocode-sync",
  "rustls",
  "rustls-graviola",
  "rustls-native-certs",
@@ -3147,7 +3238,7 @@ dependencies = [
 [[package]]
 name = "nanocode-tool-contracts"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "nanocode-types-core",
  "serde",
@@ -3158,27 +3249,32 @@ dependencies = [
 [[package]]
 name = "nanocode-tool-host"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "futures-util",
  "nanocode-code-mode",
  "nanocode-home",
  "nanocode-media",
+ "nanocode-sync",
  "nanocode-tool-contracts",
  "nanocode-tool-provider",
  "nanocode-tools",
  "nanocode-types",
  "reqwest",
+ "schemars",
+ "serde",
  "serde_json",
  "thiserror 2.0.19",
+ "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "nanocode-tool-provider"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "async-trait",
  "nanocode-home",
@@ -3189,7 +3285,7 @@ dependencies = [
 [[package]]
 name = "nanocode-tool-runtime"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3201,11 +3297,13 @@ dependencies = [
  "nanocode-mcp-tools",
  "nanocode-media",
  "nanocode-process",
+ "nanocode-sync",
  "nanocode-tls",
  "nanocode-tool-host",
  "nanocode-tool-provider",
  "nanocode-tools",
  "nanocode-types",
+ "nix 0.31.3",
  "reqwest",
  "serde",
  "serde_json",
@@ -3221,7 +3319,7 @@ dependencies = [
 [[package]]
 name = "nanocode-tools"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "async-trait",
  "nanocode-tool-contracts",
@@ -3234,7 +3332,7 @@ dependencies = [
 [[package]]
 name = "nanocode-tools-macros"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -3245,22 +3343,26 @@ dependencies = [
 [[package]]
 name = "nanocode-types"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
+ "arc-swap",
  "futures-util",
  "nanocode-platform",
+ "nanocode-sync",
  "nanocode-types-core",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "nanocode-types-core"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 dependencies = [
+ "nanocode-sync",
  "serde",
  "serde_json",
  "smallvec",
@@ -3270,7 +3372,7 @@ dependencies = [
 [[package]]
 name = "nanocode-zstd"
 version = "0.6.7"
-source = "git+https://github.com/gakonst/nanocode?rev=0e70432fada624136b59684dab4d9dff7ec762a1#0e70432fada624136b59684dab4d9dff7ec762a1"
+source = "git+https://github.com/gakonst/nanocode?rev=02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b#02e6ebc90bf33c7a4138d7e0d22a0c688ac1133b"
 
 [[package]]
 name = "nix"
@@ -3953,6 +4055,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "prettyplease"
+version = "0.2.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
+dependencies = [
+ "proc-macro2",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "proc-macro-crate"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4424,18 +4536,19 @@ dependencies = [
 
 [[package]]
 name = "rquickjs"
-version = "0.12.1"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ce6b626d30ecbedaaf8097a04982bc3b081f958f5bdf9b8796be4ac00ee48bb"
+checksum = "a0a22bf72f515cc4189dd7c63d016f6de92a11eee98ddf7dd64794198f6eb34e"
 dependencies = [
  "rquickjs-core",
+ "rquickjs-macro",
 ]
 
 [[package]]
 name = "rquickjs-core"
-version = "0.12.1"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9334dd11023d5ae6c751f64496510a576208802ed1d022ef94afa7639c2c55e"
+checksum = "6657979a24d543e5fc66f32cef2f47ca82ce8eb55cec5f7d59a12b7b570bbf24"
 dependencies = [
  "hashbrown 0.17.1",
  "relative-path 2.0.1",
@@ -4443,11 +4556,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "rquickjs-sys"
-version = "0.12.1"
+name = "rquickjs-macro"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eef73520804cf5aa4876097ac5733058d628c769eba9678e0f4dba5a4ef79703"
+checksum = "0a2ea9adb03b669c933482ff740b683cd36be7cef23891657a8ccb850401d286"
 dependencies = [
+ "convert_case 0.12.0",
+ "indexmap",
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "rquickjs-core",
+ "syn 3.0.3",
+]
+
+[[package]]
+name = "rquickjs-sys"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cee271d0eeba64f0915b846cb7ae02e16faf3dfdffdca91731101d9d30fe3423"
+dependencies = [
+ "bindgen",
  "cc",
 ]
 
@@ -4510,6 +4639,12 @@ name = "rustc-demangle"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b74b56ffa8bb2830709a538c2cbcae9aa062db0d2a42563bfb09bdaae44020eb"
+
+[[package]]
+name = "rustc-hash"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
 name = "rustc_version"
@@ -4870,19 +5005,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_yaml_ng"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b4db627b98b36d4203a7b458cf3573730f2bb591b28871d916dfa9efabfd41f"
-dependencies = [
- "indexmap",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
-]
-
-[[package]]
 name = "serial2"
 version = "0.2.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4967,6 +5089,12 @@ name = "shell-words"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc6fe69c597f9c37bfeeeeeb33da3530379845f10be461a66d16d03eca2ded77"
+
+[[package]]
+name = "shlex"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "shlex"
@@ -5279,7 +5407,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
- "shlex",
+ "shlex 2.0.1",
  "subtle",
  "syntect",
  "tact-memory",

@@ -23,7 +23,7 @@ use crate::{
     tui::components::AppEvent,
 };
 use crossterm::event::EventStream;
-use nanocode::NanocodexError;
+use nanocode::NanocodeError;
 use std::time::Instant;
 use tact_subagents::Subagents;
 
@@ -89,7 +89,7 @@ impl EventLoop {
         &mut self,
         pane: PaneId,
         effort: ReasoningEffort,
-        result: std::result::Result<(), NanocodexError>,
+        result: std::result::Result<(), NanocodeError>,
     ) -> Result<()> {
         let runtime = self.panes.runtime(pane)?;
         let previous = runtime.settings.effort;
@@ -253,7 +253,7 @@ mod tests {
     use super::apply_subagent_config;
     use crate::app::config::{Config, ConfigOverrides, Speed};
     use nanocode::{
-        Model as CodexModel, NanocodexError, ReasoningMode, Thinking, Tools,
+        Model as CodexModel, NanocodeError, ReasoningMode, Thinking, Tools,
         tools::{
             contract::{ToolContext, ToolInput},
             runtime::ToolRuntime,
@@ -290,7 +290,7 @@ mod tests {
                 Speed::Standard,
                 move |_, _| {
                     observed.fetch_add(1, Ordering::SeqCst);
-                    Err(NanocodexError::InvalidRequest(
+                    Err(NanocodeError::InvalidRequest(
                         "test factory admitted".to_owned(),
                     ))
                 },

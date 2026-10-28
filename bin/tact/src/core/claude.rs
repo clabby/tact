@@ -1,7 +1,7 @@
 use crate::{app::config::Config, core::session::AgentSnapshot};
 use futures_util::StreamExt;
 use nanocode::{
-    Agent, AgentEvents, Claude, NanocodexError, Thinking, Tools,
+    Agent, AgentEvents, Claude, NanocodeError, Thinking, Tools,
     agent::{AgentHandle, Result},
     claude::{
         ClaudeClient, ClaudeToolInvocation, ClaudeToolReply, ClaudeTools,
@@ -31,8 +31,8 @@ use tokio::sync::Notify;
 
 mod lifecycle;
 
-fn invalid(error: impl std::fmt::Display) -> NanocodexError {
-    NanocodexError::InvalidRequest(error.to_string())
+fn invalid(error: impl std::fmt::Display) -> NanocodeError {
+    NanocodeError::InvalidRequest(error.to_string())
 }
 
 pub(super) fn tool_runtime(
@@ -110,7 +110,7 @@ pub(super) fn build_client(
         .system(instructions.as_ref())
         .workspace(workspace.to_string_lossy())
         .tools_factory(move |agent| {
-            let callbacks = callbacks.upgrade().ok_or(NanocodexError::AgentStopped)?;
+            let callbacks = callbacks.upgrade().ok_or(NanocodeError::AgentStopped)?;
             let tools = callbacks.tools(agent.session_id())?;
             callbacks
                 .owner
@@ -485,6 +485,10 @@ impl CodeModeObserver for Observer<'_> {
             CodeModeUpdate::NestedCallCompleted(call) => (
                 AgentEventKind::ToolResult,
                 json!({"call_id":call.call_id,"tool":call.name,"status":if call.success {"completed"} else {"failed"},"result":call.output,"structured_result":call.structured_result,"metadata":call.metadata,"duration_ns":call.duration_ns,"started_after_ns":call.started_after_ns}),
+            ),
+            CodeModeUpdate::Notification(notification) => (
+                AgentEventKind::ToolNotification,
+                json!({"call_id":notification.call_id,"text":notification.text}),
             ),
         };
         if let Err(error) = self.bridge.emit(kind, payload) {
