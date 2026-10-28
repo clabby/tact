@@ -5,7 +5,7 @@
 //! a dedicated harness actor (see `crate::harness`), which reports turn starts, completions,
 //! and closes back to the registry; the registry republishes them as [`ScopedAgentUpdate`]s.
 //! `messaging` and `lifecycle` hold the multi-step flows that coordinate registry state with
-//! harnesses, and `policy` decides which models, efforts, and reasoning modes a parent may
+//! harnesses, and `policy` decides which efforts and reasoning modes a parent may
 //! delegate to.
 
 mod lifecycle;

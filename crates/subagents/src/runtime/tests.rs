@@ -24,59 +24,6 @@ use tokio::{
     time::timeout,
 };
 
-#[tokio::test]
-async fn descendants_can_switch_providers_with_local_model_and_shared_effort_caps() {
-    let (updates, _receiver) = mpsc::unbounded_channel();
-    let registry = Registry::new(updates, 1);
-    let codex = |model| Model::Codex(model);
-    let denied = [
-        (codex(CodexModel::Luna), codex(CodexModel::Sol)),
-        (codex(CodexModel::Luna), codex(CodexModel::Astra)),
-        (codex(CodexModel::Sol), codex(CodexModel::Astra)),
-    ];
-    for parent_model in crate::SUPPORTED_MODELS {
-        let parent = registry.reserve("root").await.unwrap();
-        let session_id = format!("parent-{parent_model}");
-        {
-            let mut state = registry.state.lock().await;
-            insert_session(&mut state, "root", parent.id, &session_id, None);
-            state
-                .scopes
-                .get_mut("root")
-                .unwrap()
-                .sessions
-                .get_mut(&parent.id)
-                .unwrap()
-                .descriptor
-                .model = parent_model;
-        }
-        let child = registry.reserve(&session_id).await.unwrap();
-        for child_model in crate::SUPPORTED_MODELS {
-            assert_eq!(
-                child
-                    .validate_child(
-                        "ignored",
-                        child_model,
-                        Thinking::Medium,
-                        ReasoningMode::Standard
-                    )
-                    .is_ok(),
-                !denied.contains(&(parent_model, child_model))
-            );
-            assert!(
-                child
-                    .validate_child(
-                        "ignored",
-                        child_model,
-                        Thinking::High,
-                        ReasoningMode::Standard
-                    )
-                    .is_err()
-            );
-        }
-    }
-}
-
 #[test]
 fn agent_factory_enforces_thinking_cap() {
     let (updates, _receiver) = mpsc::unbounded_channel();
@@ -159,12 +106,7 @@ async fn registered_parent_caps_and_turn_context_follow_its_descriptor() {
         .unwrap();
     let parent = registry.reserve("root").await.unwrap();
     parent
-        .validate_child(
-            Model::Codex(CodexModel::Astra).as_str(),
-            Model::Codex(CodexModel::Sol),
-            Thinking::Medium,
-            ReasoningMode::Standard,
-        )
+        .validate_child(Thinking::Medium, ReasoningMode::Standard)
         .unwrap();
     {
         let mut state = registry.state.lock().await;
@@ -173,18 +115,13 @@ async fn registered_parent_caps_and_turn_context_follow_its_descriptor() {
     let reservation = registry.reserve("sol-child").await.unwrap();
     assert_eq!(reservation.parent, Some(parent.id));
     for (model, thinking, allowed) in [
-        (Model::Codex(CodexModel::Astra), Thinking::Medium, false),
+        (Model::Codex(CodexModel::Astra), Thinking::Medium, true),
         (Model::Codex(CodexModel::Sol), Thinking::High, false),
         (Model::Codex(CodexModel::Sol), Thinking::Medium, true),
         (Model::Codex(CodexModel::Luna), Thinking::Low, true),
     ] {
         let result = reservation
-            .validate_child(
-                Model::Codex(CodexModel::Astra).as_str(),
-                model,
-                thinking,
-                ReasoningMode::Standard,
-            )
+            .validate_child(thinking, ReasoningMode::Standard)
             .map_err(SubagentError::from)
             .and_then(|()| registry.spawn_agent(model, thinking, ReasoningMode::Standard));
         let error = result.err().unwrap();
@@ -198,22 +135,14 @@ async fn registered_parent_caps_and_turn_context_follow_its_descriptor() {
             assert!(arguments.try_recv().is_err());
             assert!(matches!(
                 error,
-                SubagentError::Spawn(
-                    SpawnError::ModelExceedsParent { .. }
-                        | SpawnError::ThinkingExceedsParent { .. }
-                )
+                SubagentError::Spawn(SpawnError::ThinkingExceedsParent { .. })
             ));
         }
     }
     for (cap, allowed) in [(Thinking::Low, false), (Thinking::High, true)] {
         registry.set_agent_max_thinking(cap);
         reservation
-            .validate_child(
-                "ignored for registered children",
-                Model::Codex(CodexModel::Sol),
-                Thinking::Medium,
-                ReasoningMode::Standard,
-            )
+            .validate_child(Thinking::Medium, ReasoningMode::Standard)
             .unwrap();
         let error = registry
             .spawn_agent(

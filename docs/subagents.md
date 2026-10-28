@@ -89,14 +89,12 @@ Their initial prompt contains:
 - coordination rules for peers and descendants; and
 - the required structured-output contract.
 
-The required `model` and `thinking` fields choose the child's capabilities at creation. A child
-cannot exceed the spawning parent's model when both use Codex (Luna < Sol < Astra). Cross-provider
-selection and delegation between Claude models are allowed. Effort order is
+The required `model` and `thinking` fields choose the child's capabilities at creation. An agent
+can choose any model offered by the session, regardless of its own model or provider. Effort order is
 low < medium < high < xhigh < max for every provider. Root agents use the live configured `agent.thinking` cap for
 spawning effort. Registered subagents are additionally bounded by their own assigned effort. For
-example, an Astra root with a high cap can spawn a Sol/medium child, but that child cannot spawn
-Astra or request high effort. The root can launch a stronger verifier after receiving the child's
-result.
+example, an Astra root with a high cap can spawn a Sol/medium child. That child can spawn Astra
+at medium effort or lower, but cannot request high effort.
 
 The live configured `agent.thinking` cap also bounds every new spawn. User changes to this cap
 take effect for subsequent spawns, including those requested by an already active root turn.
@@ -306,7 +304,7 @@ checked in code.
 The implementation preserves these invariants:
 
 - disabling subagents removes their tools and omits their fixed instructions from fresh sessions;
-- Codex children cannot exceed a Codex parent's model; Claude requires explicit opt-in;
+- agents can choose any model offered by the session; Claude requires explicit opt-in;
 - the live configured effort cap bounds every new spawn; registered subagents also cannot delegate above their own assigned effort;
 - Pro children require a spawning agent whose actual mode is Pro, and a child's actual mode is fixed at creation;
 - each new turn receives its own effective model, effort, and reasoning mode in context;
