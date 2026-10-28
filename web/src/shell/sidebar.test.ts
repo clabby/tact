@@ -147,3 +147,51 @@ describe("sidebar titles", () => {
     expect(root.querySelector(".history-row .session-title")!.classList.contains("title-pending")).toBe(true);
   });
 });
+
+describe("sidebar history scope", () => {
+  afterEach(() => {
+    localStorage.clear();
+    document.body.innerHTML = "";
+    delete (globalThis as { window?: unknown }).window;
+    delete (globalThis as { innerWidth?: unknown }).innerWidth;
+    delete (globalThis as { innerHeight?: unknown }).innerHeight;
+  });
+
+  test("lists every checkout by default and the active session's workspace on request", async () => {
+    // The scope menu positions itself inside the viewport.
+    Object.assign(globalThis, { window: dom, innerWidth: 1024, innerHeight: 768 });
+    const scopes: (string | undefined)[] = [];
+    const api = {
+      query: async (_name: string, args: { scope?: string }) => {
+        scopes.push(args.scope);
+        return { sessions: [], next_cursor: null, live_matches: {} };
+      },
+    } as unknown as SidebarHost["api"];
+    const root = document.createElement("aside");
+    document.body.append(root);
+    const sidebar = new Sidebar(root, { ...host, api });
+    const live = (workspace: string) => sidebar.setLive([{ ...session("a", "idle"), workspace }], "a");
+    live("/work");
+    await Bun.sleep(0);
+    const scope = root.querySelector<HTMLButtonElement>(".history-scope")!;
+    const empty = () => root.querySelector(".history-list .list-empty")!.textContent;
+
+    expect(scopes).toEqual(["repository"]);
+    expect(scope.textContent).toBe("All checkouts");
+    expect(empty()).toBe("No saved sessions");
+
+    scope.click();
+    [...document.querySelectorAll<HTMLButtonElement>(".menu-item")].find((item) => item.textContent?.includes("This workspace"))!.click();
+    await Bun.sleep(0);
+
+    expect(scopes).toEqual(["repository", "workspace"]);
+    expect(scope.textContent).toBe("This workspace");
+    expect(empty()).toBe("No saved sessions in this workspace");
+
+    live("/work");
+    live("/work-checkout");
+    await Bun.sleep(0);
+
+    expect(scopes).toEqual(["repository", "workspace", "workspace"]);
+  });
+});

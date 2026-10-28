@@ -1827,7 +1827,11 @@ impl RootNode {
         } else {
             SessionPickerMode::Resume
         };
-        self.overlay = Some(Overlay::Sessions(SessionPicker::new(sessions, mode)));
+        self.overlay = Some(Overlay::Sessions(SessionPicker::new(
+            sessions,
+            mode,
+            self.workspace.clone(),
+        )));
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 

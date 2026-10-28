@@ -94,6 +94,26 @@ impl SessionSummary {
     }
 }
 
+/// Which stored sessions a session list offers, relative to the workspace it was opened from.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SessionListScope {
+    /// Sessions recorded in any checkout of the workspace's repository.
+    #[default]
+    Repository,
+    /// Sessions recorded in the workspace itself.
+    Workspace,
+}
+
+impl SessionListScope {
+    pub(crate) const fn toggled(self) -> Self {
+        match self {
+            Self::Repository => Self::Workspace,
+            Self::Workspace => Self::Repository,
+        }
+    }
+}
+
 /// The indices of the `sessions` that match `query`, best first, as the resume picker and web
 /// history list them. `sessions` must be newest first, which breaks every tie.
 ///
