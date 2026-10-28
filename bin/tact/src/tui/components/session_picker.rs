@@ -13,8 +13,13 @@
 //! conversations emits [SessionPickerEffect::Search]; the host answers with
 //! [SessionPicker::set_conversation_matches], and until then the picker matches
 //! the sessions' own fields only.
+//!
+//! Rows wrap rather than clip, so a session's workspace path is always visible.
+//! Only its title and conversation match are capped, because a session without
+//! a generated title uses its whole first prompt as one.
 
 use super::{
+    fit::wrap,
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
@@ -51,6 +56,13 @@ const MENTION_KEY_BINDINGS: [(&str, &str); 4] = [
     ("esc", "close"),
 ];
 const SEARCH_LABEL: &str = "Search: ";
+const HIGHLIGHT_SYMBOL: &str = "› ";
+const WIDTH: u16 = 100;
+const HEIGHT: u16 = 28;
+/// The most rows a session's title takes before it is cut.
+const TITLE_ROWS: usize = 2;
+/// The most rows a conversation match takes before it is cut.
+const SNIPPET_ROWS: usize = 2;
 
 pub(super) enum SessionPickerEvent {
     Terminal(Event),
@@ -327,48 +339,65 @@ impl SessionPicker {
             );
             return;
         }
-        let items = self.matches.iter().map(|index| {
-            let session = &self.sessions[*index];
-            let title = format!(
-                "{} · {}",
-                format_age(session.started_at_unix_ms),
-                session.session_id,
-            );
-            let detail = format!(
-                "{} · {} · {:?} · {}",
-                session.preview,
-                session.model,
-                session.effort,
-                session.workspace.display()
-            );
-            let mut lines = vec![
-                Line::from(Span::styled(
-                    title,
-                    Style::default()
-                        .fg(theme.text())
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(detail, Style::default().fg(theme.muted()))),
-            ];
-            let found = self
-                .current_conversation()
-                .and_then(|conversation| conversation.get(&session.session_id));
-            if let Some(found) = found {
-                lines.push(Line::from(Span::styled(
-                    format!("“{}”", sanitize_terminal_text_inline(&found.snippet)),
-                    Style::default()
-                        .fg(theme.muted())
-                        .add_modifier(Modifier::ITALIC),
-                )));
-            }
-            ListItem::new(lines)
-        });
+        let width = usize::from(area.width).saturating_sub(HIGHLIGHT_SYMBOL.width());
+        let items = self
+            .matches
+            .iter()
+            .map(|index| self.session_item(&self.sessions[*index], width, theme));
         let list = List::new(items)
-            .highlight_symbol("› ")
+            .highlight_symbol(HIGHLIGHT_SYMBOL)
             .highlight_style(Style::default().fg(theme.accent()));
         let selected = (!self.matches.is_empty()).then_some(self.selected);
         let mut state = ListState::default().with_selected(selected);
         frame.render_stateful_widget(list, area, &mut state);
+    }
+
+    /// A session's rows, wrapped to `width`: a heading, the title, the workspace when the scope
+    /// spans several, and the conversation match when a search found one.
+    fn session_item(
+        &self,
+        session: &SessionSummary,
+        width: usize,
+        theme: &Theme,
+    ) -> ListItem<'static> {
+        let muted = Style::default().fg(theme.muted());
+        let mut lines = Vec::new();
+        let mut push = |text: &str, max_rows: usize, style: Style| {
+            lines.extend(
+                wrap(text, width, max_rows)
+                    .into_iter()
+                    .map(|row| Line::styled(row, style)),
+            );
+        };
+        let heading = format!(
+            "{} · {} · {:?} · {}",
+            format_age(session.started_at_unix_ms),
+            session.model,
+            session.effort,
+            session.session_id,
+        );
+        push(
+            &heading,
+            usize::MAX,
+            Style::default()
+                .fg(theme.text())
+                .add_modifier(Modifier::BOLD),
+        );
+        push(&session.preview, TITLE_ROWS, muted);
+        if self.scope == SessionListScope::Repository {
+            push(&shorten_home(&session.workspace), usize::MAX, muted);
+        }
+        let found = self
+            .current_conversation()
+            .and_then(|conversation| conversation.get(&session.session_id));
+        if let Some(found) = found {
+            push(
+                &format!("“{}”", sanitize_terminal_text_inline(&found.snippet)),
+                SNIPPET_ROWS,
+                muted.add_modifier(Modifier::ITALIC),
+            );
+        }
+        ListItem::new(lines)
     }
 }
 
@@ -389,7 +418,7 @@ impl Component for SessionPicker {
             SessionPickerMode::Resume => ("Resume session", &RESUME_KEY_BINDINGS),
             SessionPickerMode::Mention => ("Mention session", &MENTION_KEY_BINDINGS),
         };
-        let layout = Floating::new(title, 76, 18, key_bindings).render(frame, area, theme);
+        let layout = Floating::new(title, WIDTH, HEIGHT, key_bindings).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
@@ -522,6 +551,36 @@ mod tests {
 
         picker.update(ctrl_f());
         assert_eq!(picker.matches, [0, 1]);
+    }
+
+    #[test]
+    fn long_rows_wrap_so_the_workspace_stays_visible() {
+        let workspace = "/srv/checkouts/tact/worktrees/resume-picker-scope-and-wrapping";
+        let title = "why does the resume picker cut off long rows? ".repeat(5);
+        let mut picker = SessionPicker::new(
+            vec![summary_in("one", &title, workspace)],
+            SessionPickerMode::Resume,
+            PathBuf::from(workspace),
+        );
+
+        let rows = render(&mut picker, 70, 24);
+        assert!(rows.iter().any(|row| row.contains("Scope: All checkouts")));
+        assert!(rows.iter().any(|row| row.contains(workspace)));
+        assert_eq!(
+            rows.iter().filter(|row| row.contains("cut off")).count(),
+            2,
+            "a long title is cut after two rows"
+        );
+        assert_eq!(rows.iter().filter(|row| row.contains('…')).count(), 1);
+
+        picker.update(ctrl_f());
+        let rows = render(&mut picker, 70, 24);
+        let mentions = rows
+            .iter()
+            .filter(|row| row.contains("scope-and-wrapping"))
+            .collect::<Vec<_>>();
+        assert_eq!(mentions.len(), 1, "only the scope row names the workspace");
+        assert!(mentions[0].contains("Scope: This workspace"));
     }
 
     #[test]
