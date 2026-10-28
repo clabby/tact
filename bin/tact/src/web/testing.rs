@@ -5,15 +5,19 @@ use super::{
     assets::AssetStore,
     bridge::{self, LoopEnd},
     hub::Hub,
+    monitor::{self, Choice, Monitor, MonitorModel, Settings},
     review::{self, AgentPrompt, ReviewAgent, ReviewRegistry},
     token::MachineToken,
     workspaces::Workspaces,
 };
 use crate::{
     app::config::{ReasoningEffort, ReasoningMode, Speed},
-    core::protocol::{
-        AuxiliaryError, Busy, CommandError, Draft, Publication, Reply, Request as LoopRequest,
-        SessionInfo,
+    core::{
+        direct::DirectError,
+        protocol::{
+            AuxiliaryError, Busy, CommandError, Draft, Publication, Reply, Request as LoopRequest,
+            SessionInfo,
+        },
     },
 };
 use axum::{
@@ -22,8 +26,19 @@ use axum::{
     http::{HeaderMap, Method, Request, StatusCode, header},
 };
 use futures_util::future::BoxFuture;
-use std::{fs, future::Future, path::Path, process::Command, sync::Arc};
+use nanocode::{Model as CodexModel, Thinking};
+use std::{
+    collections::VecDeque,
+    fs,
+    future::Future,
+    path::Path,
+    process::Command,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tact_subagents::HarnessModel;
 use tempfile::TempDir;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
 
@@ -63,6 +78,94 @@ pub(super) fn idle_agent() -> Arc<dyn ReviewAgent> {
     agent(|_| async { Ok("<p>Overview</p>".to_owned()) })
 }
 
+/// A monitor model that answers with scripted replies and records what it was asked.
+pub(super) struct FakeModel {
+    /// The current settings; a test can change them as a configuration reload would.
+    pub(super) settings: Mutex<Settings>,
+    /// The model the next check runs on; a test can switch it between checks.
+    pub(super) model: Mutex<HarnessModel>,
+    /// Replies in order; an exhausted script answers with an empty check.
+    pub(super) replies: Mutex<VecDeque<Result<String, DirectError>>>,
+    /// The input of every request, in order.
+    pub(super) inputs: Mutex<Vec<String>>,
+    /// When set, each request waits for a permit, so a test can hold a check open.
+    pub(super) gate: Option<Arc<Semaphore>>,
+    /// When set, each resolution takes a permit, so a test can hold a check between deciding to
+    /// run and reading its input.
+    pub(super) resolve_gate: Option<Arc<Semaphore>>,
+    /// When set, the model reports this reason instead of being available.
+    pub(super) unavailable: Mutex<Option<String>>,
+}
+
+impl Default for FakeModel {
+    fn default() -> Self {
+        Self {
+            settings: Mutex::new(Settings {
+                enabled: true,
+                interval: Duration::from_secs(120),
+            }),
+            model: Mutex::new(HarnessModel::Codex(CodexModel::Luna)),
+            replies: Mutex::default(),
+            inputs: Mutex::default(),
+            gate: None,
+            resolve_gate: None,
+            unavailable: Mutex::default(),
+        }
+    }
+}
+
+impl MonitorModel for FakeModel {
+    fn settings(&self) -> Settings {
+        *self.settings.lock().unwrap()
+    }
+
+    fn resolve(&self) -> BoxFuture<'static, Result<Choice, String>> {
+        let resolved = match self.unavailable.lock().unwrap().clone() {
+            Some(detail) => Err(detail),
+            None => Ok(Choice {
+                model: *self.model.lock().unwrap(),
+                thinking: Thinking::Medium,
+            }),
+        };
+        let gate = self.resolve_gate.clone();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.acquire().await.unwrap().forget();
+            }
+            resolved
+        })
+    }
+
+    fn complete(
+        &self,
+        _choice: Choice,
+        _instructions: &'static str,
+        input: String,
+    ) -> BoxFuture<'static, Result<String, DirectError>> {
+        self.inputs.lock().unwrap().push(input);
+        let reply = self
+            .replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Ok(r#"{"sessions": []}"#.to_owned()));
+        let gate = self.gate.clone();
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.acquire().await.unwrap().forget();
+            }
+            reply
+        })
+    }
+}
+
+/// A monitor configured off, for servers whose tests do not involve it.
+pub(super) fn disabled_monitor() -> Arc<dyn MonitorModel> {
+    let model = FakeModel::default();
+    model.settings.lock().unwrap().enabled = false;
+    Arc::new(model)
+}
+
 impl Harness {
     pub(super) fn new() -> Self {
         Self::with(repository(), idle_agent())
@@ -89,6 +192,7 @@ impl Harness {
             agent,
             shutdown.clone(),
         );
+        let monitor = Monitor::new(hub.clone(), disabled_monitor(), shutdown.clone());
         let token = MachineToken::load_or_create(&home.path().join("web")).unwrap();
         let state = Arc::new(AppState {
             token,
@@ -104,7 +208,10 @@ impl Harness {
             client: reqwest::Client::new(),
             shutdown: shutdown.clone(),
         });
-        let app = api::router(Arc::clone(&state), review::router(review));
+        let app = api::router(
+            Arc::clone(&state),
+            review::router(review).merge(monitor::router(monitor)),
+        );
         Self {
             app,
             terminal,

@@ -64,6 +64,8 @@ export class Composer {
   private mirrorTimer = 0;
   private submitting = false;
   private editingQueue: number | null = null;
+  /** Text for a session whose snapshot has not arrived yet; see `appendTo`. */
+  private waiting: { session: string; markdown: string } | null = null;
   private mention: { at: Mention | null; items: MentionItem[]; selected: number } | null = null;
   private interruptTimer = 0;
   private mentionRequest: AbortController | null = null;
@@ -143,6 +145,9 @@ export class Composer {
       this.editingQueue = null;
       this.closeMentions();
       this.hideMessage();
+      const waiting = this.waiting;
+      this.waiting = null;
+      if (waiting && waiting.session === session?.id) this.append(waiting.markdown);
     }
     this.root.classList.toggle("disabled", !session);
     this.textarea.disabled = !session;
@@ -166,6 +171,16 @@ export class Composer {
   append(markdown: string) {
     const current = this.textarea.value.replace(/\s+$/, "");
     this.replaceText(current ? `${current}\n\n${markdown.trim()}` : markdown.trim());
+  }
+
+  /**
+   * Appends to `session`'s draft. The composer edits the draft of the session whose snapshot it
+   * shows, and a session just made active has none yet: its text waits for that snapshot rather
+   * than landing in the previous session's draft, and is dropped if another session is shown first.
+   */
+  appendTo(session: string, markdown: string) {
+    if (session === this.session?.id) this.append(markdown);
+    else this.waiting = { session, markdown };
   }
 
   /** Replaces the whole draft, e.g. with a recent prompt. */

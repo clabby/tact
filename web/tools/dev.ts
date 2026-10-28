@@ -35,6 +35,8 @@ if (!await buildAssets()) process.exit(1);
 
 const tact = new MockTact();
 tact.startAmbientWork();
+// TACT_DEV_MONITOR=unavailable shows the Monitor as it is without a monitor model.
+if (process.env.TACT_DEV_MONITOR === "unavailable") tact.makeMonitorUnavailable();
 setInterval(() => tact.touchWorkspace(), 20_000);
 
 /** One review context per checkout, as the server keeps them. */
@@ -156,6 +158,7 @@ async function api(request: Request, url: URL): Promise<Response> {
     await Bun.sleep(40);
     return Response.json(tact.query(body.query as QueryName, body.args));
   }
+  if (path === "monitor") return Response.json(tact.monitor(body.refresh === true));
   return reviewCommand(path, body);
 }
 

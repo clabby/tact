@@ -9,7 +9,8 @@ import { imageSource as localImageSource, viewerUrl, type FileBase } from "../co
 import type { TranscriptData } from "../core/store";
 import type { Theme } from "../core/theme";
 import { promptParts } from "./user-prompt";
-import { presentDetail, TOOL_DEFAULT_OPEN, toolLabel } from "./tool-detail";
+import { presentDetail, TOOL_DEFAULT_OPEN } from "./tool-detail";
+import { toolLabel } from "./tool-label";
 import { receivedSessionMessageElement, renderThread, type Participants } from "./directed";
 import { runLabel, runSpan, type ToolEntry } from "./routine";
 import { resultText, turnMarkdown, turnOutcome, type TurnOutcome } from "./outcome";

@@ -1,7 +1,7 @@
 import { firstLine } from "../core/format";
 import type { TranscriptData } from "../core/store";
 import type { Subagent } from "../core/wire";
-import { toolLabel } from "./tool-detail";
+import { toolLabel } from "./tool-label";
 
 /**
  * The agent a `spawn_agent` call started, read from its result: a receipt object, its JSON text, or

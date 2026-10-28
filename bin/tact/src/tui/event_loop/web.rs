@@ -26,7 +26,7 @@ use std::{
     path::Path,
     time::{Duration, Instant},
 };
-use tokio::task::JoinHandle;
+use tokio::{sync::watch, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 /// How long the web server may take to stop once the terminal has been restored.
@@ -40,9 +40,11 @@ pub(super) struct WebServer {
 
 impl WebServer {
     /// Starts the server beside the terminal. It never stops the terminal: its failure only
-    /// changes the status that "Open in browser" reports.
+    /// changes the status that "Open in browser" reports. `updates` carries the configuration
+    /// as it reloads.
     pub(super) fn spawn(
         config: &Config,
+        updates: watch::Receiver<Config>,
         workspace: &Path,
         end: WebEnd,
         shutdown: &CancellationToken,
@@ -51,7 +53,7 @@ impl WebServer {
         let task = config
             .web()
             .enabled()
-            .then(|| web::spawn(config, workspace, end, shutdown.clone()));
+            .then(|| web::spawn(updates, workspace, end, shutdown.clone()));
         Self { shutdown, task }
     }
 

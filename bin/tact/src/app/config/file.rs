@@ -170,6 +170,19 @@ pub(super) struct WebConfigFile {
     pub(super) public_url: Option<String>,
     pub(super) tailscale: Option<bool>,
     pub(super) max_live_sessions: Option<NonZeroUsize>,
+    pub(super) monitor: WebMonitorConfigFile,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(super) struct WebMonitorConfigFile {
+    pub(super) enabled: Option<bool>,
+    /// A model id, or blank for Tact's default model. Parsed by the effective section so that a
+    /// blank value stays valid.
+    pub(super) model: Option<String>,
+    /// A reasoning effort, or blank for the inherited or catalog default. Parsed like `model`.
+    pub(super) thinking: Option<String>,
+    pub(super) interval_seconds: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]

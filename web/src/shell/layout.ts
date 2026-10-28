@@ -2,8 +2,26 @@
 
 export type Viewport = "phone" | "tablet" | "desktop";
 
-/** The two full-width views of the main area: the conversation, and the review of its changes. */
-export type View = "chat" | "review";
+/**
+ * The full-width views of the main area: the active session's conversation, the review of its
+ * changes, and the Monitor over every live session.
+ */
+export type View = "chat" | "review" | "monitor";
+
+/**
+ * The Monitor exists only while at least this many sessions are live: with one, its chat already
+ * shows everything. The server's monitor checks follow the same rule.
+ */
+export const MONITOR_MIN_LIVE = 2;
+
+export function monitorAvailable(liveSessions: number) {
+  return liveSessions >= MONITOR_MIN_LIVE;
+}
+
+/** Whether the palette offers to open the Monitor: it exists and is not already shown. */
+export function offersMonitor(layout: Layout, liveSessions: number) {
+  return layout.view !== "monitor" && monitorAvailable(liveSessions);
+}
 
 export type Layout = {
   viewport: Viewport;
@@ -24,7 +42,10 @@ export type LayoutAction =
   | { type: "resize"; width: number }
   | { type: "toggle-drawer"; open?: boolean }
   | { type: "toggle-sidebar" }
-  | { type: "view"; view: View }
+  /** Shows `view`; the Monitor only while `liveSessions` lets it exist. */
+  | { type: "view"; view: View; liveSessions: number }
+  /** The number of live sessions changed. */
+  | { type: "live"; count: number }
   | { type: "escape" };
 
 export function loadLayout(width: number, sidebarCollapsed = false): Layout {
@@ -48,7 +69,12 @@ export function layoutReducer(layout: Layout, action: LayoutAction): Layout {
         ? { ...layout, sidebarCollapsed: !layout.sidebarCollapsed }
         : { ...layout, drawerOpen: !layout.drawerOpen };
     case "view":
-      return action.view === layout.view ? layout : { ...layout, view: action.view, drawerOpen: false };
+      // A command offered while the Monitor existed may run after a session closed.
+      if (action.view === layout.view || (action.view === "monitor" && !monitorAvailable(action.liveSessions))) return layout;
+      return { ...layout, view: action.view, drawerOpen: false };
+    case "live":
+      // A Monitor left with too few live sessions gives way to the chat.
+      return layout.view === "monitor" && !monitorAvailable(action.count) ? { ...layout, view: "chat" } : layout;
     case "escape":
       return layout.drawerOpen ? { ...layout, drawerOpen: false } : layout;
   }
