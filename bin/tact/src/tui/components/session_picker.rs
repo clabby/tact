@@ -1,9 +1,10 @@
 //! Searchable picker for resumable persisted sessions.
 //!
 //! [SessionPicker] keeps the [SessionSummary] list, its own search query, the
+//! active [SessionListScope] (every checkout of the repository by default), the
 //! matching indices, the highlighted row, and a [SessionPickerMode] that decides
 //! what selection means. It consumes typed characters, pastes, and keys through
-//! [SessionPickerEvent::Terminal]. Enter or Tab emits
+//! [SessionPickerEvent::Terminal]; Ctrl+F toggles the scope. Enter or Tab emits
 //! [SessionPickerEffect::Resume] or [SessionPickerEffect::Mention] with the
 //! highlighted session id, depending on the mode. Esc, or Backspace on an empty
 //! query, emits [SessionPickerEffect::Dismiss].
@@ -20,26 +21,35 @@ use super::{
 use crate::{
     app::theme::Theme,
     core::{
-        session::{ConversationMatches, SessionSummary, search_sessions},
+        session::{ConversationMatches, SessionListScope, SessionSummary, search_sessions},
         storage::search_terms,
     },
-    tui::format::{format_age, sanitize_terminal_text_inline},
+    tui::format::{format_age, sanitize_terminal_text_inline, shorten_home},
 };
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
+use std::path::PathBuf;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const RESUME_KEY_BINDINGS: [(&str, &str); 3] =
-    [("↑↓", "move"), ("enter/tab", "resume"), ("esc", "close")];
-const MENTION_KEY_BINDINGS: [(&str, &str); 3] =
-    [("↑↓", "move"), ("enter/tab", "insert"), ("esc", "close")];
+const RESUME_KEY_BINDINGS: [(&str, &str); 4] = [
+    ("↑↓", "move"),
+    ("enter/tab", "resume"),
+    ("ctrl+f", "scope"),
+    ("esc", "close"),
+];
+const MENTION_KEY_BINDINGS: [(&str, &str); 4] = [
+    ("↑↓", "move"),
+    ("enter/tab", "insert"),
+    ("ctrl+f", "scope"),
+    ("esc", "close"),
+];
 const SEARCH_LABEL: &str = "Search: ";
 
 pub(super) enum SessionPickerEvent {
@@ -63,6 +73,10 @@ pub(super) enum SessionPickerMode {
 
 pub(super) struct SessionPicker {
     sessions: Vec<SessionSummary>,
+    /// The workspace of the pane the picker was opened from, which
+    /// [SessionListScope::Workspace] keeps sessions of.
+    workspace: PathBuf,
+    scope: SessionListScope,
     query: String,
     matches: Vec<usize>,
     selected: usize,
@@ -72,10 +86,16 @@ pub(super) struct SessionPicker {
 }
 
 impl SessionPicker {
-    pub(super) fn new(sessions: Vec<SessionSummary>, mode: SessionPickerMode) -> Self {
+    pub(super) fn new(
+        sessions: Vec<SessionSummary>,
+        mode: SessionPickerMode,
+        workspace: PathBuf,
+    ) -> Self {
         let matches = (0..sessions.len()).collect();
         Self {
             sessions,
+            workspace,
+            scope: SessionListScope::default(),
             query: String::new(),
             matches,
             selected: 0,
@@ -94,12 +114,8 @@ impl SessionPicker {
         if query != self.query {
             return ComponentUpdate::none();
         }
-        let highlighted = self.matches.get(self.selected).copied();
         self.conversation = (query, matches);
-        self.refresh_matches();
-        self.selected = highlighted
-            .and_then(|index| self.matches.iter().position(|&found| found == index))
-            .unwrap_or(0);
+        self.refresh_matches_keeping_highlight();
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
@@ -128,10 +144,7 @@ impl SessionPicker {
         true
     }
 
-    fn update_key(
-        &mut self,
-        key: crossterm::event::KeyEvent,
-    ) -> ComponentUpdate<SessionPickerEffect> {
+    fn update_key(&mut self, key: KeyEvent) -> ComponentUpdate<SessionPickerEffect> {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return ComponentUpdate::none();
         }
@@ -156,6 +169,11 @@ impl SessionPicker {
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             KeyCode::Enter | KeyCode::Tab => self.select(),
+            KeyCode::Char('f') if key.modifiers == KeyModifiers::CONTROL => {
+                self.scope = self.scope.toggled();
+                self.refresh_matches_keeping_highlight();
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
             KeyCode::Char(character)
                 if !key
                     .modifiers
@@ -206,6 +224,20 @@ impl SessionPicker {
         let empty = ConversationMatches::new();
         let conversation = self.current_conversation().unwrap_or(&empty);
         self.matches = search_sessions(&self.sessions, &self.query, conversation);
+        if self.scope == SessionListScope::Workspace {
+            self.matches
+                .retain(|&index| self.sessions[index].workspace == self.workspace);
+        }
+    }
+
+    /// Refreshes the matches while the highlighted session stays highlighted, when it still
+    /// matches.
+    fn refresh_matches_keeping_highlight(&mut self) {
+        let highlighted = self.matches.get(self.selected).copied();
+        self.refresh_matches();
+        self.selected = highlighted
+            .and_then(|index| self.matches.iter().position(|&found| found == index))
+            .unwrap_or(0);
     }
 
     fn current_conversation(&self) -> Option<&ConversationMatches> {
@@ -232,14 +264,62 @@ impl SessionPicker {
         );
     }
 
+    fn render_scope(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+        if area.is_empty() {
+            return;
+        }
+        let muted = Style::default().fg(theme.muted());
+        let label = match self.scope {
+            SessionListScope::Repository => "All checkouts",
+            SessionListScope::Workspace => "This workspace",
+        };
+        let mut spans = vec![
+            Span::raw("  "),
+            Span::styled("Scope: ", muted),
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(theme.text())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+        if self.scope == SessionListScope::Workspace {
+            spans.push(Span::styled(" · ", muted));
+            // The end of a path names the checkout, so a path that does not fit loses its start.
+            let path = shorten_home(&self.workspace);
+            let used = spans.iter().map(Span::width).sum::<usize>();
+            let available = usize::from(area.width).saturating_sub(used);
+            let path = if path.width() > available {
+                format!("…{}", visible_tail(&path, available.saturating_sub(1)))
+            } else {
+                path
+            };
+            spans.push(Span::styled(path, muted));
+        }
+        let block = Block::new()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(theme.border()));
+        frame.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
+    }
+
     fn render_sessions(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         if area.is_empty() {
             return;
         }
         if self.matches.is_empty() {
-            let message = match self.mode {
-                SessionPickerMode::Resume => "  No resumable sessions found",
-                SessionPickerMode::Mention => "  No other sessions found",
+            let message = match (self.mode, self.scope) {
+                (SessionPickerMode::Resume, SessionListScope::Repository) => {
+                    "  No resumable sessions found"
+                }
+                (SessionPickerMode::Resume, SessionListScope::Workspace) => {
+                    "  No resumable sessions in this workspace"
+                }
+                (SessionPickerMode::Mention, SessionListScope::Repository) => {
+                    "  No other sessions found"
+                }
+                (SessionPickerMode::Mention, SessionListScope::Workspace) => {
+                    "  No other sessions in this workspace"
+                }
             };
             frame.render_widget(
                 Paragraph::new(message).style(Style::default().fg(theme.muted())),
@@ -317,12 +397,21 @@ impl Component for SessionPicker {
             height: 1,
             ..layout.body
         };
+        let scope = Rect {
+            y: search.bottom(),
+            height: layout.body.height.saturating_sub(search.height).min(2),
+            ..layout.body
+        };
         let sessions = Rect {
-            y: layout.body.y + 1,
-            height: layout.body.height.saturating_sub(1),
+            y: scope.bottom(),
+            height: layout
+                .body
+                .height
+                .saturating_sub(search.height + scope.height),
             ..layout.body
         };
         self.render_search(frame, search, theme);
+        self.render_scope(frame, scope, theme);
         self.render_sessions(frame, sessions, theme);
     }
 }
@@ -344,14 +433,25 @@ mod tests {
         Component, SessionPicker, SessionPickerEffect, SessionPickerEvent, SessionPickerMode,
     };
     use crate::{
-        app::config::{ReasoningEffort, ReasoningMode},
+        app::{
+            config::{ReasoningEffort, ReasoningMode},
+            theme::Theme,
+        },
         core::{session::SessionSummary, storage::ConversationMatch},
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{Terminal, backend::TestBackend};
     use std::path::PathBuf;
 
     fn key(code: KeyCode) -> SessionPickerEvent {
         SessionPickerEvent::Terminal(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+    }
+
+    fn ctrl_f() -> SessionPickerEvent {
+        SessionPickerEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )))
     }
 
     fn summary(id: &str, preview: &str) -> SessionSummary {
@@ -368,9 +468,87 @@ mod tests {
         }
     }
 
+    fn summary_in(id: &str, preview: &str, workspace: &str) -> SessionSummary {
+        SessionSummary {
+            workspace: PathBuf::from(workspace),
+            ..summary(id, preview)
+        }
+    }
+
+    /// A picker opened from a pane working in `/work`.
+    fn open_picker(sessions: Vec<SessionSummary>, mode: SessionPickerMode) -> SessionPicker {
+        SessionPicker::new(sessions, mode, PathBuf::from("/work"))
+    }
+
+    fn render(picker: &mut SessionPicker, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| picker.render(frame, frame.area(), &Theme::default()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|row| {
+                (0..width)
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ctrl_f_toggles_between_all_checkouts_and_this_workspace() {
+        let mut picker = open_picker(
+            vec![
+                summary_in("here", "fix parser", "/work"),
+                summary_in("elsewhere", "fix lexer", "/work-feature"),
+                summary_in("also-here", "write docs", "/work"),
+            ],
+            SessionPickerMode::Resume,
+        );
+        picker.update(key(KeyCode::Down));
+        picker.update(key(KeyCode::Down));
+
+        picker.update(ctrl_f());
+        assert_eq!(picker.matches, [0, 2]);
+        assert_eq!(
+            picker.update(key(KeyCode::Enter)).effects,
+            [SessionPickerEffect::Resume("also-here".to_owned())],
+            "the highlighted session stays highlighted"
+        );
+        for character in "fix".chars() {
+            picker.update(key(KeyCode::Char(character)));
+        }
+        assert_eq!(picker.matches, [0], "search stays within the scope");
+
+        picker.update(ctrl_f());
+        assert_eq!(picker.matches, [0, 1]);
+    }
+
+    #[test]
+    fn this_workspace_scope_names_the_workspace_and_keeps_the_end_of_a_long_path() {
+        let workspace = "/srv/checkouts/tact/worktrees/resume-picker-scope-and-wrapping";
+        let mut picker = SessionPicker::new(
+            vec![summary_in("one", "fix parser", workspace)],
+            SessionPickerMode::Resume,
+            PathBuf::from(workspace),
+        );
+        let scope_row = |picker: &mut SessionPicker| {
+            render(picker, 70, 24)
+                .into_iter()
+                .find(|row| row.contains("Scope:"))
+                .unwrap()
+        };
+
+        assert!(scope_row(&mut picker).contains("Scope: All checkouts"));
+        picker.update(ctrl_f());
+        let row = scope_row(&mut picker);
+        assert!(row.contains("Scope: This workspace · …"), "{row}");
+        assert!(row.contains("/resume-picker-scope-and-wrapping│"), "{row}");
+    }
+
     #[test]
     fn conversation_matches_for_the_current_query_join_the_results() {
-        let mut picker = SessionPicker::new(
+        let mut picker = open_picker(
             vec![summary("one", "fix parser"), summary("two", "write docs")],
             SessionPickerMode::Resume,
         );
@@ -406,7 +584,7 @@ mod tests {
 
     #[test]
     fn title_updates_refresh_search_and_preserve_the_selected_session() {
-        let mut picker = SessionPicker::new(
+        let mut picker = open_picker(
             vec![summary("one", "fix parser"), summary("two", "write docs")],
             SessionPickerMode::Resume,
         );
@@ -435,7 +613,7 @@ mod tests {
 
     #[test]
     fn search_selects_a_session_by_preview() {
-        let mut picker = SessionPicker::new(
+        let mut picker = open_picker(
             vec![summary("one", "fix parser"), summary("two", "write docs")],
             SessionPickerMode::Resume,
         );
@@ -450,7 +628,7 @@ mod tests {
 
     #[test]
     fn mention_mode_returns_a_reference_instead_of_resuming() {
-        let mut picker = SessionPicker::new(
+        let mut picker = open_picker(
             vec![summary("one", "fix parser")],
             SessionPickerMode::Mention,
         );
@@ -463,7 +641,7 @@ mod tests {
 
     #[test]
     fn tab_resumes_the_selected_session() {
-        let mut picker = SessionPicker::new(
+        let mut picker = open_picker(
             vec![summary("one", "fix parser"), summary("two", "write docs")],
             SessionPickerMode::Resume,
         );
@@ -479,7 +657,7 @@ mod tests {
 
     #[test]
     fn arrows_navigate_while_typing_continues_to_search() {
-        let mut picker = SessionPicker::new(
+        let mut picker = open_picker(
             vec![summary("one", "fix parser"), summary("two", "write docs")],
             SessionPickerMode::Resume,
         );
