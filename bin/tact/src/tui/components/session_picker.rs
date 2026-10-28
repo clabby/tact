@@ -39,7 +39,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -56,8 +56,15 @@ const MENTION_KEY_BINDINGS: [(&str, &str); 4] = [
     ("esc", "close"),
 ];
 const SEARCH_LABEL: &str = "Search: ";
+const SCOPE_LABEL: &str = "  Scope: ";
+const REPOSITORY_SCOPE: &str = "All checkouts";
+const WORKSPACE_SCOPE: &str = "This workspace";
+const SEPARATOR: &str = " · ";
 const HIGHLIGHT_SYMBOL: &str = "› ";
-const WIDTH: u16 = 100;
+/// The narrowest the picker gets, so that a short list does not look cramped.
+const MIN_WIDTH: u16 = 76;
+/// The widest the picker gets. Longer headings and paths wrap.
+const MAX_WIDTH: u16 = 120;
 const HEIGHT: u16 = 28;
 /// The most rows a session's title takes before it is cut.
 const TITLE_ROWS: usize = 2;
@@ -89,6 +96,8 @@ pub(super) struct SessionPicker {
     /// [SessionListScope::Workspace] keeps sessions of.
     workspace: PathBuf,
     scope: SessionListScope,
+    /// Fixed when the picker opens, so that searching and switching scopes do not resize it.
+    width: u16,
     query: String,
     matches: Vec<usize>,
     selected: usize,
@@ -104,16 +113,44 @@ impl SessionPicker {
         workspace: PathBuf,
     ) -> Self {
         let matches = (0..sessions.len()).collect();
+        let width = Self::fitting_width(&sessions, &workspace);
         Self {
             sessions,
             workspace,
             scope: SessionListScope::default(),
+            width,
             query: String::new(),
             matches,
             selected: 0,
             mode,
             conversation: Default::default(),
         }
+    }
+
+    /// The width that fits every session's heading and workspace path, and the scope row naming
+    /// `workspace`, between [MIN_WIDTH] and [MAX_WIDTH]. Titles wrap to whatever width this
+    /// leaves.
+    fn fitting_width(sessions: &[SessionSummary], workspace: &Path) -> u16 {
+        let widest_row = sessions
+            .iter()
+            .flat_map(|session| {
+                [
+                    heading(session).width(),
+                    shorten_home(&session.workspace).width(),
+                ]
+            })
+            .max()
+            .unwrap_or(0);
+        let scope_row = [SCOPE_LABEL, WORKSPACE_SCOPE, SEPARATOR]
+            .iter()
+            .map(|text| text.width())
+            .sum::<usize>()
+            + shorten_home(workspace).width();
+        let borders = 2;
+        let width = (HIGHLIGHT_SYMBOL.width() + widest_row).max(scope_row) + borders;
+        u16::try_from(width)
+            .unwrap_or(u16::MAX)
+            .clamp(MIN_WIDTH, MAX_WIDTH)
     }
 
     /// Applies the conversation matches for `query` unless the query has changed since. The
@@ -282,12 +319,11 @@ impl SessionPicker {
         }
         let muted = Style::default().fg(theme.muted());
         let label = match self.scope {
-            SessionListScope::Repository => "All checkouts",
-            SessionListScope::Workspace => "This workspace",
+            SessionListScope::Repository => REPOSITORY_SCOPE,
+            SessionListScope::Workspace => WORKSPACE_SCOPE,
         };
         let mut spans = vec![
-            Span::raw("  "),
-            Span::styled("Scope: ", muted),
+            Span::styled(SCOPE_LABEL, muted),
             Span::styled(
                 label,
                 Style::default()
@@ -296,7 +332,7 @@ impl SessionPicker {
             ),
         ];
         if self.scope == SessionListScope::Workspace {
-            spans.push(Span::styled(" · ", muted));
+            spans.push(Span::styled(SEPARATOR, muted));
             // The end of a path names the checkout, so a path that does not fit loses its start.
             let path = shorten_home(&self.workspace);
             let used = spans.iter().map(Span::width).sum::<usize>();
@@ -369,15 +405,8 @@ impl SessionPicker {
                     .map(|row| Line::styled(row, style)),
             );
         };
-        let heading = format!(
-            "{} · {} · {:?} · {}",
-            format_age(session.started_at_unix_ms),
-            session.model,
-            session.effort,
-            session.session_id,
-        );
         push(
-            &heading,
+            &heading(session),
             usize::MAX,
             Style::default()
                 .fg(theme.text())
@@ -418,7 +447,8 @@ impl Component for SessionPicker {
             SessionPickerMode::Resume => ("Resume session", &RESUME_KEY_BINDINGS),
             SessionPickerMode::Mention => ("Mention session", &MENTION_KEY_BINDINGS),
         };
-        let layout = Floating::new(title, WIDTH, HEIGHT, key_bindings).render(frame, area, theme);
+        let layout =
+            Floating::new(title, self.width, HEIGHT, key_bindings).render(frame, area, theme);
         if layout.body.is_empty() {
             return;
         }
@@ -445,6 +475,17 @@ impl Component for SessionPicker {
     }
 }
 
+/// A session's first row: its age, model, effort, and id.
+fn heading(session: &SessionSummary) -> String {
+    format!(
+        "{}{SEPARATOR}{}{SEPARATOR}{:?}{SEPARATOR}{}",
+        format_age(session.started_at_unix_ms),
+        session.model,
+        session.effort,
+        session.session_id,
+    )
+}
+
 fn visible_tail(query: &str, width: usize) -> &str {
     let mut used = 0;
     for (index, grapheme) in query.grapheme_indices(true).rev() {
@@ -459,7 +500,8 @@ fn visible_tail(query: &str, width: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        Component, SessionPicker, SessionPickerEffect, SessionPickerEvent, SessionPickerMode,
+        Component, MAX_WIDTH, MIN_WIDTH, SessionPicker, SessionPickerEffect, SessionPickerEvent,
+        SessionPickerMode,
     };
     use crate::{
         app::{
@@ -581,6 +623,32 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(mentions.len(), 1, "only the scope row names the workspace");
         assert!(mentions[0].contains("Scope: This workspace"));
+    }
+
+    #[test]
+    fn the_picker_fits_its_widest_heading_or_path() {
+        let picker_width = |workspace: &str| {
+            let mut picker = open_picker(
+                vec![summary_in("one", "fix parser", workspace)],
+                SessionPickerMode::Resume,
+            );
+            let rows = render(&mut picker, 200, 30);
+            let top = rows
+                .iter()
+                .find(|row| row.contains("Resume session"))
+                .unwrap();
+            top.trim().chars().count()
+        };
+
+        assert_eq!(picker_width("/work"), usize::from(MIN_WIDTH));
+        let path = format!("/srv/{}", "a".repeat(85));
+        assert_eq!(
+            picker_width(&path),
+            2 + path.len() + 2,
+            "the highlight marker, the path, and the borders"
+        );
+        let path = format!("/srv/{}", "a".repeat(300));
+        assert_eq!(picker_width(&path), usize::from(MAX_WIDTH));
     }
 
     #[test]
