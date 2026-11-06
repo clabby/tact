@@ -42,6 +42,20 @@ export class Sidebar {
   private readonly footer: HTMLElement;
   private live: SessionSummary[] = [];
   private active: string | null = null;
+  /**
+   * A session the user clicked, highlighted until the server reports any change of the active
+   * session. `from` is the active session at the time of the click.
+   */
+  private pending: { id: string; from: string | null } | null = null;
+  /**
+   * Live rows by session id with the inputs they were rendered from. Updates arrive while sessions
+   * work, and replacing the element under the pointer between press and release swallows the click,
+   * so a row is rebuilt only when what it shows changes.
+   */
+  private readonly liveRows = new Map<string, { signature: string; row: HTMLLIElement }>();
+  /** Rows keep their places while the pointer is over the live list, so a click lands on its target. */
+  private pointerInside = false;
+  private footerSignature = "";
   private historyCursor: string | null = null;
   private historyQuery = "";
   /** What the search field filters the live list by; History is searched on the server. */
@@ -91,33 +105,64 @@ export class Sidebar {
     label.setAttribute("title", workspace);
   }
 
-  /** Re-renders the live list; rows are small and few (bounded by max_live_sessions). */
+  /** Updates the live list, rebuilding only the rows whose session changed. */
   setLive(live: SessionSummary[], active: string | null) {
-    const closed = this.live.some((old) => !live.some((session) => session.id === old.id));
+    const previous = new Set(this.live.map((session) => session.id));
+    const current = new Set(live.map((session) => session.id));
+    const closed = [...previous].some((id) => !current.has(id));
+    const opened = [...current].some((id) => !previous.has(id));
     this.live = orderSessions(live, this.pinned);
     this.active = active;
+    if (this.pending && (active !== this.pending.from || !current.has(this.pending.id))) this.pending = null;
     this.renderLive();
     // A closed session is only in History once it has been listed again, and the loaded pages
-    // predate it. A reload also recomputes which rows the live list now hides.
+    // predate it. A reload also recomputes which rows the live list now hides. Otherwise History
+    // only changes when a newly live session hides its row.
     if (closed && this.historyLoaded) void this.loadHistory(true);
-    else this.renderHistory();
+    else if (opened) this.renderHistory();
+  }
+
+  /** Re-renders the model labels, which come from the catalog. */
+  catalogChanged() {
+    this.renderLive();
+    this.renderHistory();
+  }
+
+  /** Brings every row's age up to date without rebuilding the rows. */
+  refreshAges() {
+    for (const age of this.root.querySelectorAll<HTMLElement>(".session-age[data-since]")) {
+      const text = formatAge(Number(age.dataset.since));
+      if (age.textContent !== text) age.textContent = text;
+    }
   }
 
   private renderLive() {
     const needle = this.filter.trim().toLowerCase();
     // Conversation matches answer the last History query, which lags the field while typing.
     const matches = this.historyQuery === this.filter.trim() ? this.liveMatches : {};
-    const visible = needle
+    let visible = needle
       ? this.live.filter((session) => session.id in matches || `${session.title} ${session.model}`.toLowerCase().includes(needle))
       : this.live;
     this.root.querySelector(".live-count")!.textContent = this.live.length ? String(this.live.length) : "";
     // While searching, a Live section with no match would only be noise above the results.
     this.root.querySelector<HTMLElement>(".live-title")!.hidden = needle !== "" && visible.length === 0;
+    const shown = new Set(visible.map((session) => session.id));
+    for (const id of this.liveRows.keys()) {
+      if (!shown.has(id)) this.liveRows.delete(id);
+    }
     if (visible.length === 0) {
       this.liveList.innerHTML = needle ? "" : `<li class="list-empty">No live sessions</li>`;
       return;
     }
-    this.liveList.replaceChildren(...visible.map((session) => this.liveRow(session, needle ? matches[session.id] : undefined)));
+    if (this.pointerInside) {
+      const places = new Map([...this.liveList.children].map((row, index) => [(row as HTMLElement).dataset.session, index]));
+      visible = [...visible].sort((a, b) => (places.get(a.id) ?? places.size) - (places.get(b.id) ?? places.size));
+    }
+    const rows = visible.map((session) => this.liveRow(session, needle ? matches[session.id] : undefined));
+    const children = this.liveList.children;
+    if (rows.length !== children.length || rows.some((row, index) => row !== children[index])) {
+      this.liveList.replaceChildren(...rows);
+    }
   }
 
   renderFooter(connection: Connection, instances: SiblingInstance[]) {
@@ -131,6 +176,11 @@ export class Sidebar {
     );
     const theme = this.host.themeChoice();
     const resolved = this.host.resolvedTheme();
+    // The app renders the footer on every live update. Rebuilding unchanged buttons would swallow
+    // clicks on them.
+    const signature = JSON.stringify([connection, instances, running, theme, resolved]);
+    if (signature === this.footerSignature) return;
+    this.footerSignature = signature;
     this.footer.innerHTML = `
       <button type="button" class="instance-button" aria-haspopup="menu" ${others.length ? "" : "disabled"}>
         <span class="connection-dot" data-connection="${connection}" aria-hidden="true"></span>
@@ -190,16 +240,27 @@ export class Sidebar {
   }
 
   private liveRow(session: SessionSummary, snippet: string | undefined) {
+    const pinned = this.pinned.has(session.id);
+    const active = session.id === (this.pending?.id ?? this.active);
+    const label = this.host.catalog()?.models.find((model) => model.id === session.model)?.label ?? session.model;
+    // Activity advances while the session works, so the age updates in place instead.
+    const { last_activity_unix_ms: activity, ...shown } = session;
+    const signature = JSON.stringify([shown, snippet, pinned, active, label, this.host.workspaceToken(session.workspace)]);
+    const cached = this.liveRows.get(session.id);
+    if (cached?.signature === signature) {
+      renderAge(cached.row, activity);
+      return cached.row;
+    }
+
     const row = document.createElement("li");
     row.className = "session-row";
-    const pinned = this.pinned.has(session.id);
+    row.dataset.session = session.id;
     row.classList.toggle("pinned", pinned);
     row.dataset.state = session.state;
-    row.classList.toggle("active", session.id === this.active);
+    row.classList.toggle("active", active);
     row.classList.toggle("unread", session.unread);
-    const label = this.host.catalog()?.models.find((model) => model.id === session.model)?.label ?? session.model;
     row.innerHTML = `
-      <button type="button" class="session-main" ${session.id === this.active ? 'aria-current="true"' : ""}>
+      <button type="button" class="session-main" ${active ? 'aria-current="true"' : ""}>
         <span class="session-marker" aria-hidden="true"></span>
         <span class="session-text"><span class="session-title"></span><span class="session-meta"><span class="model-dot"></span><span class="session-model"></span><span class="session-workspace"></span><span class="session-age"></span></span></span>
         ${pinned ? `<span class="pin-mark" title="Pinned">${glyph("pin")}</span>` : ""}
@@ -212,7 +273,7 @@ export class Sidebar {
     renderSnippet(row, snippet);
     row.querySelector(".session-model")!.textContent = label;
     this.renderWorkspace(row, session.workspace);
-    row.querySelector(".session-age")!.textContent = formatAge(session.last_activity_unix_ms);
+    renderAge(row, activity);
     row.querySelector<HTMLElement>(".model-dot")!.style.background = modelColor(session.model);
     row.querySelector<HTMLElement>(".session-main")!.setAttribute("aria-label", [
       session.title || "New chat", label, this.host.workspaceToken(session.workspace) ?? "",
@@ -227,6 +288,7 @@ export class Sidebar {
       { label: pinned ? "Unpin" : "Pin to top", run: () => this.togglePin(session.id) },
       { label: session.state === "running" ? "Stop and close…" : "Close", danger: true, run: () => void this.close(session) },
     ], "Session actions"));
+    this.liveRows.set(session.id, { signature, row });
     return row;
   }
 
@@ -267,15 +329,30 @@ export class Sidebar {
       this.searchTimer = window.setTimeout(() => void this.loadHistory(true), 160);
     });
     this.more.addEventListener("click", () => void this.loadHistory(false));
+    this.liveList.addEventListener("pointerenter", () => {
+      this.pointerInside = true;
+    });
+    this.liveList.addEventListener("pointerleave", () => {
+      this.pointerInside = false;
+      this.renderLive();
+    });
     void this.loadHistory(true);
   }
 
   private async activate(id: string) {
     this.host.navigated();
-    if (id === this.active) return;
+    // Repeated clicks during a slow switch would only queue more activations of the same session.
+    if (id === (this.pending?.id ?? this.active)) return;
+    const pending = { id, from: this.active };
+    this.pending = pending;
+    this.renderLive();
     try {
       await this.host.api.command("activate", { session: id });
     } catch (error) {
+      if (this.pending === pending) {
+        this.pending = null;
+        this.renderLive();
+      }
       toast(describeError(error), "warning");
     }
   }
@@ -349,7 +426,7 @@ export class Sidebar {
     renderSnippet(row, session.snippet);
     row.querySelector(".session-model")!.textContent = this.host.catalog()?.models.find((model) => model.id === session.model)?.label ?? session.model;
     this.renderWorkspace(row, session.workspace);
-    row.querySelector(".session-age")!.textContent = formatAge(session.started_at_unix_ms);
+    renderAge(row, session.started_at_unix_ms);
     row.querySelector<HTMLElement>(".model-dot")!.style.background = modelColor(session.model);
     row.querySelector<HTMLElement>(".session-main")!.title = "Resume";
     row.querySelector(".session-main")!.addEventListener("click", () => void this.open({ resume: { session: session.session_id } }));
@@ -364,4 +441,12 @@ function renderSnippet(row: HTMLElement, snippet: string | undefined) {
   line.className = "session-snippet";
   line.textContent = snippet;
   row.querySelector(".session-title")!.after(line);
+}
+
+/** Shows how long ago `unixMs` was, remembering it so `Sidebar.refreshAges` can advance the text. */
+function renderAge(row: HTMLElement, unixMs: number) {
+  const age = row.querySelector<HTMLElement>(".session-age")!;
+  age.dataset.since = String(unixMs);
+  const text = formatAge(unixMs);
+  if (age.textContent !== text) age.textContent = text;
 }

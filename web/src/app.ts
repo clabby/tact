@@ -36,6 +36,8 @@ const root = document.getElementById("app")!;
 const SIDEBAR_KEY = "tact.web.sidebar";
 /** How often the footer re-reads sibling instances so their running counts stay current. */
 const INSTANCE_REFRESH_MS = 5000;
+/** Sidebar rows are rebuilt only when their session changes, so their ages advance on this timer. */
+const AGE_REFRESH_MS = 30_000;
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 
 /** The full-window message shown when this browser has no valid login. */
@@ -209,7 +211,7 @@ class App {
       this.catalog = catalog;
       this.composer.settingsChanged();
       this.renderHeader();
-      this.sidebar.setLive(this.store.state.live, this.store.state.active);
+      this.sidebar.catalogChanged();
     }).catch((error) => toast(`Could not load models: ${describeError(error)}`, "warning"));
     void this.api.instance().then((instance) => this.sidebar.setWorkspace(instance.repository, instance.workspace)).catch(() => {});
     void this.api.query("workspaces", {}).then((defaults) => {
@@ -219,6 +221,7 @@ class App {
     }).catch(() => {});
     this.refreshInstances();
     setInterval(() => this.refreshInstances(), INSTANCE_REFRESH_MS);
+    setInterval(() => this.sidebar.refreshAges(), AGE_REFRESH_MS);
     this.pendingLink = linkTarget(location.hash);
     addEventListener("hashchange", () => {
       this.pendingLink = linkTarget(location.hash);
