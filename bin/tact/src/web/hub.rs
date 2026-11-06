@@ -53,6 +53,10 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const FLUSH_INTERVAL: Duration = Duration::from_nanos(8_333_334);
+/// Summaries report activity rounded down to this resolution. Records arrive on every model delta,
+/// so an exact time would change the summaries and rebroadcast the live list on nearly every flush
+/// while any session streams. Clients show ages in minutes at the finest.
+const ACTIVITY_RESOLUTION_MS: u64 = 10_000;
 /// Frames buffered per client before it is considered too slow and dropped.
 const CLIENT_BUFFER: usize = 512;
 const MAX_STREAMS: usize = 32;
@@ -450,7 +454,8 @@ impl Live {
             state,
             unread: self.unread,
             has_draft: !self.draft.text.is_empty(),
-            last_activity_unix_ms: self.last_activity_unix_ms,
+            last_activity_unix_ms: self.last_activity_unix_ms
+                - self.last_activity_unix_ms % ACTIVITY_RESOLUTION_MS,
         }
     }
 
@@ -1028,7 +1033,10 @@ fn diff_active(live: &mut Live, previous: &ActiveSent, frames: &mut Vec<Frame>) 
 
 #[cfg(test)]
 mod tests {
-    use super::{CLIENT_BUFFER, FLUSH_INTERVAL, Hub, MAX_STREAMS, Subscription, user_image};
+    use super::{
+        ACTIVITY_RESOLUTION_MS, CLIENT_BUFFER, FLUSH_INTERVAL, Hub, MAX_STREAMS, Subscription,
+        user_image,
+    };
     use crate::{
         app::config::{ReasoningEffort, ReasoningMode, Speed},
         core::{
@@ -1422,6 +1430,55 @@ mod tests {
         let events = drain(&mut subscription);
         assert_eq!(events[3].1["entries"][0]["text"], "unseen");
         assert_eq!(events.len(), 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn activity_within_one_resolution_step_does_not_rebroadcast_the_live_list() {
+        let fixture = fixture();
+        fixture.open("viewed", Some("viewed prompt"));
+        fixture.open("working", Some("working prompt"));
+        fixture.activate("viewed");
+        settle().await;
+        let mut subscription = fixture.hub.subscribe().unwrap();
+        drain(&mut subscription);
+        let record_at = |sequence: u64, recorded_at_unix_ms: u64| {
+            Arc::new(
+                TranscriptRecord::from_local(
+                    sequence,
+                    recorded_at_unix_ms,
+                    LocalEvent::UserSubmitted(UserSubmitted {
+                        id: TurnId::new(sequence),
+                        text: "more".to_owned(),
+                    }),
+                )
+                .unwrap(),
+            )
+        };
+
+        // The opening prompt was recorded at 1_001 ms, inside the first step.
+        for sequence in 2..10 {
+            fixture.publish(Publication::Record {
+                session: "working".into(),
+                record: record_at(sequence, sequence * 1_000),
+            });
+            settle().await;
+        }
+        assert!(!names(&drain(&mut subscription)).contains(&"live"));
+
+        fixture.publish(Publication::Record {
+            session: "working".into(),
+            record: record_at(10, ACTIVITY_RESOLUTION_MS + 1),
+        });
+        settle().await;
+        let events = drain(&mut subscription);
+        let live = events
+            .iter()
+            .find(|(name, _)| name == "live")
+            .expect("crossing a step rebroadcasts the live list");
+        assert_eq!(
+            live.1["sessions"][1]["last_activity_unix_ms"],
+            ACTIVITY_RESOLUTION_MS
+        );
     }
 
     #[tokio::test(start_paused = true)]

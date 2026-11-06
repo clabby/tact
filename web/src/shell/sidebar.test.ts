@@ -14,7 +14,8 @@ const host: SidebarHost = {
   workspaceToken: () => null,
 };
 
-const session = (id: string, state: SessionSummary["state"]) => ({ id, state, title: id, model: "gpt-6.1-sol", workspace: "/work" }) as SessionSummary;
+const session = (id: string, state: SessionSummary["state"], last_activity_unix_ms = 0) =>
+  ({ id, state, title: id, model: "gpt-6.1-sol", workspace: "/work", last_activity_unix_ms }) as SessionSummary;
 const instance = (running: number, current = false) =>
   ({ pid: running, port: 7878 + running, workspace: "/work", live: 1, running, current }) as SiblingInstance;
 
@@ -145,5 +146,112 @@ describe("sidebar titles", () => {
     new Sidebar(root, { ...host, api });
     await Bun.sleep(0);
     expect(root.querySelector(".history-row .session-title")!.classList.contains("title-pending")).toBe(true);
+  });
+});
+
+describe("sidebar updates while sessions work", () => {
+  const liveRows = (root: HTMLElement) => [...root.querySelectorAll<HTMLElement>(".live-list .session-row")];
+
+  test("activity keeps rows, and their clicks, in place while updating the age", () => {
+    const root = document.createElement("aside");
+    const sidebar = new Sidebar(root, host);
+    const now = Date.now();
+    sidebar.setLive([session("a", "idle", now - 3 * 60_000), session("b", "idle", now - 3_600_000)], null);
+    const [first, second] = liveRows(root);
+
+    sidebar.setLive([session("a", "idle", now - 5 * 60_000), session("b", "idle", now - 3_600_000)], null);
+
+    expect(liveRows(root)).toEqual([first!, second!]);
+    expect(first!.querySelector(".session-age")!.textContent).toBe("5m");
+  });
+
+  test("a row is rebuilt when what it shows changes", () => {
+    const root = document.createElement("aside");
+    const sidebar = new Sidebar(root, host);
+    sidebar.setLive([session("a", "idle")], null);
+    const [before] = liveRows(root);
+
+    sidebar.setLive([session("a", "error")], null);
+
+    expect(liveRows(root)[0]).not.toBe(before!);
+    expect(liveRows(root)[0]!.dataset.state).toBe("error");
+  });
+
+  test("rows keep their places while the pointer is over the list", () => {
+    const root = document.createElement("aside");
+    const sidebar = new Sidebar(root, host);
+    const list = root.querySelector(".live-list")!;
+    const order = () => liveRows(root).map((row) => row.dataset.session);
+    sidebar.setLive([session("a", "idle", 2), session("b", "idle", 1)], null);
+    list.dispatchEvent(new dom.Event("pointerenter") as unknown as Event);
+
+    sidebar.setLive([session("a", "idle", 2), session("b", "idle", 3), session("c", "idle", 4)], null);
+    expect(order()).toEqual(["a", "b", "c"]);
+
+    list.dispatchEvent(new dom.Event("pointerleave") as unknown as Event);
+    expect(order()).toEqual(["c", "b", "a"]);
+  });
+
+  test("live updates leave History rows alone unless a session joins the live list", async () => {
+    const api = {
+      query: async () => ({
+        sessions: [{ session_id: "saved", preview: "saved", model: "sol", workspace: "/work", started_at_unix_ms: 1 } as PersistedSession],
+        next_cursor: null,
+        live_matches: {},
+      }),
+    } as unknown as SidebarHost["api"];
+    const root = document.createElement("aside");
+    const sidebar = new Sidebar(root, { ...host, api });
+    sidebar.setLive([session("a", "idle", 1)], null);
+    await Bun.sleep(0);
+    const historyRow = () => root.querySelector(".history-row");
+    const before = historyRow();
+
+    sidebar.setLive([session("a", "idle", 2)], null);
+    sidebar.setLive([session("a", "error", 3)], "a");
+    expect(historyRow()).toBe(before);
+
+    sidebar.setLive([session("a", "error", 3), session("saved", "idle", 4)], "a");
+    expect(historyRow()).toBeNull();
+  });
+
+  test("the footer is rebuilt only when what it shows changes", () => {
+    const root = document.createElement("aside");
+    const sidebar = new Sidebar(root, host);
+    sidebar.renderFooter("open", [instance(0, true)]);
+    const footerButton = () => root.querySelector(".instance-button")!;
+    const button = footerButton();
+
+    sidebar.renderFooter("open", [instance(0, true)]);
+    expect(footerButton()).toBe(button);
+
+    sidebar.renderFooter("reconnecting", [instance(0, true)]);
+    expect(footerButton()).not.toBe(button);
+  });
+
+  test("a clicked session is highlighted at once and repeated clicks activate it once", async () => {
+    const activations: unknown[] = [];
+    const api = {
+      query: async () => ({ sessions: [], next_cursor: null, live_matches: {} }),
+      command: async (name: string, args: unknown) => void activations.push([name, args]),
+    } as unknown as SidebarHost["api"];
+    const root = document.createElement("aside");
+    const sidebar = new Sidebar(root, { ...host, api });
+    sidebar.setLive([session("a", "idle", 2), session("b", "idle", 1)], "a");
+    const row = (id: string) => root.querySelector<HTMLElement>(`.session-row[data-session="${id}"]`)!;
+
+    for (let click = 0; click < 3; click += 1) row("b").querySelector<HTMLButtonElement>(".session-main")!.click();
+    await Bun.sleep(0);
+    expect(activations).toEqual([["activate", { session: "b" }]]);
+    expect(row("b").classList.contains("active")).toBe(true);
+    expect(row("a").classList.contains("active")).toBe(false);
+
+    // An update sent before the switch landed does not move the highlight back.
+    sidebar.setLive([session("a", "idle", 2), session("b", "idle", 1)], "a");
+    expect(row("b").classList.contains("active")).toBe(true);
+
+    sidebar.setLive([session("a", "idle", 2), session("b", "idle", 1)], "b");
+    expect(row("b").classList.contains("active")).toBe(true);
+    expect(row("a").classList.contains("active")).toBe(false);
   });
 });
