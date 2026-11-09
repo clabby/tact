@@ -3008,12 +3008,7 @@ fn speed_action_selects_applies_and_cancels_preferences() {
 fn unsupported_models_preserve_speed_preference_for_forks_and_later_models() {
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
     root.set_speed(Speed::Ultrafast);
-    for model in [
-        ClaudeModel::Haiku55,
-        ClaudeModel::Sonnet55,
-        ClaudeModel::Fable51,
-        ClaudeModel::Mythos51,
-    ] {
+    for model in [ClaudeModel::Haiku55, ClaudeModel::Sonnet55] {
         root.set_model(Model::Claude(model));
         assert_eq!(root.composer().speed(), Speed::Ultrafast);
         let fork = root.fork(Path::new("/work"), ReasoningEffort::Medium);

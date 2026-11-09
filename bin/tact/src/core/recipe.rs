@@ -306,7 +306,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     const OPUS: Model = Model::Claude(ClaudeModel::Opus55);
-    const MYTHOS: Model = Model::Claude(ClaudeModel::Mythos51);
+    const MYTHOS: Model = Model::Claude(ClaudeModel::Mythos52);
 
     fn recipe(config_path: &Path, contents: &str) -> AgentRecipe {
         fs::write(config_path, contents).unwrap();
@@ -411,6 +411,7 @@ mod tests {
             max_tokens: 16,
             cache_control: None,
             output_config: None,
+            effort_updates: false,
             speed: None,
             tool_choice: None,
             thinking: None,

@@ -1590,8 +1590,8 @@ mod tests {
             (Model::Claude(ClaudeModel::Haiku55), Speed::Standard, "󰳗"),
             (Model::Claude(ClaudeModel::Opus55), Speed::Fast, "󰤇"),
             (Model::Claude(ClaudeModel::Sonnet55), Speed::Standard, "󰳗"),
-            (Model::Claude(ClaudeModel::Fable51), Speed::Standard, "󰳗"),
-            (Model::Claude(ClaudeModel::Mythos51), Speed::Standard, "󰳗"),
+            (Model::Claude(ClaudeModel::Fable52), Speed::Fast, "󰤇"),
+            (Model::Claude(ClaudeModel::Mythos52), Speed::Fast, "󰤇"),
         ] {
             composer.update(ComposerEvent::SetModel(model));
             assert_eq!(composer.status_line().speed, effective);
@@ -1617,8 +1617,8 @@ mod tests {
             (Model::Claude(ClaudeModel::Haiku55), Speed::Standard),
             (Model::Claude(ClaudeModel::Sonnet55), Speed::Standard),
             (Model::Claude(ClaudeModel::Opus55), Speed::Fast),
-            (Model::Claude(ClaudeModel::Fable51), Speed::Standard),
-            (Model::Claude(ClaudeModel::Mythos51), Speed::Standard),
+            (Model::Claude(ClaudeModel::Fable52), Speed::Fast),
+            (Model::Claude(ClaudeModel::Mythos52), Speed::Fast),
         ] {
             let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Max);
             composer.update(ComposerEvent::SetModel(model));

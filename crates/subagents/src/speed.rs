@@ -84,14 +84,14 @@ mod tests {
                 Speed::Standard,
             ),
             (
-                Model::Claude(ClaudeModel::Fable51),
-                Speed::Standard,
-                Speed::Standard,
+                Model::Claude(ClaudeModel::Fable52),
+                Speed::Fast,
+                Speed::Fast,
             ),
             (
-                Model::Claude(ClaudeModel::Mythos51),
-                Speed::Standard,
-                Speed::Standard,
+                Model::Claude(ClaudeModel::Mythos52),
+                Speed::Fast,
+                Speed::Fast,
             ),
         ] {
             assert_eq!(Speed::Standard.for_model(model), Speed::Standard);

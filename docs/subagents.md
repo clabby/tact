@@ -29,7 +29,7 @@ tool surface or instructions of an existing runtime. A later new or restored ses
 reloaded setting.
 
 Subagents explicitly choose `luna`, `sol`, or `astra` for each task. Setting `[claude] enabled = true`
-also exposes `haiku-5.5`, `sonnet-5.5`, `opus-5.5`, and `fable-5.1`, plus `mythos-5.1` once
+also exposes `haiku-5.5`, `sonnet-5.5`, `opus-5.5`, and `fable-5.2`, plus `mythos-5.2` once
 `[claude] glasswing_api_key` is set. Both providers can create children using either provider. The
 runtime rejects any model outside the configured roster, and a configuration reload updates the
 roster of existing runtimes. There is no `selected`
@@ -80,7 +80,7 @@ and appended instructions. A resumed parent keeps its saved instructions; its ne
 these freshly composed instructions. Fresh and resumed sessions include the model-selection guide
 directly in their instruction Markdown. Children inherit the configured speed preference and use
 the fastest supported tier no higher than requested: Astra and Sol support ultrafast, Luna and
-Opus 5.5 support fast, and Haiku 5.5, Sonnet 5.5, Fable 5.1, and Mythos 5.1 use standard speed.
+Opus 5.5, Fable 5.2, and Mythos 5.2 support fast, and Haiku 5.5 and Sonnet 5.5 use standard speed.
 Their initial prompt contains:
 
 - the assigned role and task;

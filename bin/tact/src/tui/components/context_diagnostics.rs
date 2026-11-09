@@ -224,7 +224,7 @@ impl Palette {
             theme.muted(),
         ];
         let spares = [
-            theme.model(HarnessModel::Claude(ClaudeModel::Fable51)),
+            theme.model(HarnessModel::Claude(ClaudeModel::Fable52)),
             theme.code_text(),
             theme.model(HarnessModel::Codex(CodexModel::Sol)),
             theme.model(HarnessModel::Claude(ClaudeModel::Opus55)),

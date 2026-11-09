@@ -146,8 +146,8 @@ pub const SUPPORTED_MODELS: [HarnessModel; 8] = [
     HarnessModel::Claude(ClaudeModel::Haiku55),
     HarnessModel::Claude(ClaudeModel::Sonnet55),
     HarnessModel::Claude(ClaudeModel::Opus55),
-    HarnessModel::Claude(ClaudeModel::Fable51),
-    HarnessModel::Claude(ClaudeModel::Mythos51),
+    HarnessModel::Claude(ClaudeModel::Fable52),
+    HarnessModel::Claude(ClaudeModel::Mythos52),
 ];
 
 /// The short name agents and users type for each model, in [`SUPPORTED_MODELS`] order.
@@ -158,14 +158,14 @@ const ALIASES: [&str; SUPPORTED_MODELS.len()] = [
     "haiku-5.5",
     "sonnet-5.5",
     "opus-5.5",
-    "fable-5.1",
-    "mythos-5.1",
+    "fable-5.2",
+    "mythos-5.2",
 ];
 
 /// Whether Anthropic serves `model` only to accounts it has granted access. Hosts offer such a
 /// model only after the account's model list confirms the grant.
 pub const fn is_access_gated(model: HarnessModel) -> bool {
-    matches!(model, HarnessModel::Claude(ClaudeModel::Mythos51))
+    matches!(model, HarnessModel::Claude(ClaudeModel::Mythos52))
 }
 
 /// The short name of a supported model.
@@ -216,8 +216,8 @@ mod tests {
             "haiku-5.5",
             "sonnet-5.5",
             "opus-5.5",
-            "fable-5.1",
-            "mythos-5.1",
+            "fable-5.2",
+            "mythos-5.2",
         ]
         .into_iter()
         .zip(SUPPORTED_MODELS)
