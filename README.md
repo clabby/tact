@@ -243,9 +243,9 @@ them, and collect typed results, without sharing its own conversation history. F
 picks a model and a `thinking` effort. Tact's built-in instructions include a guide for making that
 choice.
 
-A few limits apply. A Codex child can't use a higher tier than its Codex parent (Luna < Sol <
-Astra). No spawn can exceed the current `agent.thinking` setting, and nested children can't exceed
-their parent's effort. `agent.max_subagents` caps concurrency (default 32), and you can also adjust it with
+An agent can choose any model offered by the session. No spawn can exceed the current
+`agent.thinking` setting, and nested children can't exceed their parent's effort.
+`agent.max_subagents` caps concurrency (default 32), and you can also adjust it with
 `-` and `+` in the `/subagents` panel.
 
 To turn subagents off, along with their tools and delegation instructions, set this.

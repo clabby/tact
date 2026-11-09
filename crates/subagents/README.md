@@ -70,8 +70,7 @@ tokio::spawn(async move {
 ## Models and effort
 
 Each spawn names its model and reasoning effort with `HarnessModel`, a closed copy of Nanocodex's
-built-in Codex and Claude model catalogs, and Nanocodex's `Thinking` type. A Codex child cannot run
-a higher tier than a Codex parent (Luna < Sol < Astra). A runtime
+built-in Codex and Claude model catalogs, and Nanocodex's `Thinking` type. A runtime
 offers only Codex models until the host passes a roster to `Subagents::set_models`; `spawn_agent`
 lists exactly that roster and admission rejects every other model. `is_access_gated` marks models
 such as Mythos 5.1 that Anthropic serves only to granted accounts, so hosts can leave them out of

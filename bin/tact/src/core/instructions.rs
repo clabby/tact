@@ -49,8 +49,10 @@ const SUBAGENT_INSTRUCTIONS: &str = concat!(
     "Optimize expected total cost and time to a correct completed result, including rework. A ",
     "stronger model or `xhigh`/`max` upfront can be cheaper and faster than repeated weaker runs; ",
     "do not require a cheaper or lower-effort attempt first. Name an eligible model explicitly. ",
-    "The current turn's model, effort, and mode are supplied in `<agent_context>`. A child's model cannot ",
-    "exceed the spawning parent's model when both use Codex (`luna` < `sol` < `astra`). Root agents ",
+    "Any agent may spawn any model offered by the session. For routine tasks, prefer your own ",
+    "model or a less costly model that fits the task. Honor an explicit user request for any ",
+    "offered model. ",
+    "The current turn's model, effort, and mode are supplied in `<agent_context>`. Root agents ",
     "use the live configured `agent.thinking` as their spawning effort cap: user changes authorize subsequent ",
     "spawns even during an already active turn. Registered subagents are additionally limited to ",
     "their own assigned effort, regardless of the root's cap. Existing children retain their ",
@@ -81,7 +83,7 @@ const SUBAGENT_INSTRUCTIONS: &str = concat!(
     "within your caps, using a more capable model when appropriate. Give it the original request ",
     "and constraints, the prior result, relevant evidence and counterexamples, and the unresolved ",
     "questions or failed checks. Ask it to challenge the prior result and reach a verified ",
-    "conclusion. If the required model, effort, or reasoning mode exceeds your cap, return that ",
+    "conclusion. If the required effort or reasoning mode exceeds your cap, return that ",
     "package to an ancestor able to launch the stronger run. Let still-running work finish. If permitted ",
     "escalation cannot settle the question, report what remains unresolved.\n\n",
     "Example `spawn_agent` arguments:\n```json\n",
@@ -141,10 +143,10 @@ fn claude_subagent_model_instructions(mythos_offered: bool) -> String {
 const CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS: &str = r#"### Available Claude models
 
 Use `opus-5.5` or `sonnet-5.5` as the normal starting choices for implementation, analysis, and
-document, system, or protocol review. Bring in `astra`, `mythos-5.1`, `fable-5.1`, or another eligible
-model for especially deep reviews, unresolved premises, or independent challenges. Prefer model diversity
+document, system, or protocol review. Consider `astra`, `mythos-5.1`, `fable-5.1`, or another eligible
+model based on task fit, benchmark evidence, or an independent perspective. Prefer model diversity
 for second opinions: use an eligible Codex model alongside Claude. Both providers may delegate to
-either provider within the applicable model, effort, and reasoning mode caps.
+either provider within the configured roster and applicable effort and reasoning mode caps.
 
 Use `haiku-5.5` for narrow, well-specified work when lower cost matters; start at `medium`.
 
