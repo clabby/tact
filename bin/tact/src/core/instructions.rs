@@ -124,8 +124,8 @@ FrontierCode 1.1 Main (native Codex; best scoring effort per model).
 
 /// The parts of [`CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS`] that apply only when the configuration
 /// offers Mythos, which needs a Project Glasswing key.
-const MYTHOS_MENTION: &str = "`mythos-5.1`, ";
-const MYTHOS_RANKING: &str = "`mythos-5.1` ranks above `fable-5.1`. Prefer it wherever you would otherwise choose `fable-5.1`.\n\n";
+const MYTHOS_MENTION: &str = "`mythos-5.2`, ";
+const MYTHOS_RANKING: &str = "`mythos-5.2` ranks above `fable-5.2`. Prefer it wherever you would otherwise choose `fable-5.2`.\n\n";
 
 /// The Claude subagent guidance, mentioning Mythos only when it is offered.
 fn claude_subagent_model_instructions(mythos_offered: bool) -> String {
@@ -141,14 +141,14 @@ fn claude_subagent_model_instructions(mythos_offered: bool) -> String {
 const CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS: &str = r#"### Available Claude models
 
 Use `opus-5.5` or `sonnet-5.5` as the normal starting choices for implementation, analysis, and
-document, system, or protocol review. Bring in `astra`, `mythos-5.1`, `fable-5.1`, or another eligible
+document, system, or protocol review. Bring in `astra`, `mythos-5.2`, `fable-5.2`, or another eligible
 model for especially deep reviews, unresolved premises, or independent challenges. Prefer model diversity
 for second opinions: use an eligible Codex model alongside Claude. Both providers may delegate to
 either provider within the applicable model, effort, and reasoning mode caps.
 
 Use `haiku-5.5` for narrow, well-specified work when lower cost matters; start at `medium`.
 
-`mythos-5.1` ranks above `fable-5.1`. Prefer it wherever you would otherwise choose `fable-5.1`.
+`mythos-5.2` ranks above `fable-5.2`. Prefer it wherever you would otherwise choose `fable-5.2`.
 
 DeepSWE 1.1 (Artificial Analysis, native Claude Code). Cost/time are averages across AA's coding suite.
 
@@ -389,7 +389,7 @@ impl SessionInstructions {
         }
         let mythos_offered = config
             .claude()
-            .ensure_model_enabled(Model::Claude(ClaudeModel::Mythos51))
+            .ensure_model_enabled(Model::Claude(ClaudeModel::Mythos52))
             .is_ok();
         let claude_guidance = claude_subagent_model_instructions(mythos_offered);
         text.exclude_live(&claude_subagent_model_instructions(!mythos_offered));
@@ -963,7 +963,7 @@ mod tests {
         };
         let offered = prompts("sk-ant-api03-glasswing", None);
         let withheld = prompts("", None);
-        let mythos = Model::Claude(ClaudeModel::Mythos51);
+        let mythos = Model::Claude(ClaudeModel::Mythos52);
         for text in [Arc::clone(&offered.session.text), offered.for_model(mythos)] {
             assert_eq!(count(&text, CLAUDE_SUBAGENT_MODEL_INSTRUCTIONS), 1);
         }

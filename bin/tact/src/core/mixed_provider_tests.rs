@@ -167,7 +167,7 @@ async fn messages(
 ) -> Response {
     // Access-gated models authenticate only with the Glasswing credentials, and every other
     // model only with the ordinary API key and workspace.
-    let (key, workspace) = if request["model"] == ClaudeModel::Mythos51.as_str() {
+    let (key, workspace) = if request["model"] == ClaudeModel::Mythos52.as_str() {
         (GLASSWING_KEY, GLASSWING_WORKSPACE)
     } else {
         ("sk-ant-usr-fixture-token", "wrkspc_fixture")
@@ -308,8 +308,8 @@ async fn claude_root_runs_codex_child_through_code_mode() {
         ClaudeModel::Haiku55,
         ClaudeModel::Sonnet55,
         ClaudeModel::Opus55,
-        ClaudeModel::Fable51,
-        ClaudeModel::Mythos51,
+        ClaudeModel::Fable52,
+        ClaudeModel::Mythos52,
     ] {
         mixed_provider_roundtrip(
             HarnessModel::Claude(model),
@@ -327,8 +327,8 @@ async fn codex_root_runs_claude_child_through_code_mode() {
         ClaudeModel::Haiku55,
         ClaudeModel::Sonnet55,
         ClaudeModel::Opus55,
-        ClaudeModel::Fable51,
-        ClaudeModel::Mythos51,
+        ClaudeModel::Fable52,
+        ClaudeModel::Mythos52,
     ] {
         mixed_provider_roundtrip(
             HarnessModel::Codex(CodexModel::Luna),
@@ -344,7 +344,7 @@ async fn codex_root_runs_claude_child_through_code_mode() {
 async fn codex_root_runs_multiple_claude_children_through_code_mode() {
     mixed_provider_roundtrip(
         HarnessModel::Codex(CodexModel::Luna),
-        HarnessModel::Claude(ClaudeModel::Fable51),
+        HarnessModel::Claude(ClaudeModel::Fable52),
         2,
         false,
     )
@@ -593,7 +593,7 @@ for (let attempt = 0; attempt < 3; attempt++) {{
     if clean_spawn {
         root.set_thinking(Thinking::High).await.unwrap();
         for model in [
-            HarnessModel::Claude(ClaudeModel::Fable51),
+            HarnessModel::Claude(ClaudeModel::Fable52),
             HarnessModel::Codex(CodexModel::Luna),
         ] {
             assert!(

@@ -30,20 +30,20 @@ children delegate further while the runtime enforces task-tree authority. Drain 
 for as long as the runtime lives; dropping it stops event forwarding.
 
 ```rust,no_run
-use nanocode::{Agent, AgentEvents, NanocodexError, ReasoningMode, Thinking};
+use nanocode::{Agent, AgentEvents, NanocodeError, ReasoningMode, Thinking};
 use nanocode::tools::ToolsBuilder;
 use tact_subagents::{AgentContext, Speed, SubagentRoster, Subagents};
 
 fn build_child(
     context: AgentContext,
     speed: Speed,
-) -> Result<(Agent, AgentEvents), NanocodexError> {
+) -> Result<(Agent, AgentEvents), NanocodeError> {
     // Build a clean session with the resolved model, effort, reasoning mode, and speed.
     # let _ = (context, speed);
     # unimplemented!()
 }
 
-# async fn run() -> Result<(), NanocodexError> {
+# async fn run() -> Result<(), NanocodeError> {
 let (subagents, mut updates) = Subagents::new(8);
 subagents.set_agent_factory(
     Thinking::High,
@@ -74,7 +74,7 @@ built-in Codex and Claude model catalogs, and Nanocodex's `Thinking` type. A Cod
 a higher tier than a Codex parent (Luna < Sol < Astra). A runtime
 offers only Codex models until the host passes a roster to `Subagents::set_models`; `spawn_agent`
 lists exactly that roster and admission rejects every other model. `is_access_gated` marks models
-such as Mythos 5.1 that Anthropic serves only to granted accounts, so hosts can leave them out of
+such as Mythos 5.2 that Anthropic serves only to granted accounts, so hosts can leave them out of
 the roster. Any offered model may delegate to any other offered model. Every spawn is
 bounded by the runtime's live effort cap, and a registered child cannot spawn above its own
 effort.

@@ -205,8 +205,8 @@ impl Theme {
             Model::Claude(ClaudeModel::Haiku55) => self.palette().model_haiku.0,
             Model::Claude(ClaudeModel::Sonnet55) => self.palette().model_sonnet.0,
             Model::Claude(ClaudeModel::Opus55) => self.palette().model_opus.0,
-            Model::Claude(ClaudeModel::Fable51) => self.palette().model_fable.0,
-            Model::Claude(ClaudeModel::Mythos51) => self.palette().model_mythos.0,
+            Model::Claude(ClaudeModel::Fable52) => self.palette().model_fable.0,
+            Model::Claude(ClaudeModel::Mythos52) => self.palette().model_mythos.0,
             _ => self.text(),
         }
     }

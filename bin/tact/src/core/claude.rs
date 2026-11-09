@@ -422,8 +422,9 @@ fn flatten(
     result.push(FlatTool {
         definition: NativeDefinition {
             name: name.clone(),
-            description,
-            input_schema: schema,
+            description: description.into(),
+            input_schema: schema.into(),
+            cache_control: None,
             strict: None,
             defer_loading: false,
         },
@@ -791,12 +792,15 @@ mod tests {
             ClaudeModel::Haiku55,
             ClaudeModel::Sonnet55,
             ClaudeModel::Opus55,
-            ClaudeModel::Fable51,
-            ClaudeModel::Mythos51,
+            ClaudeModel::Fable52,
+            ClaudeModel::Mythos52,
         ] {
             let mut server = server((0..5).map(|_| final_text()).collect()).await;
             let workspace = tempfile::tempdir().unwrap();
-            let supported = model == ClaudeModel::Opus55;
+            let supported = matches!(
+                model,
+                ClaudeModel::Opus55 | ClaudeModel::Fable52 | ClaudeModel::Mythos52
+            );
             let (original, _) = fast_agent(
                 &server.endpoint,
                 workspace.path(),
@@ -963,8 +967,8 @@ mod tests {
             nanocode::ClaudeModel::Haiku55,
             nanocode::ClaudeModel::Sonnet55,
             nanocode::ClaudeModel::Opus55,
-            nanocode::ClaudeModel::Fable51,
-            nanocode::ClaudeModel::Mythos51,
+            nanocode::ClaudeModel::Fable52,
+            nanocode::ClaudeModel::Mythos52,
         ] {
             let selected = tools().build().unwrap();
             let (agent, _) = build_client(
@@ -1262,7 +1266,16 @@ mod tests {
             Some(&json!({"type":"ephemeral","ttl":"1h"}))
         );
         let resumed = server.requests.recv().await.unwrap();
-        assert_eq!(resumed["output_config"]["effort"], "high");
+        assert_eq!(resumed["output_config"]["effort"], "medium");
+        assert!(
+            resumed["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| {
+                    message["role"] == "system" && message["output_config"]["effort"] == "high"
+                })
+        );
         assert_eq!(resumed["max_tokens"], 128_000);
         assert_eq!(
             resumed["cache_control"],

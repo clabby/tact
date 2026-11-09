@@ -245,7 +245,7 @@ mod tests {
 
     const SOL: Model = Model::Codex(CodexModel::Sol);
     const LUNA: Model = Model::Codex(CodexModel::Luna);
-    const FABLE: Model = Model::Claude(ClaudeModel::Fable51);
+    const FABLE: Model = Model::Claude(ClaudeModel::Fable52);
 
     fn roster(claude_enabled: bool) -> Arc<[Model]> {
         tact_subagents::SUPPORTED_MODELS
@@ -325,7 +325,7 @@ mod tests {
             ("sonnet-5.5", vec![Model::Claude(ClaudeModel::Sonnet55)]),
             ("haiku", vec![Model::Claude(ClaudeModel::Haiku55)]),
             ("gpt-6.1-sol", vec![SOL]),
-            ("claude-fable-5-1", vec![FABLE]),
+            ("claude-fable-5-2", vec![FABLE]),
             ("OpenAI", roster(false).to_vec()),
             ("codex", roster(false).to_vec()),
             ("Anthropic", roster(true)[3..].to_vec()),
@@ -394,9 +394,9 @@ mod tests {
             text.iter()
                 .any(|row| row.contains("Sol") && row.contains('✓') && !row.contains('▸'))
         );
-        assert!(text.iter().any(|row| row.contains("▸ Mythos 5.1")
+        assert!(text.iter().any(|row| row.contains("▸ Mythos 5.2")
             && row.contains("Anthropic")
-            && row.contains("claude-mythos-5-1")));
+            && row.contains("claude-mythos-5-2")));
         let buffer = terminal.backend().buffer();
         let sol_row = text.iter().position(|row| row.contains("Sol")).unwrap() as u16;
         let sol_x = text[usize::from(sol_row)]

@@ -328,12 +328,12 @@ Esc to cancel.
 | `haiku-5.5` | `claude-haiku-5-5` | medium |
 | `sonnet-5.5` | `claude-sonnet-5-5` | high |
 | `opus-5.5` | `claude-opus-5-5` | medium |
-| `fable-5.1` | `claude-fable-5-1` | high |
-| `mythos-5.1` | `claude-mythos-5-1` | high |
+| `fable-5.2` | `claude-fable-5-2` | high |
+| `mythos-5.2` | `claude-mythos-5-2` | high |
 
-Claude models need Claude enabled (see below). Mythos 5.1 is only served to accounts in Anthropic's
+Claude models need Claude enabled (see below). Mythos 5.2 is only served to accounts in Anthropic's
 Project Glasswing and needs its own key, so Tact only offers it once `claude.glasswing_api_key` is set.
-It's the same model as Fable 5.1, so pick Fable if you don't have that access. Every
+It's the same model as Fable 5.2, so pick Fable if you don't have that access. Every
 model supports effort from `low` through `max`, and a configured `agent.thinking` overrides the
 defaults. Resumed sessions keep the model they started with. Sessions on retired model IDs can't be resumed.
 
@@ -349,8 +349,8 @@ when you change models. Ultrafast picks the fastest tier each model supports.
 | Model | Ultrafast means |
 | --- | --- |
 | Astra, Sol | Ultrafast |
-| Luna, Opus 5.5 | Fast |
-| Haiku 5.5, Sonnet 5.5, Fable 5.1, Mythos 5.1 | Standard |
+| Luna, Opus 5.5, Fable 5.2, Mythos 5.2 | Fast |
+| Haiku 5.5, Sonnet 5.5 | Standard |
 
 Astra and Sol send `service_tier = "ultrafast"`, and access and pricing depend on your account. See
 [OpenAI ultrafast mode](https://developers.openai.com/api/docs/guides/ultrafast-mode) for details.
@@ -398,7 +398,7 @@ including the retired `auth` and `subscription_store` settings, so remove those 
 If your key isn't scoped to a workspace, set `workspace_id` to the ID from [Console workspace settings](https://platform.claude.com/settings/workspaces),
 and Tact sends it as `anthropic-workspace-id`. Start a new session after changing it.
 
-Mythos 5.1 doesn't use `api_key`. Anthropic gives Project Glasswing members separate keys that expire
+Mythos 5.2 doesn't use `api_key`. Anthropic gives Project Glasswing members separate keys that expire
 quickly, so Tact keeps that key in its own `glasswing_api_key` field, with an optional
 `glasswing_workspace_id` for the workspace it belongs to. Mythos requests from root sessions and
 subagents only ever send the Glasswing key and workspace, and every other Claude request only ever

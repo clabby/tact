@@ -105,8 +105,8 @@ pub(crate) const fn name(model: Model) -> &'static str {
         Model::Claude(ClaudeModel::Haiku55) => "Haiku 5.5",
         Model::Claude(ClaudeModel::Sonnet55) => "Sonnet 5.5",
         Model::Claude(ClaudeModel::Opus55) => "Opus 5.5",
-        Model::Claude(ClaudeModel::Fable51) => "Fable 5.1",
-        Model::Claude(ClaudeModel::Mythos51) => "Mythos 5.1",
+        Model::Claude(ClaudeModel::Fable52) => "Fable 5.2",
+        Model::Claude(ClaudeModel::Mythos52) => "Mythos 5.2",
         _ => model.as_str(),
     }
 }
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn gated_models_need_claude_and_a_glasswing_key() {
-        let mythos = Model::Claude(ClaudeModel::Mythos51);
+        let mythos = Model::Claude(ClaudeModel::Mythos52);
         let codex: Vec<Model> = SUPPORTED_MODELS
             .into_iter()
             .filter(|model| matches!(model, Model::Codex(_)))
@@ -218,10 +218,10 @@ mod tests {
             ("claude-sonnet-5-5", Model::Claude(ClaudeModel::Sonnet55)),
             ("opus-5.5", Model::Claude(ClaudeModel::Opus55)),
             ("claude-opus-5-5", Model::Claude(ClaudeModel::Opus55)),
-            ("fable-5.1", Model::Claude(ClaudeModel::Fable51)),
-            ("claude-fable-5-1", Model::Claude(ClaudeModel::Fable51)),
-            ("mythos-5.1", Model::Claude(ClaudeModel::Mythos51)),
-            ("claude-mythos-5-1", Model::Claude(ClaudeModel::Mythos51)),
+            ("fable-5.2", Model::Claude(ClaudeModel::Fable52)),
+            ("claude-fable-5-2", Model::Claude(ClaudeModel::Fable52)),
+            ("mythos-5.2", Model::Claude(ClaudeModel::Mythos52)),
+            ("claude-mythos-5-2", Model::Claude(ClaudeModel::Mythos52)),
         ] {
             assert_eq!(parse(value), Ok(expected));
         }

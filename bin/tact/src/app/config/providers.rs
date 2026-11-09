@@ -321,8 +321,8 @@ mod tests {
             ("sonnet-5.5", ReasoningEffort::High),
             ("haiku-5.5", ReasoningEffort::Medium),
             ("opus-5.5", ReasoningEffort::Medium),
-            ("fable-5.1", ReasoningEffort::High),
-            ("mythos-5.1", ReasoningEffort::High),
+            ("fable-5.2", ReasoningEffort::High),
+            ("mythos-5.2", ReasoningEffort::High),
         ] {
             let agent = format!("[agent]\nmodel = '{model}'\n");
             assert!(matches!(
@@ -330,7 +330,7 @@ mod tests {
                 Err(Error::Config(ConfigError::ClaudeDisabled))
             ));
             let enabled = format!("{agent}[claude]\nenabled = true\n");
-            let gated = model == "mythos-5.1";
+            let gated = model == "mythos-5.2";
             assert_eq!(
                 matches!(
                     load_config(&enabled),

@@ -1320,8 +1320,8 @@ mod tests {
             Model::Claude(ClaudeModel::Haiku55),
             Model::Claude(ClaudeModel::Sonnet55),
             Model::Claude(ClaudeModel::Opus55),
-            Model::Claude(ClaudeModel::Fable51),
-            Model::Claude(ClaudeModel::Mythos51),
+            Model::Claude(ClaudeModel::Fable52),
+            Model::Claude(ClaudeModel::Mythos52),
         ] {
             let record = TranscriptRecord::from_local(
                 1,
@@ -1601,19 +1601,19 @@ mod tests {
         let directory = tempdir().unwrap();
         let config = directory.path().join("config.toml");
         let expected = claude_checkpoint(
-            ClaudeModel::Fable51,
+            ClaudeModel::Fable52,
             "native-session",
             Thinking::Max,
             json!({"native": "opaque state"}),
         );
         assert!(
             expected
-                .validate_identity(Model::Claude(ClaudeModel::Fable51), Some("native-session"))
+                .validate_identity(Model::Claude(ClaudeModel::Fable52), Some("native-session"))
                 .is_ok()
         );
         assert!(
             expected
-                .validate_identity(Model::Claude(ClaudeModel::Fable51), None)
+                .validate_identity(Model::Claude(ClaudeModel::Fable52), None)
                 .is_ok()
         );
         assert!(
@@ -1623,7 +1623,7 @@ mod tests {
         );
         assert!(
             expected
-                .validate_identity(Model::Claude(ClaudeModel::Fable51), Some("other-session"))
+                .validate_identity(Model::Claude(ClaudeModel::Fable52), Some("other-session"))
                 .is_err()
         );
         assert!(
@@ -1649,7 +1649,7 @@ mod tests {
         let checkpoint = actual.into_checkpoint();
         assert_eq!(
             checkpoint.model(),
-            ModelSelection::Claude(ClaudeModel::Fable51)
+            ModelSelection::Claude(ClaudeModel::Fable52)
         );
         assert_eq!(checkpoint.session_id(), "native-session");
         assert_eq!(checkpoint.thinking(), Thinking::Max);
