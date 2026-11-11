@@ -52,6 +52,10 @@
   .mark-seen-button:hover { background: var(--surface-hover); color: var(--text); }
   .mark-seen-button svg { width: 12px; height: 12px; }
   .mark-seen-button.seen { border-color: color-mix(in srgb, var(--success) 35%, var(--line)); background: var(--success-soft); color: var(--success); }
+  .file-collapse-toggle { display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: var(--radius-sm); background: none; color: var(--muted); cursor: pointer; }
+  .file-collapse-toggle:hover { background: var(--surface-hover); color: var(--text); }
+  .file-collapse-toggle svg { width: 11px; height: 11px; }
+  .file-collapse-toggle[aria-expanded="false"] svg { transform: rotate(-90deg); }
   .change-stats { display: flex; gap: 10px; align-items: center; color: var(--muted); font-size: 12px; }
   .change-stats strong { font-weight: 650; }
   .change-stats .add { color: var(--add); }

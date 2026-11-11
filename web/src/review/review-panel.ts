@@ -143,12 +143,13 @@ class ReviewPanel {
     this.diffView = new DiffView(root, {
       settings: () => this.settings.current,
       appearance: () => appearance(this.settings.current, this.host.theme()),
+      items: () => this.items,
       seenFiles: () => this.seenFiles(),
       seenChanged: (file, seen) => {
         this.seen.mark(this.bootstrap.checkout.path, file, seen);
-        if (!seen) this.search.fileExpanded(file.name);
         this.fileTree.refreshDecorations();
       },
+      fileExpanded: (path) => this.search.fileExpanded(path),
       renderAnnotation: (annotation) => this.annotationElement(annotation),
       openComposer: (selection) => this.commentEditor.open(selection),
       selectedLinesChanged: (selection) => this.search.selectedLinesChanged(selection),
@@ -161,7 +162,6 @@ class ReviewPanel {
       files: () => this.files,
       items: () => this.items,
       viewer: () => this.diffView.viewer,
-      seenFiles: () => this.seenFiles(),
       setCollapsed: (item, collapsed) => this.diffView.setCollapsed(item, collapsed),
       selectMobilePanel: (name) => this.selectMobilePanel(name),
     });

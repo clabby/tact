@@ -468,6 +468,9 @@ mobile-first.
   remembered per browser); on narrower windows it is a drawer.
 - **Tabs.** **Chat** holds the transcript and the shared composer. **Review** holds the Pierre
   diffs, live while the agent edits, and an **Overview** sub-tab. Cmd/Ctrl . switches between them.
+  Clicking a file's header in **Review** collapses or expands that file, and Alt+click (Option+click
+  on macOS) does the same for every file. **Mark as Seen** also collapses the file, and the mark
+  lasts until the file's diff changes.
 - **Transcript.** Prompts and messages render as Markdown with highlighted code and KaTeX math
   (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`, or a `math` fence). A `mermaid` fence renders as a
   diagram; Mermaid loads with the first one, a diagram opens enlarged on click, and one that
