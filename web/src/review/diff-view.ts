@@ -162,7 +162,18 @@ export class DiffView {
       themeType: this.deps.appearance(),
       unsafeCSS: `
         ::highlight(${SEARCH_HIGHLIGHT}) { color: #171717; background-color: #ffd54f; }
-        [data-diffs-header="default"] { cursor: pointer; }
+        [data-diffs-header="default"] {
+          --tact-header-rule: light-dark(
+            color-mix(in lab, var(--diffs-bg) 90%, var(--diffs-mixer)),
+            color-mix(in lab, var(--diffs-bg) 86%, var(--diffs-mixer))
+          );
+          background-color: light-dark(
+            color-mix(in lab, var(--diffs-bg) 97%, var(--diffs-mixer)),
+            color-mix(in lab, var(--diffs-bg) 94%, var(--diffs-mixer))
+          );
+          box-shadow: inset 0 1px 0 var(--tact-header-rule), inset 0 -1px 0 var(--tact-header-rule);
+          cursor: pointer;
+        }
         [data-diffs-header="default"] [data-metadata] { cursor: auto; }
         [data-diffs-header="default"] [data-additions-count] { color: var(--add); }
         [data-diffs-header="default"] [data-deletions-count] { color: var(--del); }`,
@@ -170,6 +181,7 @@ export class DiffView {
       expansionLineCount: 20,
       enableLineSelection: true,
       stickyHeaders: true,
+      layout: { paddingTop: 8, paddingBottom: 8, gap: 16 },
       pointerEventsOnScroll: false,
       lineHoverHighlight: "both" as const,
       renderHeaderPrefix: (_file, context) => {
