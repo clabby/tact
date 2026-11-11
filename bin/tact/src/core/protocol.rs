@@ -17,7 +17,7 @@ use crate::{
     core::{
         context::{ContextBudget, ContextDiagnostics},
         extensions::SkillMatches,
-        session::{HistoryPage, RecentPromptScope, RecentPrompts},
+        session::{HistoryPage, RecentPromptScope, RecentPrompts, SessionListScope},
         titles::Title,
         transcript::TranscriptRecord,
     },
@@ -347,6 +347,10 @@ pub(crate) enum Query {
         query: String,
         #[serde(default)]
         cursor: Option<String>,
+        /// Whether to list every checkout of the focused session's repository or only its
+        /// workspace. Live conversation matches are reported regardless.
+        #[serde(default)]
+        scope: SessionListScope,
     },
     /// Workspace paths ranked for an `@` mention.
     Files {
@@ -490,7 +494,7 @@ mod tests {
     use super::{Command, CommandEnvelope, OpenSpec, Query, Reply};
     use crate::{
         app::config::{ReasoningMode, Speed},
-        core::session::RecentPromptScope,
+        core::session::{RecentPromptScope, SessionListScope},
     };
     use serde_json::json;
     use tact_memory::MemoryKey;
@@ -626,6 +630,19 @@ mod tests {
             Query::History {
                 query: String::new(),
                 cursor: None,
+                scope: SessionListScope::Repository,
+            }
+        );
+        assert_eq!(
+            serde_json::from_value::<Query>(json!({
+                "query": "history",
+                "args": { "query": "lexer", "scope": "workspace" },
+            }))
+            .unwrap(),
+            Query::History {
+                query: "lexer".to_owned(),
+                cursor: None,
+                scope: SessionListScope::Workspace,
             }
         );
     }

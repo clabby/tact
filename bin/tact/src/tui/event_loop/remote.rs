@@ -12,7 +12,7 @@ use crate::{
     core::{
         extensions::SkillMatches,
         protocol::{CommandError, ListedMemory, Query, QueryReply, Reply},
-        session::{HistoryPage, RecentPrompt, RecentPrompts, SessionStore},
+        session::{HistoryPage, RecentPrompt, RecentPrompts, SessionListScope, SessionStore},
     },
     search::FileMatches,
     tui::components::{AppNode, RootNode},
@@ -64,15 +64,26 @@ fn prepare(query: Query, state: &QueryState<'_>) -> Result<Answer<QueryReply>, C
         Query::Models => Answer::Ready(Ok(QueryReply::Models(ModelCatalog::new(&available(
             state.config.claude(),
         ))))),
-        Query::History { query, cursor } => {
+        Query::History {
+            query,
+            cursor,
+            scope,
+        } => {
             let store = SessionStore::new(state.config.path());
             let workspace = state.workspace.to_path_buf();
             let live_sessions = state.app.live_session_ids();
             Answer::pending(async move {
-                let sessions = store
-                    .list_workspace_family(&workspace, true)
-                    .await
-                    .map_err(failed)?;
+                let sessions = match scope {
+                    SessionListScope::Repository => {
+                        store.list_workspace_family(&workspace, true).await
+                    }
+                    SessionListScope::Workspace => {
+                        store
+                            .run_blocking(move |store| store.list(&[workspace], true))
+                            .await
+                    }
+                }
+                .map_err(failed)?;
                 let search = query.clone();
                 let conversation = store
                     .run_blocking(move |store| store.search_conversations(&search))
@@ -226,7 +237,7 @@ mod tests {
         core::{
             pane::PaneId,
             protocol::{CommandError, Query, QueryReply},
-            session::{RecentPrompt, RecentPromptScope},
+            session::{RecentPrompt, RecentPromptScope, SessionListScope},
             storage::SessionStorage,
             transcript::{LocalEvent, SessionStarted, TranscriptRecord, TurnId, UserSubmitted},
         },
@@ -234,7 +245,7 @@ mod tests {
     };
     use nanocode::agent::events::{AgentEvent, AgentEventKind};
     use serde_json::{json, value::to_raw_value};
-    use std::{fs, path::Path, sync::Arc};
+    use std::{fs, path::Path, process::Command, sync::Arc};
     use tact_memory::MemoryKey;
     use tempfile::tempdir;
 
@@ -313,6 +324,7 @@ mod tests {
         let Ok(QueryReply::History(history)) = query(Query::History {
             query: String::new(),
             cursor: None,
+            scope: SessionListScope::Repository,
         })
         .await
         else {
@@ -406,6 +418,7 @@ mod tests {
             Query::History {
                 query: "LEXER".to_owned(),
                 cursor: None,
+                scope: SessionListScope::Repository,
             },
             &state,
         ))
@@ -423,6 +436,110 @@ mod tests {
             history.live_matches.get("main").map(String::as_str),
             Some("a lexer for the live session")
         );
+    }
+
+    #[tokio::test]
+    async fn history_scope_selects_the_repository_or_only_the_workspace() {
+        let directory = tempdir().unwrap();
+        let repository = directory.path().join("repository");
+        let checkout = directory.path().join("checkout");
+        fs::create_dir(&repository).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args([
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.test",
+                ])
+                .current_dir(&repository)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "--quiet"]);
+        git(&["commit", "--quiet", "--allow-empty", "-m", "fixture"]);
+        git(&[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            checkout.to_str().unwrap(),
+        ]);
+        let repository = repository.canonicalize().unwrap();
+        let checkout = checkout.canonicalize().unwrap();
+        let config = config(directory.path());
+        let app = app(&checkout);
+        let mut storage = SessionStorage::open(config.path()).unwrap();
+        for (index, (session_id, workspace)) in
+            [("in-repository", &repository), ("in-checkout", &checkout)]
+                .into_iter()
+                .enumerate()
+        {
+            let start = SessionStarted {
+                session_id: session_id.to_owned(),
+                parent_session_id: None,
+                parent_sequence: None,
+                model: "model".to_owned(),
+                effort: ReasoningEffort::Medium,
+                reasoning_mode: ReasoningMode::Standard,
+                speed: Speed::Standard,
+                workspace: workspace.clone(),
+                application_version: "test".to_owned(),
+            };
+            let started = TranscriptRecord::from_local(
+                1,
+                index as u64 + 1,
+                LocalEvent::SessionStarted(start),
+            )
+            .unwrap();
+            storage
+                .append_records(session_id, &[Arc::new(started)])
+                .unwrap();
+            storage.save_resume_state(session_id, b"{}").unwrap();
+        }
+        drop(storage);
+        let state = QueryState {
+            app: &app,
+            config: &config,
+            workspace: &checkout,
+            memory_store: None,
+            recent_prompts: None,
+        };
+        let listed = async |scope| {
+            let Ok(QueryReply::History(history)) = resolve(answer(
+                Query::History {
+                    query: String::new(),
+                    cursor: None,
+                    scope,
+                },
+                &state,
+            ))
+            .await
+            else {
+                panic!("history");
+            };
+            history
+                .sessions
+                .into_iter()
+                .map(|session| session.session_id)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            listed(SessionListScope::Repository).await,
+            ["in-checkout", "in-repository"]
+        );
+        assert_eq!(listed(SessionListScope::Workspace).await, ["in-checkout"]);
     }
 
     #[tokio::test]

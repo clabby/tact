@@ -424,8 +424,10 @@ Tact saves a checkpoint after each successful turn and keeps an append-only tran
 provider stops a session for policy reasons, the session can't be resumed, but you can still read
 its transcript. Checkpoints hold the full conversation unredacted, so treat them as private.
 
-- **Resume.** Choose **Resume session** in the Actions menu to search this workspace's sessions, or
-  run `tact --resume SESSION_ID`. Tact prints the resume command when it exits.
+- **Resume.** Choose **Resume session** in the Actions menu to search the sessions of every checkout
+  of this repository, newest first. Press `Ctrl+F` in the picker to show only this workspace's
+  sessions. You can also run `tact --resume SESSION_ID`. Tact prints the resume command when it
+  exits.
 - **Fork.** Press `Ctrl+T` or choose **Fork session** to open an independent copy next to the current
   one. You can have one fork open at a time, and forks are saved and resumable like any session.
 - **Compact.** Enter `/compact` or choose **Compact context** while idle. Tact uses the provider's native
