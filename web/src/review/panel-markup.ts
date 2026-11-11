@@ -16,7 +16,7 @@ export function panelMarkup(repository: string, settingsPopover: string, rangeDi
           <div class="review-target">
             <button class="range-button" id="range-button" aria-haspopup="dialog" aria-controls="range-dialog" aria-expanded="false" aria-label="Change range">
               ${icon("git-branch")}
-              <strong id="range-label">Full branch</strong>
+              <strong id="range-label">Committed changes</strong>
               <span class="range-chevron">${icon("chevron-down")}</span>
             </button>
             <button class="range-button checkout-button" id="checkout-button" aria-haspopup="menu" aria-expanded="false" hidden>

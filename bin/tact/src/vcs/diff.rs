@@ -176,14 +176,26 @@ impl ReviewContext {
             .collect()
     }
 
-    /// The range a review opens with: the current branch.
+    /// The range a review opens with: the current branch's commits, so uncommitted work stays out
+    /// of it, or the full branch while the branch has no commits of its own.
     pub fn default_range(&self) -> ReviewRange {
-        self.full_range()
+        self.committed_range().unwrap_or_else(|| self.full_range())
     }
 
     fn uncommitted_range(&self) -> ReviewRange {
         let to = self.range_points.len() - 1;
         ReviewRange { from: to - 1, to }
+    }
+
+    /// The current branch relative to its parent branch, through the head commit. `None` when the
+    /// branch has no commits of its own.
+    fn committed_range(&self) -> Option<ReviewRange> {
+        // The last point is the working tree, so the one before it is the head commit.
+        let head = self.range_points.len() - 2;
+        (self.branch_base < head).then_some(ReviewRange {
+            from: self.branch_base,
+            to: head,
+        })
     }
 
     /// The current branch relative to its parent branch, through the working tree. In a stack of
@@ -210,6 +222,9 @@ impl ReviewContext {
         self.validate_range(range)?;
         if range == self.uncommitted_range() {
             return Ok("Uncommitted changes".to_owned());
+        }
+        if Some(range) == self.committed_range() {
+            return Ok("Committed changes".to_owned());
         }
         if range == self.full_range() {
             return Ok("Full branch".to_owned());
@@ -839,6 +854,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn review_opens_with_the_branch_commits_without_uncommitted_work() {
+        let repository = repository();
+        feature_branch(&repository);
+        fs::write(repository.path().join("tracked.txt"), "changed\n").unwrap();
+        fs::write(repository.path().join("new.txt"), "new\n").unwrap();
+
+        let context = ReviewContext::load(repository.path()).await.unwrap();
+        assert_eq!(context.default_range(), ReviewRange { from: 0, to: 1 });
+        let snapshot = context.collect(context.default_range()).await.unwrap();
+
+        assert_eq!(snapshot.scope, "Committed changes");
+        assert_eq!(
+            added_lines(&snapshot.patch),
+            expected_lines(&[("tracked.txt", &["feature"])])
+        );
+    }
+
+    #[tokio::test]
+    async fn review_of_a_branch_without_commits_opens_with_its_uncommitted_work() {
+        let repository = repository();
+        git(repository.path(), &["checkout", "--quiet", "-b", "feature"]);
+        fs::write(repository.path().join("new.txt"), "new\n").unwrap();
+
+        let context = ReviewContext::load(repository.path()).await.unwrap();
+        assert_eq!(context.default_range(), context.full_range());
+        let snapshot = context.collect(context.default_range()).await.unwrap();
+
+        assert_eq!(
+            added_lines(&snapshot.patch),
+            expected_lines(&[("new.txt", &["new"])])
+        );
+    }
+
+    #[tokio::test]
     async fn review_patch_uses_canonical_prefixes_despite_git_configuration() {
         for setting in ["diff.mnemonicPrefix", "diff.noprefix"] {
             let repository = repository();
@@ -978,8 +1027,12 @@ mod tests {
         commit_file(repository.path(), "two.txt", "two\n", "child change");
 
         let context = ReviewContext::load(repository.path()).await.unwrap();
-        assert_eq!(context.default_range(), ReviewRange { from: 1, to: 3 });
+        assert_eq!(context.default_range(), ReviewRange { from: 1, to: 2 });
         assert_eq!(context.stack_range(), ReviewRange { from: 0, to: 3 });
+        assert_eq!(
+            context.range_label(context.default_range()).unwrap(),
+            "Committed changes"
+        );
         assert_eq!(
             context.range_label(context.full_range()).unwrap(),
             "Full branch"
@@ -1023,7 +1076,7 @@ mod tests {
 
         let context = ReviewContext::load(repository.path()).await.unwrap();
         let targets = context.range_targets();
-        assert_eq!(context.default_range(), context.full_range());
+        assert_eq!(context.default_range(), ReviewRange { from: 0, to: 2 });
         assert_eq!(targets.len(), 4);
         assert!(matches!(targets[0].kind, ReviewTargetKind::Trunk));
         assert_eq!(targets[1].title, "first change");

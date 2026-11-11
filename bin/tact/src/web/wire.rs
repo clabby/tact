@@ -27,7 +27,7 @@ use tact_subagents::{
 };
 
 /// Version of the browser protocol. Bundles declare the range they speak in their manifest.
-pub(super) const PROTOCOL_VERSION: u32 = 10;
+pub(super) const PROTOCOL_VERSION: u32 = 11;
 /// Longest string sent to a browser in an entry or a tool detail.
 const MAX_STRING_BYTES: usize = 256 * 1024;
 const MAX_SUMMARY_CHARS: usize = 200;
