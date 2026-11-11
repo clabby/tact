@@ -18,7 +18,8 @@
   .review-shell { position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; grid-template-columns: minmax(0, 1fr); height: 100%; min-height: 0; background: var(--bg); }
   .topbar { grid-row: 1; position: relative; z-index: 30; display: flex; align-items: center; gap: var(--space-3); min-height: 52px; padding: var(--space-2) var(--space-4); border-bottom: 1px solid var(--line); }
   .changes-nav { display: none; }
-  .review-shell:has(.overview-panel.active) .changes-nav, .review-shell:has(.overview-panel.active) .layout-toggle { display: none; }
+  .review-shell:has(.overview-panel.active) :is(.changes-nav, .layout-toggle, .sidebar-toggle) { display: none; }
+  .sidebar-toggle { flex: none; }
   .segment .overview-tab-activity { display: none; color: var(--accent); }
   .segment.loading .overview-tab-activity { display: inline-block; }
   .editor-tabs { align-self: center; margin: var(--space-2) 0; }
@@ -331,6 +332,11 @@
     .scope-description { display: none; }
   }
 
+  @container review (width > 760px) {
+    .changes-panel.active[data-sidebar-hidden] { grid-template-columns: minmax(0, 1fr); }
+    .changes-panel[data-sidebar-hidden] .sidebar { display: none; }
+  }
+
   @container review (max-width: 900px) {
     .change-stats span, .refresh-notice span { display: none; }
   }
@@ -344,6 +350,7 @@
     .range-button { max-width: 100%; }
     .change-stats { grid-area: stats; }
     .layout-toggle { display: none; }
+    .sidebar-toggle { display: none; }
     .changes-panel.active { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr); }
     .review-search { top: 8px; right: 8px; width: calc(100% - 16px); }
     .sidebar { display: none; grid-row: 1; width: auto; min-width: 0; border-right: 0; }

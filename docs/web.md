@@ -471,6 +471,8 @@ mobile-first.
   Clicking a file's header in **Review** collapses or expands that file, and Alt+click (Option+click
   on macOS) does the same for every file. **Mark as Seen** also collapses the file, and the mark
   lasts until the file's diff changes.
+  The button at the start of the Review toolbar folds away the changed files and comments
+  sidebar so the diff takes the full width (remembered per browser).
 - **Transcript.** Prompts and messages render as Markdown with highlighted code and KaTeX math
   (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`, or a `math` fence). A `mermaid` fence renders as a
   diagram; Mermaid loads with the first one, a diagram opens enlarged on click, and one that

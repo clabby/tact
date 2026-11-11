@@ -48,6 +48,7 @@ import { ReviewStatus } from "./review-status";
 import { SEARCH_HIGHLIGHT, SearchBar } from "./search-bar";
 import { SeenFiles } from "./seen-files";
 import { SettingsPopover } from "./settings-popover";
+import { bindSidebarToggle } from "./sidebar-toggle";
 import "./review-panel.css";
 
 /** What the application shell lends the review panel. */
@@ -561,6 +562,7 @@ class ReviewPanel {
 
   private bindEvents() {
     this.search.bind();
+    bindSidebarToggle(this.root, localStorage);
     const tabs = [...this.root.querySelectorAll<HTMLButtonElement>("[data-tab]")];
     for (const [index, tab] of tabs.entries()) {
       tab.addEventListener("click", () => this.selectTab(tab.dataset.tab ?? "changes"));
