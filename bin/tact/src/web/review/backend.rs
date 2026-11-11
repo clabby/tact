@@ -102,6 +102,7 @@ impl ReviewBackend {
                 checkout: self.identity.clone(),
                 trunk: context.trunk_name().to_owned(),
                 range_targets: context.range_targets(),
+                branch_range: context.full_range(),
                 default_range,
             };
             return Ok(PreparedReview {

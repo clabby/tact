@@ -25,6 +25,9 @@ pub(super) struct ReviewBootstrap {
     pub(super) checkout: CheckoutIdentity,
     pub(super) trunk: String,
     pub(super) range_targets: Vec<ReviewTarget>,
+    /// The current branch relative to its parent branch, through the working tree.
+    pub(super) branch_range: ReviewRange,
+    /// The range the review opens with: the branch's commits, or the full branch while it has none.
     pub(super) default_range: ReviewRange,
 }
 

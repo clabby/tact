@@ -1,7 +1,7 @@
 import type { Checkout } from "../core/wire";
 import type { ReviewRange, ReviewTarget } from "./range-selection";
 
-export const REVIEW_PROTOCOL_VERSION = 10;
+export const REVIEW_PROTOCOL_VERSION = 11;
 
 export type ReviewComment = {
   id: number;
@@ -31,6 +31,9 @@ export type ReviewSession = {
   checkout: Pick<Checkout, "path" | "name" | "label" | "kind">;
   trunk: string;
   range_targets: ReviewTarget[];
+  /** The current branch relative to its parent branch, through the working tree. */
+  branch_range: ReviewRange;
+  /** The range the review opens with: the branch's commits, or `branch_range` while it has none. */
   default_range: ReviewRange;
   page: ReviewPage;
   overview: StoredOverview | null;

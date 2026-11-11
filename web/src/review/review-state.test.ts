@@ -14,7 +14,7 @@ import {
 
 const firstPage = page(3, { from: 0, to: 2 });
 const session: ReviewSession = {
-  protocol_version: 10,
+  protocol_version: 11,
   turn_running: false,
   generation: 3,
   title: "Review",
@@ -22,6 +22,7 @@ const session: ReviewSession = {
   checkout: { path: "/src/tact", name: "tact", label: "main", kind: "git" },
   trunk: "main",
   range_targets: [],
+  branch_range: firstPage.selected_range,
   default_range: firstPage.selected_range,
   page: firstPage,
   overview: null,

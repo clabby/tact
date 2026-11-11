@@ -409,7 +409,10 @@ turn running (`turn_running`), and are cancelled when the session closes.
 | `POST /api/review/compose` | `generation, range, decision, summary?, comments?, session?, checkout?` | `{ markdown }` |
 
 `Review` is `{ protocol_version, generation, title, repository, checkout: { path, name, label,
-kind }, trunk, range_targets, default_range (the full branch), page: ReviewPage, overview, questions, turn_running }`.
+kind }, trunk, range_targets, branch_range, default_range, page: ReviewPage, overview, questions,
+turn_running }`. `branch_range` is the current branch relative to its parent branch, through the
+working tree. `default_range` is the range a review opens with: the branch's commits without the
+working tree, or `branch_range` while the branch has no commits of its own.
 A `ReviewPage` is `{ generation, selected_range, full_context, patch, repository, scope, base }`;
 `patch` is a git patch with full file context. `overview` and `questions` are the named session's
 selected overview and question threads.
