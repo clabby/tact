@@ -1,3 +1,4 @@
+import { glyph } from "../ui/glyphs";
 import { icon } from "./icons";
 import { escapeHtml } from "./markup";
 
@@ -9,6 +10,7 @@ export function panelMarkup(repository: string, settingsPopover: string, rangeDi
   return `
       <div class="review-shell">
         <header class="topbar">
+          <button type="button" class="icon-button sidebar-toggle" id="sidebar-toggle" aria-controls="review-sidebar" aria-expanded="true" aria-label="Hide files and comments" title="Hide files and comments">${glyph("sidebar")}</button>
           <nav class="segmented review-tabs" role="tablist" aria-label="Review sections">
             <button class="segment active" id="changes-tab" role="tab" aria-selected="true" aria-controls="changes-panel" data-tab="changes">Changes<span class="tab-count" id="file-count">0</span></button>
             <button class="segment" id="overview-tab" role="tab" aria-selected="false" aria-controls="overview-panel" tabindex="-1" data-tab="overview">Overview<span class="activity-spinner overview-tab-activity" aria-hidden="true"></span></button>
@@ -63,7 +65,7 @@ export function panelMarkup(repository: string, settingsPopover: string, rangeDi
             <button class="small-icon-button" data-search-next aria-label="Next match" title="Next match" disabled>${icon("chevron-down")}</button>
             <button class="small-icon-button" data-search-close aria-label="Close search" title="Close search">${icon("close")}</button>
           </div>
-          <aside class="sidebar">
+          <aside class="sidebar" id="review-sidebar">
             <div class="files-navigation" data-mobile-content="files">
               <div class="sidebar-label">Changed files</div>
               <div id="file-tree" class="file-tree"></div>
