@@ -67,7 +67,9 @@ Review reads every kind of checkout through git (the `vcs` module):
 For a jj workspace without `.git`, git runs with `GIT_DIR`, `GIT_WORK_TREE`, and a temporary
 `GIT_INDEX_FILE` seeded with `git read-tree <head>`. jj always runs with `--ignore-working-copy`.
 Reading a checkout writes nothing to the user's repository. Untracked listings skip `.jj` and
-`.git`. A jj workspace cannot be reviewed on a machine without `jj`; the error says jj is missing.
+`.git`. An untracked file larger than 1 MiB appears in a review as a binary file without content,
+so git never reads it. A jj workspace cannot be reviewed on a machine without `jj`; the error says
+jj is missing.
 
 ## Review requests
 
