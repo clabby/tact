@@ -1702,7 +1702,7 @@ fn render_stacked_table(
 mod tests {
     use super::{
         super::image::{Cache, MAX_IMAGE_HEIGHT},
-        ImageState, Layout, render, render_cached,
+        ImageState, Layout, SourceSpan, render, render_cached,
     };
     use crate::app::theme::Theme;
     use ratatui::style::{Color, Modifier};
@@ -1993,6 +1993,68 @@ mod tests {
                 vec!["Pick one."],
             ]
         );
+    }
+
+    /// Selection maps rendered cells back to the source by matching text in
+    /// order, so a construct drawn out of order or with missing text can shift
+    /// the mapping of everything after it. Each construct here must leave a
+    /// following paragraph selectable exactly as if it were rendered alone.
+    /// Diff blocks with headers and images without alt text still break this
+    /// and are not listed.
+    #[test]
+    fn constructs_leave_later_text_selectable() {
+        let paragraph = "Closing words map back to their own source text.";
+        let constructs = [
+            "| Approach | Tradeoff |\n|---|---|\n| keep every cached layout | uses more memory during long sessions |",
+            "| Key | Kind | Size | Note |\n|---|---|---|---|\n| alpha | layout | big | keeps every cached row |",
+            "| Link | Note |\n|---|---|\n| [docs](https://example.com/docs) and more | $x$ <br> text[^n] |\n\n[^n]: note",
+            "[label](https://example.com/a), <https://example.com/b> and [reference][r]\n\n[r]: https://example.com/c",
+            "![alt text](image.png)",
+            "**bold** *emphasis* ~~struck~~ `code` $x^2$ <kbd>Ctrl</kbd> &amp; \"quotes\" -- dashes...",
+            "# Heading\n\n> [!NOTE]\n> quoted text\n\n---",
+            "1. 1st item\n2. second item\n   - [x] done\n   - [ ] todo",
+            "```rust\nfn main() {\n\tlet x = 1;\n}\n```",
+            "```diff\n-old line\n+new line\n```",
+            "<div>\nhtml block\n</div>\n\nline one\\\nline two",
+        ];
+        for width in [80, 40, 12] {
+            let alone = render_without_images(paragraph, width);
+            for construct in constructs {
+                let markdown = format!("{construct}\n\n{paragraph}");
+                let layout = render_without_images(&markdown, width);
+                let offset = markdown.len() - paragraph.len();
+                let expected = alone
+                    .selections
+                    .iter()
+                    .map(|spans| {
+                        spans
+                            .iter()
+                            .map(|span| SourceSpan {
+                                columns: span.columns.clone(),
+                                source: span.source.start + offset..span.source.end + offset,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                let first_row = layout.lines.len() - alone.lines.len();
+
+                assert_eq!(
+                    layout.selections[first_row..],
+                    expected,
+                    "{construct:?} at width {width}"
+                );
+            }
+        }
+    }
+
+    fn render_without_images(markdown: &str, width: u16) -> Layout {
+        render_cached(
+            markdown,
+            width,
+            &Theme::default(),
+            Path::new("/workspace"),
+            &mut Cache::with_inline_images(false),
+        )
     }
 
     /// The source text selectable on each rendered line, split wherever the
