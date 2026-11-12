@@ -30,7 +30,7 @@ use ratatui::{
     text::{Line, Span},
 };
 use ratatui_image::sliced::SlicedProtocol;
-use std::{ops::Range, path::Path, sync::Arc};
+use std::{collections::BTreeMap, ops::Range, path::Path, sync::Arc};
 use syntect::easy::HighlightLines;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -149,14 +149,9 @@ pub(super) fn render_cached(
             event => renderer.event(event),
         }
     }
-    let (mut layout, selection_exclusions, image_selection_modes) = renderer.finish();
-    let (selections, envelopes) = markdown_selection_spans(
-        markdown,
-        &layout.lines,
-        options,
-        &selection_exclusions,
-        &image_selection_modes,
-    );
+    let (mut layout, hints) = renderer.finish();
+    let (selections, envelopes) =
+        markdown_selection_spans(markdown, &layout.lines, options, &hints);
     layout.selections = selections;
     layout.envelopes = envelopes;
     layout
@@ -172,7 +167,7 @@ pub(super) fn plain_selection_spans_excluding(
     exclusions: &[Vec<Range<u16>>],
 ) -> Vec<Vec<SourceSpan>> {
     let graphemes = source_graphemes(source, source, 0..source.len());
-    align_source_graphemes(&graphemes, lines, exclusions)
+    align_source_graphemes(graphemes, &[], lines, exclusions, &[])
 }
 
 pub(super) fn wrap_plain(text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
@@ -226,6 +221,7 @@ struct Renderer<'a> {
     rendered_links: Vec<(usize, LinkSpan)>,
     selection_exclusions: Vec<Vec<Range<u16>>>,
     image_selection_modes: Vec<ImageSelectionMode>,
+    tables: Vec<RenderedTable>,
     images: Vec<ImagePlacement>,
     image_state: ImageState,
     image: Option<LinkState>,
@@ -247,6 +243,31 @@ enum ImageSelectionMode {
     Hidden,
     AltText,
     Link,
+}
+
+/// What the renderer records for matching rendered cells to source text.
+struct SelectionHints {
+    exclusions: Vec<Vec<Range<u16>>>,
+    image_modes: Vec<ImageSelectionMode>,
+    tables: Vec<RenderedTable>,
+}
+
+/// Where a table drew the text of each of its source cells.
+///
+/// Wrapped cells share rendered rows with their neighbours, so a table is not
+/// drawn in source order. Selection matches each cell only to its own text and
+/// never to table borders.
+struct RenderedTable {
+    lines: Range<usize>,
+    /// For each line of the table, the columns that show cell text.
+    cells: Vec<Vec<CellText>>,
+}
+
+/// Columns of a table line that show part of one source cell, identified by
+/// the cell's position among the table's cells in source order.
+struct CellText {
+    columns: Range<u16>,
+    cell: usize,
 }
 
 struct TaggedSpan {
@@ -273,6 +294,7 @@ impl<'a> Renderer<'a> {
             rendered_links: Vec::new(),
             selection_exclusions: Vec::new(),
             image_selection_modes: Vec::new(),
+            tables: Vec::new(),
             images: Vec::new(),
             image_state: ImageState::None,
             image: None,
@@ -711,8 +733,13 @@ impl<'a> Renderer<'a> {
                 _ => {}
             }
         }
-        self.lines
-            .extend(render_table(&rows, header_rows, self.width, self.theme));
+        let (lines, cells) = render_table(&rows, header_rows, self.width, self.theme);
+        let first_line = self.lines.len();
+        self.tables.push(RenderedTable {
+            lines: first_line..first_line + lines.len(),
+            cells,
+        });
+        self.lines.extend(lines);
         self.blank();
     }
 
@@ -822,7 +849,7 @@ impl<'a> Renderer<'a> {
         self.selection_exclusions[line].push(columns);
     }
 
-    fn finish(mut self) -> (Layout, Vec<Vec<Range<u16>>>, Vec<ImageSelectionMode>) {
+    fn finish(mut self) -> (Layout, SelectionHints) {
         self.flush();
         while self.lines.last().is_some_and(|line| line.width() == 0) {
             self.lines.pop();
@@ -844,8 +871,11 @@ impl<'a> Renderer<'a> {
         };
         (
             layout,
-            self.selection_exclusions,
-            self.image_selection_modes,
+            SelectionHints {
+                exclusions: self.selection_exclusions,
+                image_modes: self.image_selection_modes,
+                tables: self.tables,
+            },
         )
     }
 }
@@ -860,17 +890,24 @@ fn markdown_selection_spans(
     markdown: &str,
     lines: &[Line<'static>],
     options: Options,
-    exclusions: &[Vec<Range<u16>>],
-    image_selection_modes: &[ImageSelectionMode],
+    hints: &SelectionHints,
 ) -> (Vec<Vec<SourceSpan>>, Vec<SourceEnvelope>) {
     let mut graphemes = Vec::<SourceGrapheme>::new();
+    // The grapheme ranges of every table's cells, in source order.
+    let mut table_cells = Vec::<Vec<Range<usize>>>::new();
+    let mut cell_start = 0;
     let mut envelopes = Vec::<(TagEnd, Range<usize>, usize, bool, Option<String>, bool)>::new();
     let mut source_envelopes = Vec::new();
-    let mut image_modes = image_selection_modes.iter().copied();
+    let mut image_modes = hints.image_modes.iter().copied();
     let mut hidden_image_depth = 0_usize;
     for (event, range) in Parser::new_ext(markdown, options).into_offset_iter() {
         match event {
             Event::Start(tag) => {
+                match &tag {
+                    Tag::Table(_) => table_cells.push(Vec::new()),
+                    Tag::TableCell => cell_start = graphemes.len(),
+                    _ => {}
+                }
                 let image_mode = matches!(tag, Tag::Image { .. })
                     .then(|| image_modes.next().unwrap_or(ImageSelectionMode::Hidden));
                 let hidden_image = matches!(image_mode, Some(ImageSelectionMode::Hidden));
@@ -897,6 +934,11 @@ fn markdown_selection_spans(
                 ));
             }
             Event::End(end) => {
+                if end == TagEnd::TableCell
+                    && let Some(cells) = table_cells.last_mut()
+                {
+                    cells.push(cell_start..graphemes.len());
+                }
                 let Some(index) = envelopes.iter().rposition(|(tag, ..)| *tag == end) else {
                     continue;
                 };
@@ -985,7 +1027,13 @@ fn markdown_selection_spans(
         }
     }
     (
-        align_source_graphemes(&graphemes, lines, exclusions),
+        align_source_graphemes(
+            graphemes,
+            &table_cells,
+            lines,
+            &hints.exclusions,
+            &hints.tables,
+        ),
         source_envelopes,
     )
 }
@@ -1017,12 +1065,72 @@ struct RenderedGrapheme {
     width: u16,
 }
 
+/// The rendered graphemes that a source grapheme may match. Text outside tables
+/// is drawn in source order, but the cells of a table row are drawn side by
+/// side, so each cell is matched on its own.
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum Segment {
+    Flow,
+    TableCell { table: usize, cell: usize },
+}
+
+/// Maps rendered graphemes to the source text they display. `table_cells`
+/// holds the source grapheme ranges of each table's cells, in the same order
+/// as `tables`.
 fn align_source_graphemes(
-    source: &[SourceGrapheme],
+    source: Vec<SourceGrapheme>,
+    table_cells: &[Vec<Range<usize>>],
     lines: &[Line<'static>],
     exclusions: &[Vec<Range<u16>>],
+    tables: &[RenderedTable],
 ) -> Vec<Vec<SourceSpan>> {
-    let rendered = rendered_graphemes(lines, exclusions);
+    let mut source_segments = vec![Segment::Flow; source.len()];
+    for (table, cells) in table_cells.iter().enumerate() {
+        for (cell, graphemes) in cells.iter().enumerate() {
+            source_segments[graphemes.clone()].fill(Segment::TableCell { table, cell });
+        }
+    }
+    let mut segments = BTreeMap::<Segment, (Vec<SourceGrapheme>, Vec<RenderedGrapheme>)>::new();
+    for (grapheme, segment) in source.into_iter().zip(source_segments) {
+        segments.entry(segment).or_default().0.push(grapheme);
+    }
+    for grapheme in rendered_graphemes(lines, exclusions) {
+        if let Some(segment) = rendered_segment(&grapheme, tables) {
+            segments.entry(segment).or_default().1.push(grapheme);
+        }
+    }
+    let mut selections = vec![Vec::new(); lines.len()];
+    for (source, rendered) in segments.values() {
+        align_segment(source, rendered, &mut selections);
+    }
+    selections
+}
+
+/// The segment of a rendered grapheme, or `None` for table borders.
+fn rendered_segment(grapheme: &RenderedGrapheme, tables: &[RenderedTable]) -> Option<Segment> {
+    let index = tables.partition_point(|table| table.lines.end <= grapheme.line);
+    let Some(table) = tables
+        .get(index)
+        .filter(|table| table.lines.contains(&grapheme.line))
+    else {
+        return Some(Segment::Flow);
+    };
+    table.cells[grapheme.line - table.lines.start]
+        .iter()
+        .find(|text| text.columns.contains(&grapheme.column))
+        .map(|text| Segment::TableCell {
+            table: index,
+            cell: text.cell,
+        })
+}
+
+/// Matches source graphemes to rendered graphemes that display them in the
+/// same order, adding a span for each match to the rendered grapheme's line.
+fn align_segment(
+    source: &[SourceGrapheme],
+    rendered: &[RenderedGrapheme],
+    selections: &mut [Vec<SourceSpan>],
+) {
     let mut matches = vec![None; source.len()];
     let mut next_rendered = 0;
     for (source_index, grapheme) in source.iter().enumerate() {
@@ -1098,7 +1206,6 @@ fn align_source_graphemes(
         }
     }
 
-    let mut selections = vec![Vec::new(); lines.len()];
     for (grapheme, rendered_index) in source.iter().zip(matches) {
         let Some(rendered) = rendered_index.and_then(|index| rendered.get(index)) else {
             continue;
@@ -1108,7 +1215,6 @@ fn align_source_graphemes(
             source: grapheme.source.clone(),
         });
     }
-    selections
 }
 
 fn rendered_graphemes(
@@ -1416,15 +1522,16 @@ fn code_block_header(language: Option<&str>, width: u16, theme: &Theme) -> Line<
     ])
 }
 
+/// Renders a table and returns, for each rendered line, where it drew cell text.
 fn render_table(
     rows: &[Vec<String>],
     header_rows: usize,
     width: u16,
     theme: &Theme,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<Vec<CellText>>) {
     let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
     if columns == 0 || width < 4 {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let border_cells = u16::try_from(columns.saturating_add(1)).unwrap_or(u16::MAX);
     let available = width.saturating_sub(border_cells);
@@ -1448,8 +1555,8 @@ fn render_table(
         widths[index] -= 1;
     }
 
-    let mut lines = Vec::new();
-    lines.push(table_rule('╭', '┬', '╮', &widths, theme));
+    let mut drawn = vec![(table_rule('╭', '┬', '╮', &widths, theme), Vec::new())];
+    let mut first_cell = 0;
     for (row_index, row) in rows.iter().enumerate() {
         let wrapped = widths
             .iter()
@@ -1461,6 +1568,8 @@ fn render_table(
         let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
         for line_index in 0..height {
             let mut spans = vec![Span::styled("│", Style::default().fg(theme.border()))];
+            let mut cells = Vec::new();
+            let mut left = 1_u16;
             for (column, &cell_width) in widths.iter().enumerate() {
                 let text = wrapped[column].get(line_index).map_or("", String::as_str);
                 let padding = usize::from(cell_width).saturating_sub(UnicodeWidthStr::width(text));
@@ -1476,15 +1585,23 @@ fn render_table(
                     style,
                 ));
                 spans.push(Span::styled("│", Style::default().fg(theme.border())));
+                if column < row.len() && line_index < wrapped[column].len() {
+                    cells.push(CellText {
+                        columns: left..left.saturating_add(cell_width),
+                        cell: first_cell + column,
+                    });
+                }
+                left = left.saturating_add(cell_width).saturating_add(1);
             }
-            lines.push(Line::from(spans));
+            drawn.push((Line::from(spans), cells));
         }
+        first_cell += row.len();
         if row_index + 1 < rows.len() {
-            lines.push(table_rule('├', '┼', '┤', &widths, theme));
+            drawn.push((table_rule('├', '┼', '┤', &widths, theme), Vec::new()));
         }
     }
-    lines.push(table_rule('╰', '┴', '╯', &widths, theme));
-    lines
+    drawn.push((table_rule('╰', '┴', '╯', &widths, theme), Vec::new()));
+    drawn.into_iter().unzip()
 }
 
 fn table_rule(
@@ -1511,52 +1628,85 @@ fn render_stacked_table(
     header_rows: usize,
     width: u16,
     theme: &Theme,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<Vec<CellText>>) {
     let Some(headers) = rows.first() else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
-    let mut lines = vec![Line::from(Span::styled(
-        format!("╭{}╮", "─".repeat(usize::from(width.saturating_sub(2)))),
-        Style::default().fg(theme.border()),
-    ))];
-    for row in rows.iter().skip(header_rows.max(1)) {
+    let header_rows = header_rows.max(1);
+    let mut drawn = vec![(
+        Line::from(Span::styled(
+            format!("╭{}╮", "─".repeat(usize::from(width.saturating_sub(2)))),
+            Style::default().fg(theme.border()),
+        )),
+        Vec::new(),
+    )];
+    // Header cells only appear as labels repeated beside every value, so they
+    // have no rendered text of their own.
+    let mut cell = rows.iter().take(header_rows).map(Vec::len).sum::<usize>();
+    for row in rows.iter().skip(header_rows) {
         for (column, value) in row.iter().enumerate() {
             let header = headers.get(column).map_or("Value", String::as_str);
-            let content = format!("{header}: {value}");
+            let label = format!("{header}: ");
+            let label_width =
+                u16::try_from(UnicodeWidthStr::width(label.as_str())).unwrap_or(u16::MAX);
+            let content = format!("{label}{value}");
+            let mut content_offset = 0_u16;
             for line in hard_wrap(&content, width.saturating_sub(4).max(1)) {
-                let padding = usize::from(width.saturating_sub(4))
-                    .saturating_sub(UnicodeWidthStr::width(line.as_str()));
-                lines.push(Line::from(vec![
-                    Span::styled("│ ", Style::default().fg(theme.border())),
-                    Span::styled(line, Style::default().fg(theme.text())),
-                    Span::raw(" ".repeat(padding)),
-                    Span::styled(" │", Style::default().fg(theme.border())),
-                ]));
+                let line_width =
+                    u16::try_from(UnicodeWidthStr::width(line.as_str())).unwrap_or(u16::MAX);
+                let value_start = label_width.saturating_sub(content_offset);
+                let cells = if value_start < line_width {
+                    // Content starts after the two-column left border.
+                    vec![CellText {
+                        columns: value_start.saturating_add(2)..line_width.saturating_add(2),
+                        cell,
+                    }]
+                } else {
+                    Vec::new()
+                };
+                content_offset = content_offset.saturating_add(line_width);
+                let padding = usize::from(width.saturating_sub(4).saturating_sub(line_width));
+                drawn.push((
+                    Line::from(vec![
+                        Span::styled("│ ", Style::default().fg(theme.border())),
+                        Span::styled(line, Style::default().fg(theme.text())),
+                        Span::raw(" ".repeat(padding)),
+                        Span::styled(" │", Style::default().fg(theme.border())),
+                    ]),
+                    cells,
+                ));
             }
+            cell += 1;
         }
         if row.as_ptr() != rows.last().map_or(row.as_ptr(), Vec::as_ptr) {
-            lines.push(Line::from(Span::styled(
-                format!("├{}┤", "─".repeat(usize::from(width.saturating_sub(2)))),
-                Style::default().fg(theme.border()),
-            )));
+            drawn.push((
+                Line::from(Span::styled(
+                    format!("├{}┤", "─".repeat(usize::from(width.saturating_sub(2)))),
+                    Style::default().fg(theme.border()),
+                )),
+                Vec::new(),
+            ));
         }
     }
-    lines.push(Line::from(Span::styled(
-        format!("╰{}╯", "─".repeat(usize::from(width.saturating_sub(2)))),
-        Style::default().fg(theme.border()),
-    )));
-    lines
+    drawn.push((
+        Line::from(Span::styled(
+            format!("╰{}╯", "─".repeat(usize::from(width.saturating_sub(2)))),
+            Style::default().fg(theme.border()),
+        )),
+        Vec::new(),
+    ));
+    drawn.into_iter().unzip()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         super::image::{Cache, MAX_IMAGE_HEIGHT},
-        ImageState, Layout, render, render_cached,
+        ImageState, Layout, SourceSpan, render, render_cached,
     };
     use crate::app::theme::Theme;
     use ratatui::style::{Color, Modifier};
-    use std::{fs::File, path::Path, sync::Arc, time::Instant};
+    use std::{fs::File, ops::Range, path::Path, sync::Arc, time::Instant};
 
     fn write_png(path: &Path) {
         write_solid_png(path, 1, 1);
@@ -1790,6 +1940,140 @@ mod tests {
 
         assert!(lines.iter().all(|line| line.width() <= 8));
         assert!(lines.first().unwrap().to_string().starts_with('╭'));
+    }
+
+    #[test]
+    fn wrapped_table_cells_select_their_own_source_text() {
+        let markdown = concat!(
+            "| Approach | Tradeoff |\n",
+            "|---|---|\n",
+            "| keep cached layouts | more memory |\n\n",
+            "Pick one.",
+        );
+        let layout = render(markdown, 21, &Theme::default());
+
+        assert_eq!(
+            selectable_text(&layout, markdown),
+            [
+                vec![],
+                vec!["Approach", "Tradeoff"],
+                vec![],
+                vec!["keep cach", "more memo"],
+                vec!["ed layout", "ry"],
+                vec!["s"],
+                vec![],
+                vec![],
+                vec!["Pick one."],
+            ]
+        );
+    }
+
+    #[test]
+    fn stacked_table_values_select_their_own_source_text() {
+        let markdown = concat!(
+            "| Key | Kind | Size | Note |\n",
+            "|---|---|---|---|\n",
+            "| alpha | layout | big | keeps every cached row |\n\n",
+            "Pick one.",
+        );
+        let layout = render(markdown, 16, &Theme::default());
+
+        assert_eq!(
+            selectable_text(&layout, markdown),
+            [
+                vec![],
+                vec!["alpha"],
+                vec!["layout"],
+                vec!["big"],
+                vec!["keeps "],
+                vec!["every cached"],
+                vec![" row"],
+                vec![],
+                vec![],
+                vec!["Pick one."],
+            ]
+        );
+    }
+
+    /// Selection maps rendered cells back to the source by matching text in
+    /// order, so a construct drawn out of order or with missing text can shift
+    /// the mapping of everything after it. Each construct here must leave a
+    /// following paragraph selectable exactly as if it were rendered alone.
+    /// Diff blocks with headers and images without alt text still break this
+    /// and are not listed.
+    #[test]
+    fn constructs_leave_later_text_selectable() {
+        let paragraph = "Closing words map back to their own source text.";
+        let constructs = [
+            "| Approach | Tradeoff |\n|---|---|\n| keep every cached layout | uses more memory during long sessions |",
+            "| Key | Kind | Size | Note |\n|---|---|---|---|\n| alpha | layout | big | keeps every cached row |",
+            "| Link | Note |\n|---|---|\n| [docs](https://example.com/docs) and more | $x$ <br> text[^n] |\n\n[^n]: note",
+            "[label](https://example.com/a), <https://example.com/b> and [reference][r]\n\n[r]: https://example.com/c",
+            "![alt text](image.png)",
+            "**bold** *emphasis* ~~struck~~ `code` $x^2$ <kbd>Ctrl</kbd> &amp; \"quotes\" -- dashes...",
+            "# Heading\n\n> [!NOTE]\n> quoted text\n\n---",
+            "1. 1st item\n2. second item\n   - [x] done\n   - [ ] todo",
+            "```rust\nfn main() {\n\tlet x = 1;\n}\n```",
+            "```diff\n-old line\n+new line\n```",
+            "<div>\nhtml block\n</div>\n\nline one\\\nline two",
+        ];
+        for width in [80, 40, 12] {
+            let alone = render_without_images(paragraph, width);
+            for construct in constructs {
+                let markdown = format!("{construct}\n\n{paragraph}");
+                let layout = render_without_images(&markdown, width);
+                let offset = markdown.len() - paragraph.len();
+                let expected = alone
+                    .selections
+                    .iter()
+                    .map(|spans| {
+                        spans
+                            .iter()
+                            .map(|span| SourceSpan {
+                                columns: span.columns.clone(),
+                                source: span.source.start + offset..span.source.end + offset,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                let first_row = layout.lines.len() - alone.lines.len();
+
+                assert_eq!(
+                    layout.selections[first_row..],
+                    expected,
+                    "{construct:?} at width {width}"
+                );
+            }
+        }
+    }
+
+    fn render_without_images(markdown: &str, width: u16) -> Layout {
+        render_cached(
+            markdown,
+            width,
+            &Theme::default(),
+            Path::new("/workspace"),
+            &mut Cache::with_inline_images(false),
+        )
+    }
+
+    /// The source text selectable on each rendered line, split wherever the
+    /// source is not contiguous.
+    fn selectable_text<'a>(layout: &Layout, markdown: &'a str) -> Vec<Vec<&'a str>> {
+        layout
+            .selections
+            .iter()
+            .map(|spans| {
+                let mut runs = Vec::<Range<usize>>::new();
+                for span in spans {
+                    match runs.last_mut() {
+                        Some(run) if run.end == span.source.start => run.end = span.source.end,
+                        _ => runs.push(span.source.clone()),
+                    }
+                }
+                runs.into_iter().map(|run| &markdown[run]).collect()
+            })
+            .collect()
     }
 
     #[test]

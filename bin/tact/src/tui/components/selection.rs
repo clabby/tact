@@ -48,10 +48,12 @@ impl TextRange {
             return None;
         }
         let range_start = if block == start.block { start.start } else { 0 };
-        let range_end = if block == end.block {
-            end.end
-        } else {
-            source_len
+        let range_end = match (block == start.block, block == end.block) {
+            // Endpoint spans can nest, for example when every character of a
+            // link destination maps to the whole link, so cover both fully.
+            (true, true) => start.end.max(end.end),
+            (false, true) => end.end,
+            (_, false) => source_len,
         };
         (range_start < range_end).then_some(range_start..range_end)
     }
