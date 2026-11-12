@@ -2388,6 +2388,48 @@ fn transcript_selection_copies_original_markdown_syntax() {
 }
 
 #[test]
+fn transcript_selection_between_a_link_label_and_its_reference_destination_copies_the_link() {
+    let mut terminal = Terminal::new(TestBackend::new(64, 12)).unwrap();
+    let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+    root.update(super::RootEvent::Transcript(agent_record(
+        1,
+        AgentEventKind::AssistantMessage,
+        json!({
+            "model_call_index": 1,
+            "item_id": "answer",
+            "phase": "final_answer",
+            "text": "See [label][docs] for details.\n\n[docs]: https://example.com/dest",
+        }),
+    )));
+    terminal
+        .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let row = (0..buffer.area.height)
+        .find(|&row| {
+            (0..buffer.area.width)
+                .map(|column| buffer[(column, row)].symbol())
+                .collect::<String>()
+                .contains("label")
+        })
+        .expect("the link should be visible");
+    let label = text_column(buffer, row, "label");
+    let destination = text_column(buffer, row, "https://example.com/dest");
+
+    for (from, to) in [(label, destination), (destination, label)] {
+        root.update(mouse(MouseEventKind::Down(MouseButton::Left), from, row));
+        root.update(mouse(MouseEventKind::Drag(MouseButton::Left), to, row));
+        let update = root.update(mouse(MouseEventKind::Up(MouseButton::Left), to, row));
+
+        assert_eq!(
+            update.effects,
+            [RootEffect::Copy("[label][docs]".to_owned())],
+            "dragging from column {from} to column {to}"
+        );
+    }
+}
+
+#[test]
 fn transcript_selection_after_a_wrapped_table_copies_the_selected_line() {
     let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
