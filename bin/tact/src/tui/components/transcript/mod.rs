@@ -6,8 +6,8 @@
 //! - scrolling and tail following ([viewport]), including the count of updates
 //!   that arrived while the reader was scrolled away;
 //! - the per-entry layout cache ([cache]) and entry rendering ([render]);
-//! - expandable tool and message entries, their keyboard focus, and the
-//!   expand-all toggle;
+//! - expandable tool, message, and reasoning entries, their keyboard focus, and
+//!   the expand-all toggle;
 //! - the prompt pinned above a detached viewport ([pinned]);
 //! - the regions that mouse clicks and text selection resolve against ([hits]).
 //!
@@ -734,7 +734,7 @@ fn is_running_tool(entry: &TranscriptEntry) -> bool {
 fn is_expandable(entry: &TranscriptEntry) -> bool {
     matches!(
         entry.kind,
-        EntryKind::Tool(_) | EntryKind::DirectedMessage(_)
+        EntryKind::Tool(_) | EntryKind::DirectedMessage(_) | EntryKind::Reasoning { .. }
     )
 }
 
