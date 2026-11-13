@@ -22,6 +22,13 @@ use std::{borrow::Cow, ops::Range, path::Path, sync::Arc};
 const NESTED_TOOL_INDENT: u16 = 4;
 /// Columns occupied by the gutter in front of user prompt rows.
 const USER_GUTTER_WIDTH: u16 = 2;
+/// Columns in front of the reasoning title, as in tool summaries: room for the
+/// focus marker, then the disclosure marker and the reasoning symbol. Expanded
+/// reasoning is indented to the same column.
+const REASONING_INDENT: u16 = 6;
+/// Ends a reasoning preview whose line continues past the summary row.
+const REASONING_ELLIPSIS: &str = " …";
+const REASONING_ELLIPSIS_WIDTH: u16 = 2;
 
 /// Renders transcript entries at one width, borrowing the session's workspace for
 /// relative image paths and its image cache for prepared image protocols.
@@ -45,24 +52,7 @@ impl EntryRenderer<'_> {
             EntryKind::Assistant { text, .. } => {
                 markdown::render_cached(text, width, theme, self.workspace, self.images)
             }
-            EntryKind::Reasoning { text } => {
-                let mut layout = markdown::render_cached(
-                    text,
-                    width.saturating_sub(2),
-                    theme,
-                    self.workspace,
-                    self.images,
-                );
-                let style = Style::default()
-                    .fg(theme.muted())
-                    .add_modifier(Modifier::ITALIC);
-                for line in &mut layout.lines {
-                    for span in &mut line.spans {
-                        span.style = span.style.patch(style);
-                    }
-                }
-                layout
-            }
+            EntryKind::Reasoning { text } => self.reasoning(text, expanded),
             EntryKind::Tool(tool) => {
                 let indent = nested_tool_indent(entry, width);
                 let mut layout = tool::render_layout(
@@ -199,6 +189,101 @@ impl EntryRenderer<'_> {
             value,
             Span::styled(" · takes effect on the next turn", muted),
         ])])
+    }
+
+    /// Renders reasoning as one titled summary row, with the full Markdown
+    /// indented beneath it when expanded.
+    ///
+    /// Reasoning starts collapsed because it can run to many paragraphs. A
+    /// collapsed row previews the start of the latest line, which streamed text
+    /// extends, so a streaming entry reads as its current status. Expanded, the
+    /// preview would repeat the end of the body, so the row shows only the title.
+    fn reasoning(&mut self, text: &str, expanded: bool) -> markdown::Layout {
+        let theme = self.theme;
+        let style = Style::default()
+            .fg(theme.muted())
+            .add_modifier(Modifier::ITALIC);
+        let mut summary = Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                if expanded { "▼ " } else { "▶ " },
+                Style::default().fg(theme.border()),
+            ),
+            Span::styled("∴ ", Style::default().fg(theme.muted())),
+            Span::styled(
+                "Reasoning",
+                Style::default()
+                    .fg(theme.text())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
+        if !expanded {
+            summary.spans.push(Span::raw("  "));
+            let preview_width = self
+                .width
+                .saturating_sub(u16::try_from(summary.width()).unwrap_or(u16::MAX));
+            let preview = self.reasoning_preview(text, preview_width, style);
+            summary.spans.extend(preview);
+            return markdown::Layout::plain(vec![summary]);
+        }
+
+        let content_width = self.width.saturating_sub(REASONING_INDENT);
+        let mut body =
+            markdown::render_cached(text, content_width, theme, self.workspace, self.images);
+        let indent = " ".repeat(usize::from(REASONING_INDENT));
+        for line in body.lines.iter_mut().filter(|line| line.width() > 0) {
+            for span in &mut line.spans {
+                span.style = span.style.patch(style);
+            }
+            line.spans.insert(0, Span::raw(indent.clone()));
+        }
+        for link in body.links.iter_mut().flatten() {
+            link.start = link.start.saturating_add(REASONING_INDENT);
+            link.end = link.end.saturating_add(REASONING_INDENT);
+        }
+        for span in body.selections.iter_mut().flatten() {
+            span.columns.start = span.columns.start.saturating_add(REASONING_INDENT);
+            span.columns.end = span.columns.end.saturating_add(REASONING_INDENT);
+        }
+        for image in &mut body.images {
+            image.line += 1;
+        }
+        body.lines.insert(0, summary);
+        body.links.insert(0, Vec::new());
+        body.selections.insert(0, Vec::new());
+        body
+    }
+
+    /// The start of the latest nonblank line of `text`, ending in an ellipsis when
+    /// the line continues past `width`. The line wraps short of the ellipsis, so
+    /// the cut falls between words unless one word is wider than the row.
+    fn reasoning_preview(&mut self, text: &str, width: u16, style: Style) -> Vec<Span<'static>> {
+        let latest = text
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_default();
+        let layout = markdown::render_cached(
+            latest,
+            width.saturating_sub(REASONING_ELLIPSIS_WIDTH),
+            self.theme,
+            self.workspace,
+            self.images,
+        );
+        let mut rows = layout.lines.into_iter().filter(|line| line.width() > 0);
+        let Some(first) = rows.next() else {
+            return Vec::new();
+        };
+        let mut spans: Vec<_> = first
+            .spans
+            .into_iter()
+            .map(|span| span.patch_style(style))
+            .collect();
+        if rows.next().is_some() {
+            spans.push(Span::styled(REASONING_ELLIPSIS, style));
+        }
+        spans
     }
 
     /// Renders a user prompt whose image markers are replaced by image rows.

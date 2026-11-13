@@ -6,8 +6,8 @@
 //! - scrolling and tail following ([viewport]), including the count of updates
 //!   that arrived while the reader was scrolled away;
 //! - the per-entry layout cache ([cache]) and entry rendering ([render]);
-//! - expandable tool and message entries, their keyboard focus, and the
-//!   expand-all toggle;
+//! - expandable tool, message, and reasoning entries, their keyboard focus, and
+//!   the expand-all toggle;
 //! - the prompt pinned above a detached viewport ([pinned]);
 //! - the regions that mouse clicks and text selection resolve against ([hits]).
 //!
@@ -98,7 +98,8 @@ pub(crate) struct Transcript {
     cache: LayoutCache,
     viewport: Viewport,
     hits: HitMap,
-    tool_spinner: Option<Spinner>,
+    /// Animates the status column of running tools and of streaming reasoning.
+    spinner: Option<Spinner>,
     running_tool_timers: HashMap<EntryId, RunningToolTimer>,
     expandables_focused: bool,
     /// The expandable that keyboard focus acts on; retained while unfocused so
@@ -176,7 +177,7 @@ impl Transcript {
             cache: LayoutCache::default(),
             viewport: Viewport::default(),
             hits: HitMap::default(),
-            tool_spinner: None,
+            spinner: None,
             running_tool_timers: HashMap::new(),
             expandables_focused: false,
             selected_expandable: None,
@@ -241,7 +242,7 @@ impl Transcript {
 
     pub(crate) fn animation_deadline(&self) -> Option<Instant> {
         let empty = self.is_empty().then(|| self.empty_logo.deadline());
-        self.tool_spinner
+        self.spinner
             .map(Spinner::deadline)
             .into_iter()
             .chain(empty)
@@ -258,12 +259,7 @@ impl Transcript {
         let activity = self.activity();
         let now = Instant::now();
         self.sync_running_tool_timers(now);
-        let tool_active = self.model.has_running_tools();
-        if tool_active && self.tool_spinner.is_none() {
-            self.tool_spinner = Some(Spinner::new(now));
-        } else if !tool_active {
-            self.tool_spinner = None;
-        }
+        self.sync_spinner(now);
         if change.changed {
             self.viewport.record_update();
         }
@@ -314,7 +310,7 @@ impl Transcript {
         }
         let now = Instant::now();
         self.sync_running_tool_timers(now);
-        self.tool_spinner = self.model.has_running_tools().then(|| Spinner::new(now));
+        self.sync_spinner(now);
         let activity = self.activity();
         ComponentUpdate {
             effects: (previous_activity != activity)
@@ -332,17 +328,43 @@ impl Transcript {
         }
     }
 
+    /// The reasoning entry that is still streaming: the newest visible entry while
+    /// a turn runs. Later output, such as a tool call or the answer, starts a new
+    /// entry and ends it.
+    fn streaming_reasoning(&self) -> Option<EntryId> {
+        if !self.model.is_active() {
+            return None;
+        }
+        let entry = self
+            .model
+            .entries()
+            .iter()
+            .rev()
+            .find(|entry| !entry.hidden)?;
+        matches!(entry.kind, EntryKind::Reasoning { .. }).then_some(entry.id)
+    }
+
+    /// Runs the spinner while a tool runs or reasoning streams, keeping its phase
+    /// across updates.
+    fn sync_spinner(&mut self, now: Instant) {
+        if !self.model.has_running_tools() && self.streaming_reasoning().is_none() {
+            self.spinner = None;
+        } else if self.spinner.is_none() {
+            self.spinner = Some(Spinner::new(now));
+        }
+    }
+
     fn update_animation(&mut self, now: Instant) -> ComponentUpdate<TranscriptEffect> {
         let timer_changed = self.refresh_running_tool_durations(now);
-        let tool_changed = self
-            .tool_spinner
+        let spinner_changed = self
+            .spinner
             .as_mut()
             .is_some_and(|spinner| spinner.advance(now));
         let logo_changed = self.is_empty() && self.empty_logo.advance(now);
         let images_changed = self.cache.poll_images(now);
         ComponentUpdate {
             effects: Vec::new(),
-            render: if timer_changed || tool_changed || logo_changed || images_changed {
+            render: if timer_changed || spinner_changed || logo_changed || images_changed {
                 RenderRequest::Streaming
             } else {
                 RenderRequest::None
@@ -734,7 +756,7 @@ fn is_running_tool(entry: &TranscriptEntry) -> bool {
 fn is_expandable(entry: &TranscriptEntry) -> bool {
     matches!(
         entry.kind,
-        EntryKind::Tool(_) | EntryKind::DirectedMessage(_)
+        EntryKind::Tool(_) | EntryKind::DirectedMessage(_) | EntryKind::Reasoning { .. }
     )
 }
 
@@ -811,6 +833,7 @@ impl Component for Transcript {
         let marker_style = Style::default()
             .fg(theme.accent())
             .add_modifier(Modifier::BOLD);
+        let streaming_reasoning = self.streaming_reasoning();
         let mut y = transcript_area.y.saturating_add(top_padding);
         let mut visible_images: Vec<VisibleImage> = Vec::new();
         for anchor in anchors {
@@ -849,9 +872,8 @@ impl Component for Transcript {
                 continue;
             }
             self.hits.push_expandable(anchor.entry, row);
-            if is_running_tool(entry)
-                && let Some(spinner) = self.tool_spinner
-            {
+            let animated = is_running_tool(entry) || streaming_reasoning == Some(entry.id);
+            if animated && let Some(spinner) = self.spinner {
                 let spinner_x = transcript_area
                     .x
                     .saturating_add(4)
