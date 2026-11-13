@@ -1146,6 +1146,34 @@ fn streaming_reasoning_updates_one_row_at_the_bottom() {
 }
 
 #[test]
+fn streaming_reasoning_animates_its_icon_until_later_output_arrives() {
+    let mut transcript = transcript_of([
+        agent(1, AgentEventKind::RunStarted),
+        reasoning(2, "Reading the scheduler."),
+    ]);
+    let reasoning_id = entry_id(&transcript, |kind| {
+        matches!(kind, EntryKind::Reasoning { .. })
+    });
+    let icon = |screen: &Screen| {
+        let row = u16::try_from(screen.first_row(reasoning_id)).unwrap();
+        screen.buffer[(4, row)].symbol().to_owned()
+    };
+
+    let streaming = render(&mut transcript, 60, 8);
+    assert_eq!(icon(&streaming), "⠋");
+    assert!(transcript.animation_deadline().is_some());
+
+    transcript.update(TranscriptEvent::Record(tool_call(
+        3,
+        "call-3",
+        "exec_command",
+        shell_arguments(),
+    )));
+    let settled = render(&mut transcript, 60, 8);
+    assert_eq!(icon(&settled), "∴");
+}
+
+#[test]
 fn clicking_reasoning_expands_its_selectable_text_below_the_summary() {
     let mut transcript = transcript_of([reasoning(1, "First step.\n\nSecond step.")]);
     let reasoning = entry_id(&transcript, |kind| {
