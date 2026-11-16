@@ -16,6 +16,9 @@ use syntect::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+// Highlighting runs on the UI thread, where long lines can stall regex matching.
+const MAX_HIGHLIGHT_LINE_BYTES: usize = 4096;
+
 pub(super) struct Assets {
     pub(super) syntaxes: SyntaxSet,
 }
@@ -84,6 +87,9 @@ pub(super) fn line(
     text: &str,
     syntaxes: &SyntaxSet,
 ) -> Vec<Span<'static>> {
+    if text.len() > MAX_HIGHLIGHT_LINE_BYTES {
+        return vec![Span::styled(text.to_owned(), code_style())];
+    }
     let line = format!("{text}\n");
     let Ok(regions) = highlighter.highlight_line(&line, syntaxes) else {
         return vec![Span::styled(text.to_owned(), code_style())];
@@ -204,5 +210,71 @@ fn terminal_color(color: SyntectColor) -> Color {
         (0x11, 0xa8, 0xcd) => Color::Cyan,
         (0x66, 0x66, 0x66) => Color::DarkGray,
         _ => Color::Reset,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_lines_render_plainly_without_losing_text() {
+        let assets = assets();
+        let syntax = syntax_for_token(&assets.syntaxes, "rs");
+        let theme = theme();
+        let mut highlighter = HighlightLines::new(syntax, &theme);
+        let text = format!("// {}", "x".repeat(4096));
+
+        assert_eq!(
+            line(&mut highlighter, &text, &assets.syntaxes),
+            vec![Span::styled(text, code_style())],
+        );
+    }
+
+    #[test]
+    fn long_shell_payload_renders_plainly() {
+        let assets = assets();
+        let syntax = syntax_for_token(&assets.syntaxes, "sh");
+        let theme = theme();
+        let mut highlighter = HighlightLines::new(syntax, &theme);
+        let text = format!("echo '{}=' | base64 -d", "aGVsbG8".repeat(2048));
+
+        assert_eq!(
+            line(&mut highlighter, &text, &assets.syntaxes),
+            vec![Span::styled(text, code_style())],
+        );
+    }
+
+    #[test]
+    fn line_limit_counts_bytes_and_preserves_unicode() {
+        let assets = assets();
+        let syntax = syntax_for_token(&assets.syntaxes, "rs");
+        let theme = theme();
+        let mut highlighter = HighlightLines::new(syntax, &theme);
+        let text = format!("// {}", "é".repeat(2047));
+
+        assert_eq!(
+            line(&mut highlighter, &text, &assets.syntaxes),
+            vec![Span::styled(text, code_style())],
+        );
+    }
+
+    #[test]
+    fn lines_at_limit_keep_highlighting() {
+        let assets = assets();
+        let syntax = syntax_for_token(&assets.syntaxes, "rs");
+        let theme = theme();
+        let mut highlighter = HighlightLines::new(syntax, &theme);
+        let text = format!("// {}", "x".repeat(4093));
+        let spans = line(&mut highlighter, &text, &assets.syntaxes);
+
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            text
+        );
+        assert!(spans.iter().any(|span| span.style != code_style()));
     }
 }
