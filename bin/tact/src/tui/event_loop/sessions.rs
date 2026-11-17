@@ -418,7 +418,7 @@ mod tests {
         })
         .unwrap();
 
-        for model in [CodexModel::Astra, CodexModel::Sol, CodexModel::Luna] {
+        for model in [CodexModel::Astra62, CodexModel::Sol62, CodexModel::Luna] {
             let settings = fresh_settings(&config, Model::Codex(model));
             assert_eq!(settings.reasoning_mode, ReasoningMode::Pro);
             assert_eq!(settings.effort, config.agent().thinking());
@@ -473,7 +473,7 @@ mod tests {
         });
         let snapshot = SessionCheckpoint::native(
             "session",
-            ModelSelection::Codex(CodexModel::Astra),
+            ModelSelection::Codex(CodexModel::Astra62),
             Thinking::Medium,
             Lineage::root("session"),
             "resume",

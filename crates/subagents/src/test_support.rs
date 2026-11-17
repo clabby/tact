@@ -7,6 +7,7 @@ use nanocode::{
         ResponseError,
         tower::{
             ResponsesAttempt, ResponsesAttemptKind, ResponsesOutput, ResponsesServiceResponse,
+            Service,
         },
     },
 };
@@ -18,7 +19,6 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::sync::{Notify, mpsc};
-use tower::Service;
 
 /// A model request that never completes, optionally recording each turn's latest user prompt.
 #[derive(Clone)]
@@ -67,6 +67,7 @@ impl Service<ResponsesAttempt> for PendingService {
 }
 
 pub(crate) fn pending_agent(called: Arc<Notify>) -> (Agent, nanocode::AgentEvents) {
+    tact_runtime::init().unwrap();
     let openai = OpenAi::builder("test-key")
         .service(move || PendingService {
             called: Arc::clone(&called),
@@ -81,6 +82,7 @@ pub(crate) fn pending_agent(called: Arc<Notify>) -> (Agent, nanocode::AgentEvent
 pub(crate) fn recording_agent(
     prompts: mpsc::UnboundedSender<(nanocode::Model, Thinking, String)>,
 ) -> (Agent, nanocode::AgentEvents) {
+    tact_runtime::init().unwrap();
     let openai = OpenAi::builder("test-key")
         .service(move || PendingService {
             called: Arc::new(Notify::new()),

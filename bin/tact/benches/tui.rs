@@ -504,7 +504,7 @@ fn benchmark_resume_state(session_id: &str, history_items: usize) -> Vec<u8> {
     });
     let snapshot = SessionCheckpoint::native(
         session_id,
-        ModelSelection::Codex(nanocode::Model::Astra),
+        ModelSelection::Codex(nanocode::Model::Astra62),
         Thinking::Medium,
         Lineage::root(session_id),
         session_id,
@@ -546,6 +546,7 @@ fn commit_fixture(
                     records: &[],
                     events: &events,
                     summary: &SummaryUpdate::Unchanged,
+                    settle: Default::default(),
                 },
             )
             .await
@@ -903,6 +904,7 @@ fn benchmarks(criterion: &mut Criterion) {
                         records: &[],
                         events: &batch_events,
                         summary: &SummaryUpdate::Unchanged,
+                        settle: Default::default(),
                     },
                 ))
                 .unwrap()
@@ -923,7 +925,7 @@ fn benchmarks(criterion: &mut Criterion) {
     let durable = runtime
         .block_on(catalog.session(SessionRecord::root(
             "session",
-            ModelSelection::Codex(nanocode::Model::Astra),
+            ModelSelection::Codex(nanocode::Model::Astra62),
             Some(commit_directory.path().to_path_buf()),
         )))
         .unwrap();

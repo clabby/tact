@@ -1091,7 +1091,7 @@ mod tests {
                 info: SessionInfo {
                     id: id.to_owned(),
                     workspace: "/work".into(),
-                    model: "gpt-6.1-sol".to_owned(),
+                    model: "gpt-6.2-sol".to_owned(),
                     effort: ReasoningEffort::Low,
                     reasoning_mode: ReasoningMode::Standard,
                     speed: Speed::Standard,
@@ -1280,7 +1280,7 @@ mod tests {
         });
         fixture.publish(Publication::Settings {
             session: "s1".into(),
-            model: "gpt-6.1-sol".into(),
+            model: "gpt-6.2-sol".into(),
             effort: ReasoningEffort::High,
             reasoning_mode: ReasoningMode::Pro,
             speed: Speed::Fast,
@@ -1497,7 +1497,7 @@ mod tests {
                         session_id: "fork".to_owned(),
                         parent_session_id: Some("parent".to_owned()),
                         parent_sequence: Some(1),
-                        model: "gpt-6.1-sol".to_owned(),
+                        model: "gpt-6.2-sol".to_owned(),
                         effort: ReasoningEffort::Low,
                         reasoning_mode: ReasoningMode::Standard,
                         speed: Speed::Standard,

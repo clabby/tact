@@ -14,11 +14,14 @@ use clap::Parser;
 use miette::{Report, Result};
 
 pub(crate) fn install_tls_provider() {
+    tact_runtime::init().expect("initialize Nanocode runtime");
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     install_tls_provider();
-    Cli::parse().run().await.map_err(Report::new)
+    tact_runtime::scope(Cli::parse().run())
+        .await
+        .map_err(Report::new)
 }

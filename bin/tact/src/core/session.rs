@@ -300,7 +300,7 @@ impl AgentSnapshot {
         if self.0.family() != HarnessFamily::Claude {
             return None;
         }
-        let native = Native::deserialize(self.0.payload()).ok()?;
+        let native = self.0.payload().decode::<Native>().ok()?;
         (native.version == 1
             && native.snapshot.version == 1
             && native.snapshot.provider == "claude"
@@ -400,7 +400,7 @@ impl LegacySnapshot {
         let invalid = |reason: String| NanocodeError::InvalidCheckpoint(reason);
         let checkpoint = match self {
             Self::Claude(snapshot) => {
-                let payload = serde_json::from_str(&snapshot.payload)
+                let payload: serde_json::Value = serde_json::from_str(&snapshot.payload)
                     .map_err(|error| invalid(error.to_string()))?;
                 SessionCheckpoint::native(
                     snapshot.session_id.clone(),
@@ -441,7 +441,7 @@ impl LegacySnapshot {
                     snapshot.lineage_id,
                     None,
                     true,
-                    payload.into(),
+                    serde_json::Value::Object(payload),
                 )
             }
         };
@@ -918,7 +918,7 @@ impl LoadedTranscript {
 
     pub(crate) fn model(&self) -> Result<Model, SessionError> {
         let stored = self.latest_start().map_or_else(
-            || Model::Codex(CodexModel::Sol).to_string(),
+            || Model::Codex(CodexModel::Sol62).to_string(),
             |started| started.model,
         );
         model::parse(&stored).map_err(|_| SessionError::UnsupportedModel { model: stored })
@@ -974,7 +974,7 @@ mod tests {
         SessionSummary {
             session_id: format!("session-{index}"),
             started_at_unix_ms: 0,
-            model: "gpt-6.1-sol".to_owned(),
+            model: "gpt-6.2-sol".to_owned(),
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
             workspace: PathBuf::from("/work"),
@@ -1317,6 +1317,10 @@ mod tests {
     fn restored_model_comes_from_the_session_start_record() {
         for selected in [
             Model::Codex(CodexModel::Luna),
+            Model::Codex(CodexModel::Sol62),
+            Model::Codex(CodexModel::Astra62),
+            Model::Codex(CodexModel::Sol),
+            Model::Codex(CodexModel::Astra),
             Model::Claude(ClaudeModel::Haiku55),
             Model::Claude(ClaudeModel::Sonnet55),
             Model::Claude(ClaudeModel::Opus55),
@@ -1347,7 +1351,7 @@ mod tests {
         }
         assert_eq!(
             LoadedTranscript::default().model().unwrap(),
-            Model::Codex(CodexModel::Sol)
+            Model::Codex(CodexModel::Sol62)
         );
     }
 
@@ -1628,7 +1632,7 @@ mod tests {
         );
         assert!(
             expected
-                .validate_identity(Model::Codex(CodexModel::Sol), Some("native-session"))
+                .validate_identity(Model::Codex(CodexModel::Sol62), Some("native-session"))
                 .is_err()
         );
         let encoded = encode_checkpoint(&expected, "exact Claude instructions", true).unwrap();
@@ -1653,7 +1657,10 @@ mod tests {
         );
         assert_eq!(checkpoint.session_id(), "native-session");
         assert_eq!(checkpoint.thinking(), Thinking::Max);
-        assert_eq!(checkpoint.payload(), &json!({"native": "opaque state"}));
+        assert_eq!(
+            checkpoint.payload().decode::<serde_json::Value>().unwrap(),
+            json!({"native": "opaque state"})
+        );
         assert!(checkpoint.has_conversation());
     }
 
@@ -1690,8 +1697,12 @@ mod tests {
         let checkpoint = actual.into_checkpoint();
         assert_eq!(checkpoint.session_id(), CODEX_SESSION);
         assert_eq!(checkpoint.conversation_id(), "legacy");
-        assert_eq!(checkpoint.payload()["conversation"], legacy);
+        assert_eq!(
+            checkpoint.payload().decode::<serde_json::Value>().unwrap()["conversation"],
+            legacy
+        );
         assert_eq!(instructions, "legacy instructions");
+        tact_runtime::init().unwrap();
         let openai = nanocode::OpenAi::builder("test-key").build().unwrap();
         nanocode::Agent::builder(openai).resume(checkpoint).unwrap();
     }
@@ -1725,7 +1736,10 @@ mod tests {
             ModelSelection::Claude(ClaudeModel::Opus55)
         );
         assert_eq!(checkpoint.thinking(), Thinking::Low);
-        assert_eq!(checkpoint.payload(), &json!({"version": 1}));
+        assert_eq!(
+            checkpoint.payload().decode::<serde_json::Value>().unwrap(),
+            json!({"version": 1})
+        );
     }
 
     #[test]
@@ -1738,7 +1752,7 @@ mod tests {
         );
         assert!(
             claude
-                .validate_identity(Model::Codex(CodexModel::Sol), None)
+                .validate_identity(Model::Codex(CodexModel::Sol62), None)
                 .is_err()
         );
         assert!(snapshot("codex").context_budget().is_none());

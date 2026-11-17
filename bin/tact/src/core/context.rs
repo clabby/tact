@@ -1007,7 +1007,7 @@ mod tests {
     fn model_call_completed(call_index: u32, usage: Value) -> Value {
         json!({
             "call_index": call_index,
-            "model": "gpt-6.1-sol",
+            "model": "gpt-6.2-sol",
             "response_id": "secret-continuation-token",
             "attempt": 1,
             "connection_generation": 1,

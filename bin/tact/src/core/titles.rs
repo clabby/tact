@@ -4,7 +4,11 @@ use nanocode::{
     claude::{ClaudeClient, ContentBlock, Message, MessagesRequest, Role},
     oai::transport::ResponsesTransport,
 };
-use reqwest::header::{HeaderMap, HeaderValue};
+use nanocode_http::{
+    Client,
+    header::{HeaderMap, HeaderValue},
+    redirect::Policy,
+};
 use serde_json::json;
 use std::{num::NonZeroU32, time::Duration};
 
@@ -44,34 +48,37 @@ pub(crate) async fn generate(config: &Config, prompt: &str) -> Option<String> {
     if prompt.trim().is_empty() {
         return None;
     }
-    tokio::time::timeout(GENERATION_TIMEOUT, async {
-        let output = if let Ok(auth) = config.auth().load() {
-            let mut builder = OpenAi::builder(auth)
-                .model(Model::Luna)
-                .thinking(Thinking::Low)
-                .transport(ResponsesTransport::Https)
-                .max_attempts(NonZeroU32::new(1).unwrap());
-            if let Some(url) = config.agent().api_base_url() {
-                builder = builder.api_base_url(url);
-            }
-            let mut session = builder
-                .build()
-                .ok()?
-                .instructions(INSTRUCTIONS)
-                .build()
-                .ok()?;
-            session
-                .turn()
-                .create(prompt)
-                .await
-                .ok()?
-                .output_text()
-                .to_owned()
-        } else {
-            claude_title(config, &prompt).await?
-        };
-        normalize(&output)
-    })
+    tokio::time::timeout(
+        GENERATION_TIMEOUT,
+        tact_runtime::scope(async {
+            let output = if let Ok(auth) = config.auth().load() {
+                let mut builder = OpenAi::builder(auth)
+                    .model(Model::Luna)
+                    .thinking(Thinking::Low)
+                    .transport(ResponsesTransport::Https)
+                    .max_attempts(NonZeroU32::new(1).unwrap());
+                if let Some(url) = config.agent().api_base_url() {
+                    builder = builder.api_base_url(url);
+                }
+                let mut session = builder
+                    .build()
+                    .ok()?
+                    .instructions(INSTRUCTIONS)
+                    .build()
+                    .ok()?;
+                session
+                    .turn()
+                    .create(prompt)
+                    .await
+                    .ok()?
+                    .output_text()
+                    .to_owned()
+            } else {
+                claude_title(config, &prompt).await?
+            };
+            normalize(&output)
+        }),
+    )
     .await
     .ok()
     .flatten()
@@ -87,10 +94,11 @@ async fn claude_title(config: &Config, prompt: &str) -> Option<String> {
             HeaderValue::from_str(workspace).ok()?,
         );
     }
-    let http = reqwest::Client::builder()
+    let http = Client::builder()
         .default_headers(headers)
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
+        .redirect(Policy::none())
+        // Avoid the native client's automatic retry on a stale pooled connection.
+        .pool_max_idle_per_host(0)
         .build()
         .ok()?;
     // The native client retains a non-zeroizing copy of the resolved API key.
@@ -113,6 +121,7 @@ async fn claude_title(config: &Config, prompt: &str) -> Option<String> {
             tool_choice: None,
             thinking: None,
             context_management: None,
+            compaction: None,
             diagnostics: None,
             system: Some(json!(INSTRUCTIONS).into()),
             messages: vec![Message::text(Role::User, prompt)],

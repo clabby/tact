@@ -593,7 +593,8 @@ impl TranscriptModel {
                 self.pending_error = None;
                 Ok(true)
             }
-            AgentEventKind::ApiEvent
+            AgentEventKind::ContextNotice
+            | AgentEventKind::ApiEvent
             | AgentEventKind::RunSteered
             | AgentEventKind::ToolNotification
             | AgentEventKind::ToolInputDelta
@@ -1416,7 +1417,8 @@ const fn visibility(kind: AgentEventKind) -> EventVisibility {
         | AgentEventKind::ModelCallFailed
         | AgentEventKind::ModelAttemptFailed
         | AgentEventKind::ModelConnectionFailed => EventVisibility::ErrorFallback,
-        AgentEventKind::ApiEvent
+        AgentEventKind::ContextNotice
+        | AgentEventKind::ApiEvent
         | AgentEventKind::InputAccepted
         | AgentEventKind::RunSteered
         | AgentEventKind::RunCompleted

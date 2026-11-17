@@ -226,9 +226,9 @@ impl Palette {
         let spares = [
             theme.model(HarnessModel::Claude(ClaudeModel::Fable52)),
             theme.code_text(),
-            theme.model(HarnessModel::Codex(CodexModel::Sol)),
+            theme.model(HarnessModel::Codex(CodexModel::Sol62)),
             theme.model(HarnessModel::Claude(ClaudeModel::Opus55)),
-            theme.model(HarnessModel::Codex(CodexModel::Astra)),
+            theme.model(HarnessModel::Codex(CodexModel::Astra62)),
             theme.model(HarnessModel::Claude(ClaudeModel::Haiku55)),
         ];
         for index in 0..categories.len() {

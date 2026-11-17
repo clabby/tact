@@ -13,6 +13,7 @@ pub(super) fn thinking_rank(thinking: Thinking) -> Result<u8, SpawnError> {
         Thinking::High => 3,
         Thinking::Xhigh => 4,
         Thinking::Max => 5,
+        Thinking::Ultra => 6,
     })
 }
 
@@ -32,8 +33,8 @@ pub(super) const fn reasoning_mode_exceeds(
 const fn codex_tier(model: Model) -> Option<u8> {
     match model {
         Model::Codex(CodexModel::Luna) => Some(1),
-        Model::Codex(CodexModel::Sol) => Some(2),
-        Model::Codex(CodexModel::Astra) => Some(3),
+        Model::Codex(CodexModel::Sol62 | CodexModel::Sol) => Some(2),
+        Model::Codex(CodexModel::Astra62 | CodexModel::Astra) => Some(3),
         _ => None,
     }
 }

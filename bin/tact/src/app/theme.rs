@@ -200,8 +200,8 @@ impl Theme {
     pub(crate) const fn model(&self, model: Model) -> Color {
         match model {
             Model::Codex(CodexModel::Luna) => self.palette().model_luna.0,
-            Model::Codex(CodexModel::Sol) => self.palette().model_sol.0,
-            Model::Codex(CodexModel::Astra) => self.palette().model_astra.0,
+            Model::Codex(CodexModel::Sol62) => self.palette().model_sol.0,
+            Model::Codex(CodexModel::Astra62) => self.palette().model_astra.0,
             Model::Claude(ClaudeModel::Haiku55) => self.palette().model_haiku.0,
             Model::Claude(ClaudeModel::Sonnet55) => self.palette().model_sonnet.0,
             Model::Claude(ClaudeModel::Opus55) => self.palette().model_opus.0,
@@ -425,7 +425,7 @@ mod tests {
     fn model_overrides_roundtrip_and_reload_with_system_scheme() {
         let mut theme: Theme = toml::from_str("model_luna = \"red\"\nmodel_opus = 123\n[light]\nmodel_luna = \"#123456\"\n[dark]\nmodel_sol = \"green\"\n").unwrap();
         let luna = Model::Codex(CodexModel::Luna);
-        let sol = Model::Codex(CodexModel::Sol);
+        let sol = Model::Codex(CodexModel::Sol62);
         let opus = Model::Claude(nanocode::ClaudeModel::Opus55);
         assert_eq!(theme.model(luna), Color::Red);
         assert_eq!(theme.model(sol), Color::Green);

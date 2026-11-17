@@ -284,6 +284,7 @@ impl StateStore for SqliteStateStore {
                 records,
                 events: &[],
                 summary: &SummaryUpdate::Unchanged,
+                settle: Default::default(),
             },
         );
         Box::pin(async move { Ok(committed.await?.revision) })
@@ -303,6 +304,7 @@ impl StateStore for SqliteStateStore {
         let records = commit.records.to_vec();
         let events = commit.events.to_vec();
         let summary = commit.summary.clone();
+        let settle = commit.settle;
         self.run(move |database| {
             let batch = host.batches().remove(&key);
             let committed = database
@@ -318,6 +320,7 @@ impl StateStore for SqliteStateStore {
                             records: &records,
                             events: &events,
                             summary: &summary,
+                            settle,
                         },
                         batch.as_ref(),
                     )

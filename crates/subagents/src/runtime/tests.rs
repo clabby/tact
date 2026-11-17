@@ -30,9 +30,9 @@ async fn descendants_can_switch_providers_with_local_model_and_shared_effort_cap
     let registry = Registry::new(updates, 1);
     let codex = |model| Model::Codex(model);
     let denied = [
-        (codex(CodexModel::Luna), codex(CodexModel::Sol)),
-        (codex(CodexModel::Luna), codex(CodexModel::Astra)),
-        (codex(CodexModel::Sol), codex(CodexModel::Astra)),
+        (codex(CodexModel::Luna), codex(CodexModel::Sol62)),
+        (codex(CodexModel::Luna), codex(CodexModel::Astra62)),
+        (codex(CodexModel::Sol62), codex(CodexModel::Astra62)),
     ];
     for parent_model in crate::SUPPORTED_MODELS {
         let parent = registry.reserve("root").await.unwrap();
@@ -160,8 +160,8 @@ async fn registered_parent_caps_and_turn_context_follow_its_descriptor() {
     let parent = registry.reserve("root").await.unwrap();
     parent
         .validate_child(
-            Model::Codex(CodexModel::Astra).as_str(),
-            Model::Codex(CodexModel::Sol),
+            Model::Codex(CodexModel::Astra62).as_str(),
+            Model::Codex(CodexModel::Sol62),
             Thinking::Medium,
             ReasoningMode::Standard,
         )
@@ -173,14 +173,14 @@ async fn registered_parent_caps_and_turn_context_follow_its_descriptor() {
     let reservation = registry.reserve("sol-child").await.unwrap();
     assert_eq!(reservation.parent, Some(parent.id));
     for (model, thinking, allowed) in [
-        (Model::Codex(CodexModel::Astra), Thinking::Medium, false),
-        (Model::Codex(CodexModel::Sol), Thinking::High, false),
-        (Model::Codex(CodexModel::Sol), Thinking::Medium, true),
+        (Model::Codex(CodexModel::Astra62), Thinking::Medium, false),
+        (Model::Codex(CodexModel::Sol62), Thinking::High, false),
+        (Model::Codex(CodexModel::Sol62), Thinking::Medium, true),
         (Model::Codex(CodexModel::Luna), Thinking::Low, true),
     ] {
         let result = reservation
             .validate_child(
-                Model::Codex(CodexModel::Astra).as_str(),
+                Model::Codex(CodexModel::Astra62).as_str(),
                 model,
                 thinking,
                 ReasoningMode::Standard,
@@ -210,14 +210,14 @@ async fn registered_parent_caps_and_turn_context_follow_its_descriptor() {
         reservation
             .validate_child(
                 "ignored for registered children",
-                Model::Codex(CodexModel::Sol),
+                Model::Codex(CodexModel::Sol62),
                 Thinking::Medium,
                 ReasoningMode::Standard,
             )
             .unwrap();
         let error = registry
             .spawn_agent(
-                Model::Codex(CodexModel::Sol),
+                Model::Codex(CodexModel::Sol62),
                 Thinking::Medium,
                 ReasoningMode::Standard,
             )
@@ -228,7 +228,7 @@ async fn registered_parent_caps_and_turn_context_follow_its_descriptor() {
             assert_eq!(
                 arguments.try_recv().unwrap(),
                 (
-                    Model::Codex(CodexModel::Sol),
+                    Model::Codex(CodexModel::Sol62),
                     Thinking::Medium,
                     Speed::Standard
                 )
@@ -250,7 +250,7 @@ async fn registered_parent_caps_and_turn_context_follow_its_descriptor() {
             .await
             .unwrap();
         assert_eq!(token, expected_token);
-        assert_eq!(context.model, Model::Codex(CodexModel::Sol));
+        assert_eq!(context.model, Model::Codex(CodexModel::Sol62));
         assert_eq!(context.thinking, Thinking::Medium);
         let mut state = registry.state.lock().await;
         let session = state
@@ -270,6 +270,7 @@ async fn harness_injects_descriptor_context_on_initial_and_reused_turns() {
     let (updates, _receiver) = mpsc::unbounded_channel();
     let registry = Arc::new(Registry::new(updates, 1));
     let (prompts, mut received) = mpsc::unbounded_channel();
+    tact_runtime::init().unwrap();
     let openai = OpenAi::builder("test-key")
         .service(move || PendingService {
             called: Arc::new(Notify::new()),
@@ -278,7 +279,7 @@ async fn harness_injects_descriptor_context_on_initial_and_reused_turns() {
         .build()
         .unwrap();
     let (agent, events) = Agent::builder(openai)
-        .model(nanocode::Model::Sol)
+        .model(nanocode::Model::Sol62)
         .thinking(Thinking::Medium)
         .build()
         .unwrap();
@@ -306,7 +307,7 @@ async fn harness_injects_descriptor_context_on_initial_and_reused_turns() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(model, nanocode::Model::Sol);
+        assert_eq!(model, nanocode::Model::Sol62);
         assert_eq!(thinking, Thinking::Medium);
         assert!(prompt.contains(&format!("task {token}")), "{prompt}");
         assert!(prompt.contains(&format!("turn_token: {token}")));
@@ -394,7 +395,7 @@ async fn insert_runtime_session(
     let descriptor = AgentDescriptor {
         id: reservation.id,
         session_id: session_id.clone(),
-        model: Model::Codex(CodexModel::Sol),
+        model: Model::Codex(CodexModel::Sol62),
         thinking: Thinking::Medium,
         reasoning_mode,
         role: format!("agent-{}", reservation.id),
@@ -483,7 +484,7 @@ fn test_session(id: AgentId, session_id: &str, parent: Option<AgentId>) -> Child
     let descriptor = AgentDescriptor {
         id,
         session_id: session_id.to_owned(),
-        model: Model::Codex(CodexModel::Sol),
+        model: Model::Codex(CodexModel::Sol62),
         thinking: Thinking::Medium,
         reasoning_mode: ReasoningMode::Standard,
         role: format!("agent-{id}"),

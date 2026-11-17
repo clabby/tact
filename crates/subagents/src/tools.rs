@@ -743,7 +743,7 @@ mod tests {
                     .execute(
                         ToolInput::Function(to_raw_value(&input).unwrap()),
                         ToolContext::new(
-                            Model::Codex(CodexModel::Astra).as_str(),
+                            Model::Codex(CodexModel::Astra62).as_str(),
                             "root",
                             "spawn",
                             &[],
@@ -806,8 +806,8 @@ mod tests {
 
         let models = [
             ("luna", Model::Codex(CodexModel::Luna)),
-            ("sol", Model::Codex(CodexModel::Sol)),
-            ("astra", Model::Codex(CodexModel::Astra)),
+            ("sol", Model::Codex(CodexModel::Sol62)),
+            ("astra", Model::Codex(CodexModel::Astra62)),
         ];
         for (parent_rank, (_, parent_model)) in models.iter().enumerate() {
             for (child_rank, (model, expected_model)) in models.iter().copied().enumerate() {
@@ -871,7 +871,7 @@ mod tests {
             assert!(
                 tool.execute(
                     ToolInput::Function(to_raw_value(&input).unwrap()),
-                    ToolContext::new("gpt-6-astra", "root", "spawn", &[], 128),
+                    ToolContext::new("gpt-6.2-astra", "root", "spawn", &[], 128),
                 )
                 .await
                 .is_err()
@@ -898,7 +898,7 @@ mod tests {
             assert!(
                 tool.execute(
                     ToolInput::Function(to_raw_value(&input).unwrap()),
-                    ToolContext::new("gpt-6-astra", "root", "spawn", &[], 128),
+                    ToolContext::new("gpt-6.2-astra", "root", "spawn", &[], 128),
                 )
                 .await
                 .is_err()
@@ -973,7 +973,7 @@ mod tests {
                 .execute(
                     ToolInput::Function(to_raw_value(&input).unwrap()),
                     ToolContext::new(
-                        Model::Codex(CodexModel::Astra).as_str(),
+                        Model::Codex(CodexModel::Astra62).as_str(),
                         caller_session,
                         "spawn",
                         &[],

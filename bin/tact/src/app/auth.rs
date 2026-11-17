@@ -12,7 +12,7 @@ use nanocode::{
         resolve_chatgpt_auth_status,
     },
 };
-use reqwest::header::{HeaderMap, HeaderValue};
+use nanocode_http::header::{HeaderMap, HeaderValue};
 use std::{
     fmt,
     path::Path,

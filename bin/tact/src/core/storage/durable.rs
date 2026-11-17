@@ -486,6 +486,8 @@ impl SessionStorage {
         .map_err(not_committed)?;
         write_state(&transaction, path, state_id, revision, commit.payload)?;
         write_summary(&transaction, path, state_id, revision, commit.summary)?;
+        // SQLite commits satisfy both settlement modes durably. Ordered commits may
+        // use the stronger guarantee without changing recovery or publication ordering.
         transaction.commit().map_err(uncertain(path))?;
         if let Some(active_turn) = active_turn {
             self.active_turns.insert(state_id.to_owned(), active_turn);
@@ -671,13 +673,13 @@ fn write_records(
         let retained = stored
             .as_deref()
             .or_else(|| staged.get(record.key.as_str()).copied());
-        if retained.is_some_and(|value| value != record.value) {
+        if retained.is_some_and(|value| value != record.value.as_ref()) {
             return Err(StoreError::NotCommitted(format!(
                 "durability record {} has conflicting content",
                 record.key
             )));
         }
-        staged.insert(record.key.as_str(), record.value.as_str());
+        staged.insert(record.key.as_str(), record.value.as_ref());
     }
     for record in records {
         transaction

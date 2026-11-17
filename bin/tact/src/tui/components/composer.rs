@@ -284,7 +284,7 @@ impl Composer {
             context_window_tokens: MODEL_WINDOW_TOKENS,
             workspace: shorten_home(workspace),
             thinking,
-            model: Model::Codex(CodexModel::Sol),
+            model: Model::Codex(CodexModel::Sol62),
             reasoning_mode: ReasoningMode::Standard,
             speed: Speed::Standard,
             input_mode: InputMode::Prompt,
@@ -1336,7 +1336,7 @@ mod tests {
             subagents: 0,
             live_sessions: None,
             turn_timer: None,
-            model: Model::Codex(CodexModel::Sol),
+            model: Model::Codex(CodexModel::Sol62),
             effort: ReasoningEffort::Medium,
             speed: Speed::Standard,
             pro: false,
@@ -1416,7 +1416,7 @@ mod tests {
         assert_eq!(
             rows(&terminal),
             [
-                "╭─ 0%/272k ──────────────────────── gpt-6.1-sol  medium 󰳗 ─╮".to_owned(),
+                "╭─ 0%/272k ──────────────────────── gpt-6.2-sol  medium 󰳗 ─╮".to_owned(),
                 "│                                                          │".to_owned(),
                 "│                                                          │".to_owned(),
                 "│                                                          │".to_owned(),
@@ -1481,7 +1481,7 @@ mod tests {
         );
         assert_eq!(
             rows(&render(&mut composer, 120, 5))[0],
-            "╭─ 3%/1m Preparing handoff… Thinking… 2 subagents 3 sessions, 1 running ──────────── 1m 5s  gpt-6.1-sol  medium 󰤇 pro ─╮"
+            "╭─ 3%/1m Preparing handoff… Thinking… 2 subagents 3 sessions, 1 running ──────────── 1m 5s  gpt-6.2-sol  medium 󰤇 pro ─╮"
         );
     }
 
@@ -1499,13 +1499,13 @@ mod tests {
         );
         assert_eq!(
             rows(&render(&mut composer, 90, 5))[0],
-            "╭─ 0%/272k Reflection instructions · enter start · esc cancel ─── gpt-6.1-sol  medium 󰳗 ─╮"
+            "╭─ 0%/272k Reflection instructions · enter start · esc cancel ─── gpt-6.2-sol  medium 󰳗 ─╮"
         );
     }
 
     #[test]
     fn composer_chrome_uses_the_model_palette() {
-        for model in [CodexModel::Luna, CodexModel::Sol, CodexModel::Astra].map(Model::Codex) {
+        for model in [CodexModel::Luna, CodexModel::Sol62, CodexModel::Astra62].map(Model::Codex) {
             let mut composer = new_composer();
             composer.update(ComposerEvent::SetModel(model));
             assert_eq!(composer.status_line().model, model);
@@ -1584,8 +1584,8 @@ mod tests {
         let mut composer = new_composer();
         composer.update(ComposerEvent::SetSpeed(Speed::Ultrafast));
         for (model, effective, icon) in [
-            (Model::Codex(CodexModel::Astra), Speed::Ultrafast, "󰑣"),
-            (Model::Codex(CodexModel::Sol), Speed::Ultrafast, "󰑣"),
+            (Model::Codex(CodexModel::Astra62), Speed::Ultrafast, "󰑣"),
+            (Model::Codex(CodexModel::Sol62), Speed::Ultrafast, "󰑣"),
             (Model::Codex(CodexModel::Luna), Speed::Fast, "󰤇"),
             (Model::Claude(ClaudeModel::Haiku55), Speed::Standard, "󰳗"),
             (Model::Claude(ClaudeModel::Opus55), Speed::Fast, "󰤇"),
@@ -1647,7 +1647,7 @@ mod tests {
         let terminal = render(&mut composer, 60, 5);
         assert_eq!(
             rows(&terminal)[0],
-            "╭─ 0%/272k ──────────────────── gpt-6.1-sol  medium 󰤇 pro ─╮"
+            "╭─ 0%/272k ──────────────────── gpt-6.2-sol  medium 󰤇 pro ─╮"
         );
         for cell in cells_of(&terminal, 0, "pro") {
             assert_eq!(cell.fg, Color::Green);
@@ -1662,7 +1662,7 @@ mod tests {
         composer.update(ComposerEvent::SetReasoningMode(ReasoningMode::Pro));
 
         let terminal = render(&mut composer, 28, 5);
-        assert_eq!(rows(&terminal)[0], "╭─ gpt-6.1-sol  mediumpro ─╮");
+        assert_eq!(rows(&terminal)[0], "╭─ gpt-6.2-sol  mediumpro ─╮");
         assert!(composer.chrome_area(ComposerChromeTarget::Speed).is_none());
         assert!(
             cells_of(&terminal, 0, "pro")
@@ -2239,7 +2239,7 @@ mod tests {
         }
         assert_eq!(
             rows(&terminal)[0],
-            "╭─ 0%/272k ──────────────────────────────────────────── gpt-6.1-sol  medium 󰳗 ─╮"
+            "╭─ 0%/272k ──────────────────────────────────────────── gpt-6.2-sol  medium 󰳗 ─╮"
         );
         assert_eq!(
             rows(&terminal)[4],

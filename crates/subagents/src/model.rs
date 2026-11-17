@@ -51,8 +51,8 @@ impl AgentContext {
         let mut prompt = prompt.into();
         let model = match self.model {
             Model::Codex(CodexModel::Luna) => "luna",
-            Model::Codex(CodexModel::Sol) => "sol",
-            Model::Codex(CodexModel::Astra) => "astra",
+            Model::Codex(CodexModel::Sol62) => "sol",
+            Model::Codex(CodexModel::Astra62) => "astra",
             _ => self.model.as_str(),
         };
         let context = format!(
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn agent_context_preserves_text_media_and_transcript() {
         let context = AgentContext {
-            model: Model::Codex(CodexModel::Sol),
+            model: Model::Codex(CodexModel::Sol62),
             thinking: Thinking::Medium,
             reasoning_mode: ReasoningMode::Pro,
         };

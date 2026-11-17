@@ -444,8 +444,8 @@ mod tests {
         assert_eq!(config.auth().mode(), AuthMode::Auto);
         assert_eq!(config.auth().file(), home.join(".codex/auth.json"));
         assert_eq!(config.agent().workspace(), directory.path());
-        assert_eq!(config.agent().model(), Model::Codex(CodexModel::Sol));
-        assert_eq!(config.agent().thinking(), ReasoningEffort::Medium);
+        assert_eq!(config.agent().model(), Model::Codex(CodexModel::Sol62));
+        assert_eq!(config.agent().thinking(), ReasoningEffort::Low);
         assert_eq!(config.agent().reasoning_mode(), ReasoningMode::Standard);
         assert_eq!(config.agent().speed(), Speed::Standard);
         assert_eq!(config.agent().max_subagents(), 32);
@@ -569,14 +569,14 @@ mod tests {
         );
         assert_eq!(
             rendered["agent"]["model"].as_str(),
-            Some(Model::Codex(CodexModel::Sol).as_str())
+            Some(Model::Codex(CodexModel::Sol62).as_str())
         );
         assert_eq!(rendered["agent"]["transport"].as_str(), Some("websocket"));
         assert_eq!(
             rendered["agent"]["workspace"].as_str(),
             directory.path().to_str()
         );
-        assert_eq!(rendered["agent"]["thinking"].as_str(), Some("medium"));
+        assert_eq!(rendered["agent"]["thinking"].as_str(), Some("low"));
         assert_eq!(rendered["agent"]["speed"].as_str(), Some("standard"));
         assert_eq!(rendered["agent"]["max_subagents"].as_integer(), Some(32));
         for field in [
@@ -846,7 +846,7 @@ mod tests {
         assert_eq!(config.theme().thinking_high(), Color::Green);
         assert_eq!(config.theme().accent(), Color::Blue);
         assert_eq!(
-            config.theme().model(Model::Codex(CodexModel::Sol)),
+            config.theme().model(Model::Codex(CodexModel::Sol62)),
             Color::Rgb(0x12, 0x34, 0x56)
         );
 

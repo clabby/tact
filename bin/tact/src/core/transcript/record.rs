@@ -570,6 +570,7 @@ impl TranscriptRecord {
 const fn agent_kind_name(kind: AgentEventKind) -> &'static str {
     match kind {
         AgentEventKind::ApiEvent => "api.event",
+        AgentEventKind::ContextNotice => "context.notice",
         AgentEventKind::AssistantDelta => "assistant.delta",
         AgentEventKind::AssistantMessage => "assistant.message",
         AgentEventKind::ReasoningSummaryDelta => "reasoning.summary.delta",
@@ -613,7 +614,7 @@ mod tests {
     use serde_json::{Value, json, value::to_raw_value};
     use std::sync::Arc;
 
-    const AGENT_KINDS: [AgentEventKind; 27] = [
+    const AGENT_KINDS: [AgentEventKind; 28] = [
         AgentEventKind::ApiEvent,
         AgentEventKind::AssistantDelta,
         AgentEventKind::AssistantMessage,
@@ -641,6 +642,7 @@ mod tests {
         AgentEventKind::ModelConnectionStarted,
         AgentEventKind::ModelConnectionCompleted,
         AgentEventKind::ModelConnectionFailed,
+        AgentEventKind::ContextNotice,
     ];
 
     const LOCAL_KINDS: [LocalKind; 20] = [

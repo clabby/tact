@@ -100,8 +100,8 @@ where
 pub(crate) const fn name(model: Model) -> &'static str {
     match model {
         Model::Codex(CodexModel::Luna) => "Luna",
-        Model::Codex(CodexModel::Sol) => "Sol",
-        Model::Codex(CodexModel::Astra) => "Astra",
+        Model::Codex(CodexModel::Sol62 | CodexModel::Sol) => "Sol",
+        Model::Codex(CodexModel::Astra62 | CodexModel::Astra) => "Astra",
         Model::Claude(ClaudeModel::Haiku55) => "Haiku 5.5",
         Model::Claude(ClaudeModel::Sonnet55) => "Sonnet 5.5",
         Model::Claude(ClaudeModel::Opus55) => "Opus 5.5",
@@ -141,7 +141,7 @@ mod tests {
         let astra = catalog
             .models
             .iter()
-            .find(|model| model.id == Model::Codex(CodexModel::Astra).as_str())
+            .find(|model| model.id == Model::Codex(CodexModel::Astra62).as_str())
             .unwrap();
         assert_eq!(
             astra.reasoning_modes,
@@ -153,7 +153,7 @@ mod tests {
         let sol = catalog
             .models
             .iter()
-            .find(|model| model.id == Model::Codex(CodexModel::Sol).as_str())
+            .find(|model| model.id == Model::Codex(CodexModel::Sol62).as_str())
             .unwrap();
         assert_eq!(sol.effective_speeds, Speed::ALL);
 
@@ -207,10 +207,12 @@ mod tests {
         for (value, expected) in [
             ("gpt-6-luna", Model::Codex(CodexModel::Luna)),
             ("luna", Model::Codex(CodexModel::Luna)),
+            ("gpt-6.2-sol", Model::Codex(CodexModel::Sol62)),
+            ("sol", Model::Codex(CodexModel::Sol62)),
             ("gpt-6.1-sol", Model::Codex(CodexModel::Sol)),
-            ("sol", Model::Codex(CodexModel::Sol)),
+            ("gpt-6.2-astra", Model::Codex(CodexModel::Astra62)),
+            ("astra", Model::Codex(CodexModel::Astra62)),
             ("gpt-6-astra", Model::Codex(CodexModel::Astra)),
-            ("astra", Model::Codex(CodexModel::Astra)),
             ("haiku", Model::Claude(ClaudeModel::Haiku55)),
             ("haiku-5.5", Model::Claude(ClaudeModel::Haiku55)),
             ("claude-haiku-5-5", Model::Claude(ClaudeModel::Haiku55)),

@@ -312,7 +312,7 @@ mod tests {
                     "spawn_agent",
                     ToolInput::Function(serde_json::value::to_raw_value(&input).unwrap()),
                     ToolContext::new(
-                        Model::Codex(CodexModel::Sol).as_str(),
+                        Model::Codex(CodexModel::Sol62).as_str(),
                         "root",
                         "spawn",
                         &[],

@@ -187,7 +187,7 @@ impl Harness {
             info: SessionInfo {
                 id: id.to_owned(),
                 workspace: self.workspace.path().to_owned(),
-                model: "gpt-6.1-sol".to_owned(),
+                model: "gpt-6.2-sol".to_owned(),
                 effort: ReasoningEffort::Low,
                 reasoning_mode: ReasoningMode::Standard,
                 speed: Speed::Standard,

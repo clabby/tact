@@ -243,7 +243,7 @@ mod tests {
     use nanocode::{ClaudeModel, Model as CodexModel};
     use ratatui::{Terminal, backend::TestBackend, style::Color};
 
-    const SOL: Model = Model::Codex(CodexModel::Sol);
+    const SOL: Model = Model::Codex(CodexModel::Sol62);
     const LUNA: Model = Model::Codex(CodexModel::Luna);
     const FABLE: Model = Model::Claude(ClaudeModel::Fable52);
 
@@ -303,7 +303,9 @@ mod tests {
         }
         assert_eq!(
             key(&mut selector, KeyCode::Enter).effects,
-            [ModelSelectorEffect::Apply(Model::Codex(CodexModel::Astra))]
+            [ModelSelectorEffect::Apply(Model::Codex(
+                CodexModel::Astra62
+            ))]
         );
         paste(&mut selector, "claude");
         assert!(key(&mut selector, KeyCode::Enter).effects.is_empty());
@@ -324,7 +326,7 @@ mod tests {
             ("SoL", vec![SOL]),
             ("sonnet-5.5", vec![Model::Claude(ClaudeModel::Sonnet55)]),
             ("haiku", vec![Model::Claude(ClaudeModel::Haiku55)]),
-            ("gpt-6.1-sol", vec![SOL]),
+            ("gpt-6.2-sol", vec![SOL]),
             ("claude-fable-5-2", vec![FABLE]),
             ("OpenAI", roster(false).to_vec()),
             ("codex", roster(false).to_vec()),

@@ -7,13 +7,14 @@
 //! are dropped once it is exhausted. Read failures abort loading so a session never silently
 //! omits configured instructions.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use nanocode::NanocodeError;
 use std::{
     env,
     fs::{self, File},
     io::{self, Read},
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 use thiserror::Error;
 
@@ -168,7 +169,7 @@ impl ProjectContext {
             "<environment_context>\n  <cwd>{}</cwd>\n  <shell>{}</shell>\n  <current_date>{}</current_date>\n  <timezone>UTC</timezone>\n</environment_context>",
             xml_text(&self.workspace),
             xml_text(&shell),
-            Utc::now().format("%Y-%m-%d")
+            DateTime::<Utc>::from(SystemTime::now()).format("%Y-%m-%d")
         ));
         output
     }
@@ -295,7 +296,9 @@ mod tests {
         };
 
         let rendered = context.render();
-        let date = Utc::now().format("%Y-%m-%d").to_string();
+        let date = DateTime::<Utc>::from(SystemTime::now())
+            .format("%Y-%m-%d")
+            .to_string();
         let (prefix, environment) = rendered.split_once("<environment_context>").unwrap();
 
         assert_eq!(

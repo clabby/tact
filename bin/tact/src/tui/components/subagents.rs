@@ -1142,7 +1142,7 @@ mod tests {
         AgentDescriptor {
             id: AgentId::new(id),
             session_id: format!("agent-{id}"),
-            model: Model::Codex(CodexModel::Sol),
+            model: Model::Codex(CodexModel::Sol62),
             thinking: Thinking::Medium,
             reasoning_mode: ReasoningMode::Standard,
             role: role.to_owned(),

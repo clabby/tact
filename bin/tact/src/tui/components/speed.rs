@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn speed_dial_has_three_stops_and_shares_effort_animation_timing() {
         let start = Instant::now();
-        let mut selector = SpeedSelector::new(Speed::Standard, Model::Codex(CodexModel::Astra));
+        let mut selector = SpeedSelector::new(Speed::Standard, Model::Codex(CodexModel::Astra62));
         let terminal = render(&mut selector, 60, 18);
         assert_eq!(
             terminal
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn arrows_wrap_preferences_and_enter_applies_the_selected_preference() {
         let now = Instant::now();
-        let mut selector = SpeedSelector::new(Speed::Standard, Model::Codex(CodexModel::Sol));
+        let mut selector = SpeedSelector::new(Speed::Standard, Model::Codex(CodexModel::Sol62));
         selector.update(key(KeyCode::Left, now));
         assert_eq!(selector.selected_speed(), Speed::Ultrafast);
         assert_eq!(
@@ -238,8 +238,8 @@ mod tests {
     #[test]
     fn only_speeds_the_model_runs_at_are_offered() {
         for (model, expected) in [
-            (Model::Codex(CodexModel::Astra), &Speed::ALL[..]),
-            (Model::Codex(CodexModel::Sol), &Speed::ALL[..]),
+            (Model::Codex(CodexModel::Astra62), &Speed::ALL[..]),
+            (Model::Codex(CodexModel::Sol62), &Speed::ALL[..]),
             (
                 Model::Codex(CodexModel::Luna),
                 &[Speed::Standard, Speed::Fast][..],
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn narrow_terminals_do_not_overflow_the_selector() {
-        let mut selector = SpeedSelector::new(Speed::Ultrafast, Model::Codex(CodexModel::Sol));
+        let mut selector = SpeedSelector::new(Speed::Ultrafast, Model::Codex(CodexModel::Sol62));
         let terminal = render(&mut selector, 3, 4);
         assert_eq!(terminal.backend().buffer().area.width, 3);
     }

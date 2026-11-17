@@ -398,7 +398,9 @@ impl JournalWriter {
         self.store
             .stage(&self.session_id, HostBatch { rows, resume_state })?;
         self.runtime
-            .block_on(session.append(SessionWrite { events, metadata }))
+            .block_on(tact_runtime::scope(async {
+                session.append(SessionWrite { events, metadata }).await
+            }))
             .map_err(|source| self.durability(source))?;
         Ok(())
     }
@@ -412,12 +414,13 @@ impl JournalWriter {
         let opened = match started {
             Some(started) => {
                 let record = self.session_record(started)?;
-                self.runtime.block_on(self.catalog.session(record))
+                self.runtime.block_on(tact_runtime::scope(async {
+                    self.catalog.session(record).await
+                }))
             }
-            None => self.runtime.block_on(DurableSession::open(
-                self.store.clone(),
-                self.session_id.clone(),
-            )),
+            None => self.runtime.block_on(tact_runtime::scope(async {
+                DurableSession::open(self.store.clone(), self.session_id.clone()).await
+            })),
         };
         opened.map_err(|source| self.durability(source))
     }

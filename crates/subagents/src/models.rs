@@ -141,8 +141,8 @@ impl<'de> Deserialize<'de> for HarnessModel {
 /// Models enabled by Tact's provider policy, in picker order.
 pub const SUPPORTED_MODELS: [HarnessModel; 8] = [
     HarnessModel::Codex(Model::Luna),
-    HarnessModel::Codex(Model::Sol),
-    HarnessModel::Codex(Model::Astra),
+    HarnessModel::Codex(Model::Sol62),
+    HarnessModel::Codex(Model::Astra62),
     HarnessModel::Claude(ClaudeModel::Haiku55),
     HarnessModel::Claude(ClaudeModel::Sonnet55),
     HarnessModel::Claude(ClaudeModel::Opus55),
@@ -181,7 +181,7 @@ pub(crate) fn alias(model: HarnessModel) -> Option<&'static str> {
 #[error("unsupported Tact model: {0}")]
 pub struct UnsupportedModel(String);
 
-/// Parses Tact's aliases and rejects models outside its supported roster.
+/// Parses the current roster and retains explicit prior Sol/Astra IDs for saved sessions.
 ///
 /// # Errors
 ///
@@ -193,7 +193,10 @@ pub fn parse_model(value: &str) -> Result<HarnessModel, UnsupportedModel> {
     value
         .parse::<HarnessModel>()
         .ok()
-        .filter(|model| SUPPORTED_MODELS.contains(model))
+        .filter(|model| {
+            SUPPORTED_MODELS.contains(model)
+                || matches!(model, HarnessModel::Codex(Model::Sol | Model::Astra))
+        })
         .ok_or_else(|| UnsupportedModel(value.to_owned()))
 }
 
@@ -226,6 +229,14 @@ mod tests {
             assert_eq!(alias(model), Some(name));
             assert_eq!(parse_model(model.as_str()), Ok(model));
         }
+        assert_eq!(
+            parse_model("gpt-6.1-sol"),
+            Ok(HarnessModel::Codex(Model::Sol))
+        );
+        assert_eq!(
+            parse_model("gpt-6-astra"),
+            Ok(HarnessModel::Codex(Model::Astra))
+        );
         for unsupported in [
             "claude-sonnet-5",
             "claude-haiku-4-5",
