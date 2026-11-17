@@ -95,7 +95,7 @@ const SUBAGENT_INSTRUCTIONS: &str = concat!(
 );
 const SUBAGENT_MODEL_INSTRUCTIONS: &str = r#"## Subagent model selection
 
-Among Codex models, start with `sol` (GPT-6.1 Sol). Use `astra` for especially deep reviews or
+Among Codex models, start with `sol` (GPT-6.2 Sol). Use `astra` for especially deep reviews or
 unresolved reasoning that warrants it.
 
 Choose `reasoning_mode: "standard"` by default. Use `"pro"` selectively for especially difficult
@@ -539,8 +539,8 @@ mod tests {
 
     const CODEX_MODELS: [Model; 3] = [
         Model::Codex(CodexModel::Luna),
-        Model::Codex(CodexModel::Sol),
-        Model::Codex(CodexModel::Astra),
+        Model::Codex(CodexModel::Sol62),
+        Model::Codex(CodexModel::Astra62),
     ];
 
     fn no_skills() -> SkillsConfig {
@@ -593,7 +593,7 @@ mod tests {
     }
 
     fn codex_base() -> String {
-        default_base(Model::Codex(CodexModel::Astra))
+        default_base(Model::Codex(CodexModel::Astra62))
     }
 
     fn load_config(directory: &Path, contents: &str, overrides: ConfigOverrides) -> Config {
@@ -779,7 +779,7 @@ mod tests {
                 directory.path(),
                 "",
                 ConfigOverrides {
-                    model: Some(Model::Codex(CodexModel::Astra)),
+                    model: Some(Model::Codex(CodexModel::Astra62)),
                     instructions: custom.map(str::to_owned),
                     append_instructions: Some("Project instructions.".to_owned()),
                     ..ConfigOverrides::default()
@@ -833,7 +833,7 @@ mod tests {
                 directory.path(),
                 "[skills]\nenabled = false\n",
                 ConfigOverrides {
-                    model: Some(Model::Codex(CodexModel::Astra)),
+                    model: Some(Model::Codex(CodexModel::Astra62)),
                     instructions: custom.map(str::to_owned),
                     append_instructions: Some("Current project instructions.".to_owned()),
                     ..ConfigOverrides::default()
@@ -843,7 +843,7 @@ mod tests {
                 "You are Tact, an agent based on GPT-6 Astra.\n\nSaved project instructions.";
             let instructions = AgentInstructions::from_config(
                 &config,
-                Model::Codex(CodexModel::Astra),
+                Model::Codex(CodexModel::Astra62),
                 Some(RestoredInstructions::new(stored.to_owned(), Some(false))),
                 true,
             )
@@ -926,7 +926,7 @@ mod tests {
             "[skills]\nenabled = false\n",
             ConfigOverrides::default(),
         );
-        let model = Model::Codex(CodexModel::Sol);
+        let model = Model::Codex(CodexModel::Sol62);
         let stored = format!(
             "Saved instructions.{}{}",
             separated(SUBAGENT_MODEL_INSTRUCTIONS),
@@ -958,7 +958,7 @@ mod tests {
             );
             let restored =
                 restored.map(|text| RestoredInstructions::new(text.to_owned(), Some(false)));
-            AgentInstructions::from_config(&config, Model::Codex(CodexModel::Sol), restored, true)
+            AgentInstructions::from_config(&config, Model::Codex(CodexModel::Sol62), restored, true)
                 .unwrap()
         };
         let offered = prompts("sk-ant-api03-glasswing", None);
@@ -969,7 +969,7 @@ mod tests {
         }
         for text in [
             Arc::clone(&withheld.session.text),
-            withheld.for_model(Model::Codex(CodexModel::Sol)),
+            withheld.for_model(Model::Codex(CodexModel::Sol62)),
         ] {
             assert!(!text.contains("mythos"));
             assert!(text.contains("### Available Claude models"));
@@ -985,7 +985,7 @@ mod tests {
     #[test]
     fn subagent_sections_follow_the_configuration() {
         let directory = tempdir().unwrap();
-        let model = Model::Codex(CodexModel::Sol);
+        let model = Model::Codex(CodexModel::Sol62);
         for enabled in [true, false] {
             let config = load_config(
                 directory.path(),

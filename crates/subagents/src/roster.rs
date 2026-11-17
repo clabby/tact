@@ -136,7 +136,7 @@ mod tests {
         AgentUpdate::Added(AgentDescriptor {
             id: AgentId::new(id),
             session_id: format!("child-{id}"),
-            model: Model::Codex(CodexModel::Sol),
+            model: Model::Codex(CodexModel::Sol62),
             thinking: Thinking::High,
             reasoning_mode: ReasoningMode::Pro,
             role: "reviewer".to_owned(),
@@ -193,7 +193,7 @@ mod tests {
                     "session_id": "child-1",
                     "role": "reviewer",
                     "task": "audit",
-                    "model": Model::Codex(CodexModel::Sol).as_str(),
+                    "model": Model::Codex(CodexModel::Sol62).as_str(),
                     "thinking": "high",
                     "reasoning_mode": "pro",
                     "status": { "state": "running" },

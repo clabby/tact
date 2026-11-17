@@ -244,6 +244,7 @@ impl Drop for Fixture {
 }
 
 fn configured(config: &Config, model: Model) -> ConfiguredAgent {
+    crate::install_tls_provider();
     ConfiguredAgent::from_config_with_model(
         config,
         config.agent().thinking(),
@@ -364,13 +365,13 @@ async fn custom_workspace_reaches_the_agent_checkpoint() {
     let directory = tempdir().unwrap();
     let selected = tempdir().unwrap();
     let selected = selected.path().canonicalize().unwrap();
-    let config = fixture.config(&directory, Model::Sol, Transport::Https, Speed::Standard);
+    let config = fixture.config(&directory, Model::Sol62, Transport::Https, Speed::Standard);
     let scoped = config.with_workspace(selected.clone());
-    let agent = configured(&scoped, Model::Sol);
+    let agent = configured(&scoped, Model::Sol62);
     prompt(&agent.agent, "Inspect this checkout").await;
     let checkpoint = agent.agent.checkpoint().await.unwrap();
     assert_eq!(
-        checkpoint.payload()["conversation"]["workspace"],
+        checkpoint.payload().decode::<Value>().unwrap()["conversation"]["workspace"],
         selected.to_string_lossy().as_ref()
     );
     assert_eq!(config.agent().workspace(), directory.path());
@@ -386,13 +387,13 @@ async fn configured_api_key_and_model_tiers_reach_both_transports() {
     }
     let fixture = Fixture::start().await;
     for transport in [Transport::Https, Transport::Websocket] {
-        for model in [Model::Astra, Model::Sol, Model::Luna] {
+        for model in [Model::Astra62, Model::Sol62, Model::Luna] {
             let policies = [
                 (Speed::Standard, None),
                 (Speed::Fast, Some("priority")),
                 (
                     Speed::Ultrafast,
-                    if matches!(model, Model::Astra | Model::Sol) {
+                    if matches!(model, Model::Astra62 | Model::Sol62) {
                         Some("ultrafast")
                     } else {
                         Some("priority")
@@ -427,7 +428,7 @@ async fn configured_pro_mode_reaches_both_transports() {
     }
     let fixture = Fixture::start().await;
     for transport in [Transport::Https, Transport::Websocket] {
-        for model in [Model::Astra, Model::Sol, Model::Luna] {
+        for model in [Model::Astra62, Model::Sol62, Model::Luna] {
             let directory = tempdir().unwrap();
             let mut config = fixture.config(&directory, model, transport, Speed::Standard);
             config.set_reasoning_mode(ReasoningMode::Pro);
@@ -465,7 +466,7 @@ try {
     for transport in [Transport::Https, Transport::Websocket] {
         for mode in [ReasoningMode::Standard, ReasoningMode::Pro] {
             let directory = tempdir().unwrap();
-            let config = fixture.config(&directory, Model::Astra, transport, Speed::Ultrafast);
+            let config = fixture.config(&directory, Model::Astra62, transport, Speed::Ultrafast);
             let text = fs::read_to_string(config.path()).unwrap();
             fs::write(
                 config.path(),
@@ -477,7 +478,7 @@ try {
             .unwrap();
             let mut config = config.reload().unwrap().into_parts().0;
             config.set_reasoning_mode(mode);
-            let mut root = configured(&config, Model::Astra);
+            let mut root = configured(&config, Model::Astra62);
             prompt(&root.agent, "DELEGATE_MODES").await;
             let expected_children = if mode == ReasoningMode::Pro { 2 } else { 1 };
             let mut children = BTreeMap::new();
@@ -554,7 +555,7 @@ try {
                 } else {
                     ReasoningMode::Standard
                 };
-                assert_eq!(request.body["model"], Model::Sol.as_str());
+                assert_eq!(request.body["model"], Model::Sol62.as_str());
                 assert_eq!(request.body["service_tier"], "ultrafast");
                 assert_eq!(request.body["reasoning"]["effort"], "high");
                 assert_eq!(
@@ -583,7 +584,7 @@ async fn configured_lineage_and_effort_survive_speed_changes_children_and_restor
     }
     let fixture = Fixture::start().await;
     for transport in [Transport::Https, Transport::Websocket] {
-        for model in [Model::Astra, Model::Sol] {
+        for model in [Model::Astra62, Model::Sol62] {
             let directory = tempdir().unwrap();
             let mut config = fixture.config(&directory, model, transport, Speed::Ultrafast);
             let root = configured(&config, model);

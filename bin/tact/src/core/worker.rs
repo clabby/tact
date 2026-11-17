@@ -924,7 +924,7 @@ pub(crate) fn spawn(
         compactions: JoinSet::new(),
         updates: Updates(updates),
     };
-    tokio::spawn(worker.run(
+    tokio::spawn(tact_runtime::scope(worker.run(
         PaneAgent {
             agent,
             context,
@@ -932,7 +932,7 @@ pub(crate) fn spawn(
         },
         command_rx,
         shutdown,
-    ));
+    )));
     (commands, update_rx)
 }
 
@@ -1378,11 +1378,12 @@ mod tests {
             ResponseError,
             tower::{
                 ResponsesAttempt, ResponsesAttemptKind, ResponsesServiceError,
-                ResponsesServiceResponse,
+                ResponsesServiceResponse, Service,
             },
             transport::ResponsesError,
         },
     };
+    use nanocode_http::Client;
     use std::{
         future::{Pending, pending},
         path::Path,
@@ -1400,7 +1401,6 @@ mod tests {
         time::timeout,
     };
     use tokio_util::sync::CancellationToken;
-    use tower::Service;
 
     #[derive(Clone)]
     struct CompactionService {
@@ -1511,6 +1511,7 @@ mod tests {
     #[tokio::test]
     async fn manual_compaction_captures_codex_snapshot_and_failure_has_no_checkpoint() {
         let (requests, mut receive) = mpsc::unbounded_channel();
+        tact_runtime::init().unwrap();
         let openai = OpenAi::builder("test-key")
             .service(move || CompactionService {
                 requests: requests.clone(),
@@ -1585,6 +1586,7 @@ mod tests {
             transcript::{CompactionFinished, LocalEvent, TranscriptJournal},
         };
         let (requests, mut receive) = mpsc::unbounded_channel();
+        tact_runtime::init().unwrap();
         let openai = OpenAi::builder("test-key")
             .service(move || CompactionService {
                 requests: requests.clone(),
@@ -1794,6 +1796,7 @@ mod tests {
         sender: mpsc::UnboundedSender<CapturedRequest>,
         context: AgentContext,
     ) -> (Agent, AgentEvents) {
+        tact_runtime::init().unwrap();
         let openai = OpenAi::builder("test-key")
             .service(move || CaptureService(sender.clone()))
             .build()
@@ -1841,13 +1844,13 @@ mod tests {
         }).await.unwrap();
     }
 
-    fn claude_text_frames(text: &str) -> String {
+    fn claude_frames(text: &str, compact: bool) -> String {
         use serde_json::json;
         [
             json!({"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}),
-            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":text}}),
+            json!({"type":"content_block_start","index":0,"content_block": if compact { json!({"type":"compaction","content":text,"signature":"fixture-signature"}) } else { json!({"type":"text","text":text}) }}),
             json!({"type":"content_block_stop","index":0}),
-            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}),
+            json!({"type":"message_delta","delta":{"stop_reason":if compact {"compaction"} else {"end_turn"}},"usage":{"output_tokens":1}}),
             json!({"type":"message_stop"}),
         ].into_iter().map(|frame| format!("event: {}\ndata: {frame}\n\n", frame["type"].as_str().unwrap())).collect::<String>()
     }
@@ -1861,24 +1864,26 @@ mod tests {
             mpsc::unbounded_channel::<oneshot::Sender<Option<String>>>();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let router = Router::new().route("/v1/messages", post(move || {
+        let router = Router::new().route("/v1/messages", post(move |axum::Json(body): axum::Json<serde_json::Value>| {
             let requested = requested.clone();
             async move {
                 let (send, receive) = oneshot::channel();
                 requested.send(send).unwrap();
                 match receive.await.unwrap() {
-                    Some(text) => (StatusCode::OK, [("content-type", "text/event-stream")], claude_text_frames(&text)),
-                    None => (StatusCode::BAD_REQUEST, [("content-type", "application/json")], "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"synthetic compaction failure\"}}".to_owned()),
+                    Some(text) => (StatusCode::OK, [("content-type", "text/event-stream")], claude_frames(&text, body["compaction"]["type"] == "summarize")),
+                    // Invalid-request errors trigger a fallback summarizer; use a terminal error.
+                    None => (StatusCode::UNAUTHORIZED, [("content-type", "application/json")], "{\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"synthetic compaction failure\"}}".to_owned()),
                 }
             }
         }));
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let directory = tempfile::tempdir().unwrap();
         let client = ClaudeClient::new(
-            reqwest::Client::new(),
+            Client::new(),
             format!("http://{address}/v1/messages"),
             "synthetic-key",
         );
+        crate::install_tls_provider();
         let (agent, mut events) = Agent::builder(Claude::new(
             client,
             Model::Claude(ClaudeModel::Opus55).as_str(),
@@ -1957,7 +1962,7 @@ mod tests {
         let _ = rustls::crypto::ring::default_provider().install_default();
         use axum::{Router, routing::post};
         use nanocode::{Claude, ClaudeModel, ModelSelection, claude::ClaudeClient};
-        let frames = claude_text_frames("done");
+        let frames = claude_frames("done", false);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1980,10 +1985,11 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let directory = tempfile::tempdir().unwrap();
         let client = ClaudeClient::new(
-            reqwest::Client::new(),
+            Client::new(),
             format!("http://{address}/v1/messages"),
             "synthetic-key",
         );
+        crate::install_tls_provider();
         let (agent, mut events) = Agent::builder(Claude::new(
             client,
             Model::Claude(ClaudeModel::Opus55).as_str(),
@@ -2064,7 +2070,7 @@ mod tests {
         assert_eq!(checkpoint.session_id(), expected_session);
         assert_eq!(checkpoint.thinking(), Thinking::High);
         assert!(checkpoint.has_conversation());
-        let payload = checkpoint.payload().to_string();
+        let payload = serde_json::to_string(checkpoint.payload()).unwrap();
         assert!(payload.contains("hello"));
         assert!(payload.contains("done"));
         commands
@@ -2152,7 +2158,7 @@ mod tests {
         }
         let first = captured(
             &mut requests,
-            Model::Codex(CodexModel::Astra),
+            Model::Codex(CodexModel::Astra62),
             Thinking::Low,
             Thinking::Low,
         )
@@ -2179,7 +2185,7 @@ mod tests {
         first.release.send(()).unwrap();
         captured(
             &mut requests,
-            Model::Codex(CodexModel::Astra),
+            Model::Codex(CodexModel::Astra62),
             Thinking::Low,
             Thinking::Low,
         )
@@ -2191,7 +2197,7 @@ mod tests {
         // valid; the new effort reaches the model through the turn context asserted below.
         captured(
             &mut requests,
-            Model::Codex(CodexModel::Astra),
+            Model::Codex(CodexModel::Astra62),
             Thinking::Low,
             Thinking::High,
         )
@@ -2223,7 +2229,7 @@ mod tests {
             };
             captured(
                 &mut requests,
-                Model::Codex(CodexModel::Astra),
+                Model::Codex(CodexModel::Astra62),
                 requested,
                 Thinking::High,
             )
@@ -2263,7 +2269,7 @@ mod tests {
             .unwrap();
         captured(
             &mut requests,
-            Model::Codex(CodexModel::Astra),
+            Model::Codex(CodexModel::Astra62),
             Thinking::Low,
             Thinking::High,
         )
@@ -2274,7 +2280,7 @@ mod tests {
         finished(&mut updates, TurnId::new(5)).await;
 
         let replacement_context = AgentContext {
-            model: Model::Codex(CodexModel::Sol),
+            model: Model::Codex(CodexModel::Sol62),
             thinking: Thinking::Medium,
             reasoning_mode: ReasoningMode::Standard,
         };
@@ -2299,7 +2305,7 @@ mod tests {
             .unwrap();
         captured(
             &mut requests,
-            Model::Codex(CodexModel::Sol),
+            Model::Codex(CodexModel::Sol62),
             Thinking::Medium,
             Thinking::Medium,
         )
@@ -2407,12 +2413,13 @@ mod tests {
     }
 
     const TEST_CONTEXT: AgentContext = AgentContext {
-        model: Model::Codex(CodexModel::Astra),
+        model: Model::Codex(CodexModel::Astra62),
         thinking: Thinking::Low,
         reasoning_mode: ReasoningMode::Standard,
     };
 
     fn pending_agent(called: Arc<Notify>, calls: Arc<AtomicUsize>) -> (Agent, AgentEvents) {
+        tact_runtime::init().unwrap();
         let openai = OpenAi::builder("test-key")
             .service(move || PendingService {
                 called: Arc::clone(&called),

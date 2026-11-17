@@ -243,7 +243,7 @@ mod tests {
         Agent, Model as CodexModel, OpenAi, ReasoningMode,
         oai::{
             ResponseError,
-            tower::{ResponsesAttempt, ResponsesServiceConfig, ResponsesServiceResponse},
+            tower::{ResponsesAttempt, ResponsesServiceConfig, ResponsesServiceResponse, Service},
         },
     };
     use std::{
@@ -259,7 +259,6 @@ mod tests {
     use tempfile::tempdir;
     use tokio::{sync::Notify, time::timeout};
     use tokio_util::sync::CancellationToken;
-    use tower::Service;
 
     #[derive(Clone)]
     struct PendingService {
@@ -378,6 +377,7 @@ mod tests {
     async fn cancellation_stops_the_turn_and_waits_for_the_driver() {
         let called = Arc::new(Notify::new());
         let service_called = Arc::clone(&called);
+        tact_runtime::init().unwrap();
         let openai = OpenAi::builder("test-key")
             .service(move || PendingService {
                 called: Arc::clone(&service_called),
@@ -390,7 +390,7 @@ mod tests {
             workspace: std::env::current_dir().unwrap(),
             agent,
             context: tact_subagents::AgentContext {
-                model: Model::Codex(CodexModel::Astra),
+                model: Model::Codex(CodexModel::Astra62),
                 thinking: nanocode::Thinking::Low,
                 reasoning_mode: ReasoningMode::Standard,
             },

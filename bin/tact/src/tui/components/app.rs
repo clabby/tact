@@ -1813,7 +1813,7 @@ mod tests {
             effort: ReasoningEffort::Medium,
             reasoning_mode: ReasoningMode::Standard,
             speed: Speed::Standard,
-            model: Model::Codex(CodexModel::Sol),
+            model: Model::Codex(CodexModel::Sol62),
             draft_reset: DraftReset::Preserve,
             skills: Arc::from([]),
         });
@@ -1830,7 +1830,7 @@ mod tests {
             effort: ReasoningEffort::High,
             reasoning_mode: ReasoningMode::Standard,
             speed: Speed::Standard,
-            model: Model::Codex(CodexModel::Astra),
+            model: Model::Codex(CodexModel::Astra62),
             draft_reset: DraftReset::Preserve,
             skills: Arc::from([]),
         });
@@ -3161,7 +3161,7 @@ mod registry_tests {
             effort: ReasoningEffort::High,
             reasoning_mode: ReasoningMode::Standard,
             speed: Speed::Standard,
-            model: Model::Codex(CodexModel::Sol),
+            model: Model::Codex(CodexModel::Sol62),
             draft_reset: DraftReset::Clear,
             skills: Arc::from([]),
         });
@@ -3551,7 +3551,7 @@ mod parity_tests {
             update: AgentUpdate::Added(AgentDescriptor {
                 id: AgentId::new(1),
                 session_id: "child".to_owned(),
-                model: Model::Codex(CodexModel::Sol),
+                model: Model::Codex(CodexModel::Sol62),
                 thinking: Thinking::Medium,
                 reasoning_mode: NanocodexReasoningMode::Standard,
                 role: "worker".to_owned(),

@@ -15,7 +15,7 @@ const host: SidebarHost = {
 };
 
 const session = (id: string, state: SessionSummary["state"], last_activity_unix_ms = 0) =>
-  ({ id, state, title: id, model: "gpt-6.1-sol", workspace: "/work", last_activity_unix_ms }) as SessionSummary;
+  ({ id, state, title: id, model: "gpt-6.2-sol", workspace: "/work", last_activity_unix_ms }) as SessionSummary;
 const instance = (running: number, current = false) =>
   ({ pid: running, port: 7878 + running, workspace: "/work", live: 1, running, current }) as SiblingInstance;
 
@@ -63,7 +63,7 @@ describe("sidebar search", () => {
   test("shows where history and live sessions matched the conversation", async () => {
     // The search field debounces History queries with `window.setTimeout`.
     Object.assign(globalThis, { window: dom });
-    const saved = { session_id: "saved", model: "gpt-6.1-sol", workspace: "/work", preview: "same first prompt", snippet: "…the lexer now handles unicode" } as PersistedSession;
+    const saved = { session_id: "saved", model: "gpt-6.2-sol", workspace: "/work", preview: "same first prompt", snippet: "…the lexer now handles unicode" } as PersistedSession;
     const api = {
       query: async (_name: string, args: { query?: string }) => args.query
         ? { sessions: [saved], next_cursor: null, live_matches: { b: "a lexer in the live one" } }

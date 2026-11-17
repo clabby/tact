@@ -8,7 +8,7 @@
 //! half-admitted.
 
 use super::*;
-use futures_util::{FutureExt, Stream};
+use futures_util::FutureExt;
 use nanocode::{
     AgentSessionContext, Capabilities, ForkRequest, HarnessFamily, ModelSelection, PromptRequest,
     ReasoningMode, SessionCheckpoint, TurnControl, TurnResult, agent::SpawnOptions, oai::Prompt,
@@ -17,6 +17,7 @@ use nanocode_agent::backend::{
     BackendFuture, BackendPrompt, BackendPromptRoute, BackendRuntime, BackendTurn, BackendTurnKey,
     LifecycleBackend,
 };
+use nanocode_sync::stream::Stream;
 use std::{
     future::{Future, poll_fn},
     pin::Pin,
@@ -94,7 +95,7 @@ impl State {
         });
         let (result_tx, result_rx) = oneshot::channel();
         let state = self.clone();
-        tokio::spawn(async move {
+        tokio::spawn(tact_runtime::scope(async move {
             let (mut result, terminal) = match std::panic::AssertUnwindSafe(state.drive(turn))
                 .catch_unwind()
                 .await
@@ -121,7 +122,7 @@ impl State {
             *state.bridge.events.lock().unwrap() = None;
             done.cancel();
             let _ = result_tx.send(result);
-        });
+        }));
         Ok(BackendTurn {
             request_id: Some(id),
             result: Box::pin(
@@ -241,9 +242,9 @@ impl Drop for Driver {
     fn drop(&mut self) {
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let state = self.0.clone();
-            runtime.spawn(async move {
+            runtime.spawn(tact_runtime::scope(async move {
                 let _ = state.stop().await;
-            });
+            }));
         }
     }
 }
@@ -265,7 +266,9 @@ impl LifecycleBackend for Driver {
         let state = self.0.clone();
         Box::pin(async move {
             // Admission remains owned even if the caller drops its prompt future.
-            tokio::spawn(state.submit(request)).await.map_err(invalid)?
+            tokio::spawn(tact_runtime::scope(state.submit(request)))
+                .await
+                .map_err(invalid)?
         })
     }
     fn route(&self, _request: BackendPrompt) -> BackendFuture<Result<BackendPromptRoute>> {
@@ -404,7 +407,7 @@ impl LifecycleBackend for Driver {
     fn shutdown(&self) -> BackendFuture<Result<()>> {
         let state = self.0.clone();
         Box::pin(async move {
-            tokio::spawn(async move { state.stop().await })
+            tokio::spawn(tact_runtime::scope(async move { state.stop().await }))
                 .await
                 .map_err(invalid)?
         })

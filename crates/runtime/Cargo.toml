@@ -1,0 +1,28 @@
+[package]
+name = "tact-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Tokio host integration for Nanocode native services"
+
+[lints]
+workspace = true
+
+[dependencies]
+ctor = "0.6"
+nanocode-home.workspace = true
+nanocode-psh.workspace = true
+nanocode-psh-embedded.workspace = true
+psh.workspace = true
+nanocode-executor.workspace = true
+nanocode-platform.workspace = true
+tokio.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+nanocode-http.workspace = true

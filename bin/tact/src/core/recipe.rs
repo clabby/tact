@@ -32,8 +32,12 @@ use nanocode::{
     },
     tools::ToolsBuildError,
 };
-use reqwest::header::{HeaderMap, HeaderValue, InvalidHeaderValue};
-use std::{num::NonZeroU32, path::PathBuf, sync::Arc};
+use nanocode_http::{
+    Client, Error as HttpError, Result as HttpResult,
+    header::{HeaderMap, HeaderValue, InvalidHeaderValue},
+    redirect::Policy,
+};
+use std::{io, num::NonZeroU32, path::PathBuf, sync::Arc};
 use tact_memory::{MemoryTool, MutationAuthorizer, SelectedMemoryStore};
 use tact_subagents::{
     AgentContext, AuthorityError, HarnessModel as Model, RootAgentAuthority, WeakSubagents,
@@ -46,6 +50,8 @@ const RESPONSE_MAX_ATTEMPTS: NonZeroU32 = NonZeroU32::new(2_000).unwrap();
 /// Why an agent could not be constructed.
 #[derive(Debug, Error)]
 pub(super) enum AgentBuildError {
+    #[error("initialize Nanocode runtime")]
+    Runtime(#[source] io::Error),
     #[error(transparent)]
     Auth(#[from] AuthError),
     #[error(transparent)]
@@ -57,7 +63,7 @@ pub(super) enum AgentBuildError {
     #[error("claude.workspace_id is not a valid HTTP header value")]
     ClaudeWorkspaceId(#[source] InvalidHeaderValue),
     #[error(transparent)]
-    HttpClient(#[from] reqwest::Error),
+    HttpClient(#[from] HttpError),
 }
 
 impl From<AgentBuildError> for NanocodeError {
@@ -101,6 +107,7 @@ impl AgentRecipe {
         self: &Arc<Self>,
         spec: AgentSpec<'_>,
     ) -> nanocode::agent::Result<(Agent, AgentEvents)> {
+        tact_runtime::init().map_err(AgentBuildError::Runtime)?;
         if let Some(snapshot) = &spec.snapshot {
             snapshot.validate_identity(spec.context.model, spec.session_id)?;
         }
@@ -262,11 +269,12 @@ impl AgentRecipe {
 
 /// An HTTP client that never follows redirects or retries, so credentials reach only the
 /// configured endpoint and the agent's own retry policy applies.
-fn http_client(headers: HeaderMap) -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
+fn http_client(headers: HeaderMap) -> HttpResult<Client> {
+    Client::builder()
         .default_headers(headers)
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
+        .redirect(Policy::none())
+        // Avoid the native client's automatic retry on a stale pooled connection.
+        .pool_max_idle_per_host(0)
         .build()
 }
 
@@ -317,7 +325,7 @@ mod tests {
         }
         let config = Config::load(ConfigOverrides {
             path: Some(config_path.to_path_buf()),
-            model: Some(Model::Codex(CodexModel::Sol)),
+            model: Some(Model::Codex(CodexModel::Sol62)),
             ..Default::default()
         })
         .unwrap();
@@ -416,6 +424,7 @@ mod tests {
             tool_choice: None,
             thinking: None,
             context_management: None,
+            compaction: None,
             diagnostics: None,
             system: None,
             messages: vec![Message::text(Role::User, "hello")],

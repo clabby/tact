@@ -21,7 +21,7 @@ use nanocode::{
         responses::{ContentItem, MessageRole, ResponseItem, WarmupResponse},
         tower::{
             CodeCall, CodeCallKind, GenerationOutput, ResponsePipelineStats, ResponsesAttempt,
-            ResponsesAttemptKind, ResponsesOutput, ResponsesServiceResponse,
+            ResponsesAttemptKind, ResponsesOutput, ResponsesServiceResponse, Service,
         },
     },
 };
@@ -39,7 +39,6 @@ use std::{
 use tact_subagents::{AgentContext, AgentStatus, AgentUpdate, HarnessModel, Subagents};
 use tempfile::tempdir;
 use tokio::{net::TcpListener, sync::Notify, time::timeout};
-use tower::Service;
 
 #[derive(Clone)]
 struct Script {
@@ -152,6 +151,7 @@ impl Service<ResponsesAttempt> for Script {
                 time_to_first_output_ns: None,
                 pipeline_stats: ResponsePipelineStats::default(),
                 timing: Default::default(),
+                hedge: Default::default(),
             }),
         )))
     }
@@ -313,7 +313,7 @@ async fn claude_root_runs_codex_child_through_code_mode() {
     ] {
         mixed_provider_roundtrip(
             HarnessModel::Claude(model),
-            HarnessModel::Codex(CodexModel::Sol),
+            HarnessModel::Codex(CodexModel::Sol62),
             1,
             false,
         )
@@ -355,7 +355,7 @@ async fn codex_root_runs_multiple_claude_children_through_code_mode() {
 async fn api_key_clean_spawn_keeps_parent_and_child_isolated() {
     mixed_provider_roundtrip(
         HarnessModel::Claude(ClaudeModel::Opus55),
-        HarnessModel::Codex(CodexModel::Sol),
+        HarnessModel::Codex(CodexModel::Sol62),
         2,
         true,
     )
@@ -433,7 +433,7 @@ async fn api_key_messages_reject_redirects_without_forwarding_credentials() {
                 reasoning_mode: ReasoningMode::Standard,
             },
             &recipe,
-            Script::new(HarnessModel::Codex(CodexModel::Sol), String::new()),
+            Script::new(HarnessModel::Codex(CodexModel::Sol62), String::new()),
             Speed::Standard,
         )
         .unwrap();

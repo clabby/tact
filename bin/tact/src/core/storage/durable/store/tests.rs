@@ -63,6 +63,7 @@ impl Fixture {
                 owner,
                 expected_revision,
                 StateCommit {
+                    settle: Default::default(),
                     payload: "payload",
                     records: &[],
                     events,
@@ -159,7 +160,7 @@ async fn rejected_commits_change_nothing() {
     let owner = fixture.owner("session").await;
     let record = StoreRecord {
         key: "key".to_owned(),
-        value: "value".to_owned(),
+        value: Arc::from("value"),
     };
     fixture
         .store
@@ -184,7 +185,7 @@ async fn rejected_commits_change_nothing() {
         .unwrap();
 
     let conflicting = StoreRecord {
-        value: "other".to_owned(),
+        value: Arc::from("other"),
         ..record
     };
     let mut mislabeled = event(&prompt(2, "text"));
@@ -664,6 +665,7 @@ async fn write_lock_contention_delays_a_commit_without_failing_it() {
                 &owner,
                 1,
                 StateCommit {
+                    settle: Default::default(),
                     payload: "payload",
                     records: &[],
                     events: events.as_slice(),
@@ -722,6 +724,7 @@ async fn a_fenced_owner_cannot_take_another_owners_host_batch() {
             &stale_owner,
             0,
             StateCommit {
+                settle: Default::default(),
                 payload: "stale",
                 records: &[],
                 events: &[event(&started("session"))],
@@ -738,6 +741,7 @@ async fn a_fenced_owner_cannot_take_another_owners_host_batch() {
             &current_owner,
             0,
             StateCommit {
+                settle: Default::default(),
                 payload: "current",
                 records: &[],
                 events: &[event(&started("session")), event(&prompt(3, "question"))],
@@ -770,7 +774,7 @@ async fn a_rejected_commit_keeps_its_host_batch_for_the_retry() {
             "payload",
             &[StoreRecord {
                 key: "key".to_owned(),
-                value: "value".to_owned(),
+                value: Arc::from("value"),
             }],
         )
         .await
@@ -788,7 +792,7 @@ async fn a_rejected_commit_keeps_its_host_batch_for_the_retry() {
     let events = [event(&started("session"))];
     let conflicting = [StoreRecord {
         key: "key".to_owned(),
-        value: "other".to_owned(),
+        value: Arc::from("other"),
     }];
     for (expected_revision, records) in [(0, &[][..]), (1, &conflicting[..])] {
         let rejected = fixture
@@ -798,6 +802,7 @@ async fn a_rejected_commit_keeps_its_host_batch_for_the_retry() {
                 &owner,
                 expected_revision,
                 StateCommit {
+                    settle: Default::default(),
                     payload: "payload",
                     records,
                     events: &events,
@@ -1145,6 +1150,7 @@ async fn older_binaries_can_append_after_contract_commits() {
             &owner,
             1,
             StateCommit {
+                settle: Default::default(),
                 payload: "payload",
                 records: &[],
                 events: &[event(&prompt(4, "newer binary"))],

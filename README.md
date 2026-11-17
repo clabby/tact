@@ -323,8 +323,8 @@ Esc to cancel.
 | Model | ID | Default effort |
 | --- | --- | --- |
 | `luna` | `gpt-6-luna` | medium |
-| `sol` | `gpt-6.1-sol` | medium |
-| `astra` | `gpt-6-astra` | low |
+| `sol` | `gpt-6.2-sol` | low |
+| `astra` | `gpt-6.2-astra` | low |
 | `haiku-5.5` | `claude-haiku-5-5` | medium |
 | `sonnet-5.5` | `claude-sonnet-5-5` | high |
 | `opus-5.5` | `claude-opus-5-5` | medium |
@@ -335,7 +335,9 @@ Claude models need Claude enabled (see below). Mythos 5.2 is only served to acco
 Project Glasswing and needs its own key, so Tact only offers it once `claude.glasswing_api_key` is set.
 It's the same model as Fable 5.2, so pick Fable if you don't have that access. Every
 model supports effort from `low` through `max`, and a configured `agent.thinking` overrides the
-defaults. Resumed sessions keep the model they started with. Sessions on retired model IDs can't be resumed.
+defaults. Resumed sessions keep the model they started with. Previous `gpt-6.1-sol` and
+`gpt-6-astra` IDs remain accepted for saved sessions and explicit configuration. Sessions on other
+retired model IDs can't be resumed.
 
 Astra, Sol, and Luna also support **Pro** mode, independent of effort. Open `/effort`, press `p` to toggle
 Pro, and press Enter to save. Pro applies to new sessions.

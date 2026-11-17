@@ -46,7 +46,7 @@ impl AgentConfig {
         let model = overrides
             .model
             .or(file.model)
-            .unwrap_or(Model::Codex(CodexModel::Sol));
+            .unwrap_or(Model::Codex(CodexModel::Sol62));
         let legacy_speed = if file.fast_mode == Some(true) {
             Speed::Fast
         } else {
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn model_defaults_choose_the_catalog_effort() {
         for (model, expected) in [
-            ("sol", ReasoningEffort::Medium),
+            ("sol", ReasoningEffort::Low),
             ("luna", ReasoningEffort::Medium),
             ("astra", ReasoningEffort::Low),
             ("haiku-5.5", ReasoningEffort::Medium),
@@ -241,7 +241,7 @@ mod tests {
             config.agent().workspace(),
             directory.path().join("workspace")
         );
-        assert_eq!(config.agent().model(), Model::Codex(CodexModel::Astra));
+        assert_eq!(config.agent().model(), Model::Codex(CodexModel::Astra62));
         assert_eq!(config.agent().thinking(), ReasoningEffort::Xhigh);
         assert_eq!(config.agent().reasoning_mode(), ReasoningMode::Pro);
         assert_eq!(config.agent().speed(), Speed::Fast);

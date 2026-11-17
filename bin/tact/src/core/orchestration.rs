@@ -407,7 +407,7 @@ mod tests {
     fn run_terminal(model_calls: u32, cost_usd: Option<f64>) -> Value {
         json!({
             "status": "completed",
-            "model": "gpt-6.1-sol",
+            "model": "gpt-6.2-sol",
             "reasoning_mode": "summary",
             "effort": "high",
             "transport": "responses_websocket_v2",
@@ -463,7 +463,7 @@ mod tests {
                 update: AgentUpdate::Added(AgentDescriptor {
                     id,
                     session_id: "child".to_owned(),
-                    model: Model::Codex(CodexModel::Sol),
+                    model: Model::Codex(CodexModel::Sol62),
                     thinking: Thinking::Medium,
                     reasoning_mode: ReasoningMode::Standard,
                     role: "researcher".to_owned(),

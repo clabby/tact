@@ -1,5 +1,4 @@
 use crate::{app::config::Config, core::session::AgentSnapshot};
-use futures_util::StreamExt;
 use nanocode::{
     Agent, AgentEvents, Claude, NanocodeError, Thinking, Tools,
     agent::{AgentHandle, Result},
@@ -20,6 +19,7 @@ use nanocode::{
         runtime::ToolRuntime,
     },
 };
+use nanocode_sync::stream::StreamExt;
 use serde_json::{Value, json, value::to_raw_value};
 use std::{
     collections::{HashMap, HashSet},
@@ -458,7 +458,8 @@ fn native_content(body: ToolOutputBody) -> std::result::Result<ToolResultContent
                 };
                 json!({"type":"image","source":source})
             }
-            ToolOutputContent::InputImageFile { .. }
+            ToolOutputContent::InputFile { .. }
+            | ToolOutputContent::InputImageFile { .. }
             | ToolOutputContent::InputAudio { .. }
             | ToolOutputContent::EncryptedContent { .. } => {
                 return Err("Claude Messages cannot accept this tool media type".into());
@@ -516,6 +517,7 @@ mod tests {
         ClaudeModel, ReasoningMode, Tool,
         tools::contract::{ToolContext, ToolOutput, ToolResult},
     };
+    use nanocode_http::Client;
     use std::{
         collections::VecDeque,
         sync::atomic::{AtomicBool, Ordering},
@@ -530,6 +532,7 @@ mod tests {
     >;
     struct ServerState {
         responses: Mutex<VecDeque<ResponseFactory>>,
+        input_tokens: Mutex<VecDeque<u64>>,
         seen: mpsc::UnboundedSender<Value>,
         headers: mpsc::UnboundedSender<HeaderMap>,
     }
@@ -546,11 +549,19 @@ mod tests {
     }
 
     async fn server(responses: Vec<ResponseFactory>) -> Server {
+        server_with_input_tokens(responses, vec![]).await
+    }
+
+    async fn server_with_input_tokens(
+        responses: Vec<ResponseFactory>,
+        input_tokens: Vec<u64>,
+    ) -> Server {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (seen, requests) = mpsc::unbounded_channel();
         let (headers, received_headers) = mpsc::unbounded_channel();
         let state = Arc::new(ServerState {
             responses: Mutex::new(responses.into()),
+            input_tokens: Mutex::new(input_tokens.into()),
             seen,
             headers,
         });
@@ -568,12 +579,24 @@ mod tests {
                         let model = body["model"].as_str().unwrap().to_owned();
                         let next = state.responses.lock().unwrap().pop_front();
                         let content = match next {
-                            Some(next) => next(body).await,
+                            Some(next) => {
+                                let compact = body["compaction"]["type"] == "summarize";
+                                let content = next(body).await;
+                                if compact {
+                                    json!({"type":"compaction","content":content["text"],"signature":"fixture-signature"})
+                                } else {
+                                    content
+                                }
+                            }
                             None => std::future::pending::<Value>().await,
                         };
                         (
                             [(header::CONTENT_TYPE, "text/event-stream")],
-                            sse(content, &model),
+                            sse(
+                                content,
+                                &model,
+                                state.input_tokens.lock().unwrap().pop_front(),
+                            ),
                         )
                     },
                 ),
@@ -592,19 +615,23 @@ mod tests {
         }
     }
 
-    fn sse(block: Value, model: &str) -> String {
+    fn sse(block: Value, model: &str, input_tokens: Option<u64>) -> String {
         let tool = block["type"] == "tool_use";
-        let usage = if tool {
+        let compact = block["type"] == "compaction";
+        let mut usage = if tool {
             json!({"input_tokens":10,"cache_read_input_tokens":20,"cache_creation_input_tokens":30,"output_tokens":0})
         } else {
             json!({"input_tokens":15,"cache_read_input_tokens":25,"cache_creation_input_tokens":35,"output_tokens":0})
         };
+        if let Some(input_tokens) = input_tokens {
+            usage["input_tokens"] = json!(input_tokens);
+        }
         let mut output = String::new();
         for event in [
             json!({"type":"message_start","message":{"id":"fixture-message","type":"message","role":"assistant","model":model,"content":[],"stop_reason":null,"usage":usage}}),
             json!({"type":"content_block_start","index":0,"content_block":block}),
             json!({"type":"content_block_stop","index":0}),
-            json!({"type":"message_delta","delta":{"stop_reason":if tool {"tool_use"} else {"end_turn"}},"usage":{"output_tokens":if tool {2} else {3}}}),
+            json!({"type":"message_delta","delta":{"stop_reason":if tool {"tool_use"} else if compact {"compaction"} else {"end_turn"}},"usage":{"output_tokens":if tool {2} else {3}}}),
             json!({"type":"message_stop"}),
         ] {
             output.push_str(&format!(
@@ -626,8 +653,9 @@ mod tests {
         Box::new(|_| Box::pin(async { json!({"type":"text","text":"finished"}) }))
     }
     fn agent(server: &Server, workspace: &Path, tools: Tools) -> (Agent, AgentEvents) {
+        tact_runtime::init().unwrap();
         build_client(
-            ClaudeClient::new(reqwest::Client::new(), &server.endpoint, "fixture-key"),
+            ClaudeClient::new(Client::new(), &server.endpoint, "fixture-key"),
             AgentContext {
                 model: Model::Claude(nanocode::ClaudeModel::Opus55),
                 thinking: Thinking::Medium,
@@ -746,9 +774,10 @@ mod tests {
         session: ClaudeSession<'_>,
         spawn: Option<CleanAgentFactory>,
     ) -> (Agent, AgentEvents) {
+        tact_runtime::init().unwrap();
         let selected = tools().build().unwrap();
         build_client(
-            ClaudeClient::new(reqwest::Client::new(), endpoint, "fixture-key"),
+            ClaudeClient::new(Client::new(), endpoint, "fixture-key"),
             AgentContext {
                 model: Model::Claude(model),
                 thinking: Thinking::Medium,
@@ -961,6 +990,7 @@ mod tests {
 
     #[tokio::test]
     async fn native_model_windows_reach_tact_snapshots() {
+        tact_runtime::init().unwrap();
         let server = server(vec![]).await;
         let workspace = tempfile::tempdir().unwrap();
         for model in [
@@ -972,7 +1002,7 @@ mod tests {
         ] {
             let selected = tools().build().unwrap();
             let (agent, _) = build_client(
-                ClaudeClient::new(reqwest::Client::new(), &server.endpoint, "fixture-key"),
+                ClaudeClient::new(Client::new(), &server.endpoint, "fixture-key"),
                 AgentContext {
                     model: Model::Claude(model),
                     thinking: Thinking::Medium,
@@ -995,25 +1025,30 @@ mod tests {
 
     #[tokio::test]
     async fn automatic_compaction_preserves_code_mode_continuation_and_active_count() {
-        let mut server = server(vec![
-            tool(
-                "before-compact",
-                "exec",
-                json!({"code":"text('large receipt '.repeat(1000));"}),
-            ),
-            Box::new(|_| {
-                Box::pin(async { json!({"type":"text","text":"compacted fixture summary"}) })
-            }),
-            tool(
-                "after-compact",
-                "exec",
-                json!({"code":"text(await tools.inspect({}));"}),
-            ),
-            final_text(),
-        ])
+        tact_runtime::init().unwrap();
+        let mut server = server_with_input_tokens(
+            vec![
+                tool(
+                    "before-compact",
+                    "exec",
+                    json!({"code":"text('large receipt '.repeat(1000));"}),
+                ),
+                Box::new(|_| {
+                    Box::pin(async { json!({"type":"text","text":"compacted fixture summary"}) })
+                }),
+                tool(
+                    "after-compact",
+                    "exec",
+                    json!({"code":"text(await tools.inspect({}));"}),
+                ),
+                final_text(),
+            ],
+            // Automatic compaction follows reported usage rather than tool receipt size.
+            vec![1_000],
+        )
         .await;
         let workspace = tempfile::tempdir().unwrap();
-        let client = ClaudeClient::new(reqwest::Client::new(), &server.endpoint, "fixture-key");
+        let client = ClaudeClient::new(Client::new(), &server.endpoint, "fixture-key");
         let (seed, _) = Agent::builder(Claude::new(
             client.clone(),
             nanocode::ClaudeModel::Opus55.as_str(),
@@ -1062,16 +1097,11 @@ mod tests {
             json!({"type":"ephemeral","ttl":"1h"})
         );
         let summary = server.requests.recv().await.unwrap();
-        assert!(
-            summary["messages"].as_array().unwrap().last().unwrap()["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("concise text-only handoff")
-        );
+        assert_eq!(summary["compaction"], json!({"type":"summarize"}));
         let continued = server.requests.recv().await.unwrap();
         let messages = continued["messages"].as_array().unwrap();
         assert!(
-            messages[0]["content"][0]["text"]
+            messages[0]["content"][0]["content"]
                 .as_str()
                 .unwrap()
                 .contains("compacted fixture summary")
@@ -1110,7 +1140,7 @@ mod tests {
         assert_eq!(budget.active_tokens, 15 + 25 + 35 + 3);
         assert_eq!(
             result.usage().unwrap().total_tokens(),
-            2 * (10 + 20 + 30 + 2) + 2 * budget.active_tokens
+            (1_000 + 20 + 30 + 2) + (10 + 20 + 30 + 2) + 2 * budget.active_tokens
         );
         agent.shutdown().await.unwrap();
     }
@@ -1212,10 +1242,11 @@ mod tests {
 
     #[tokio::test]
     async fn restore_applies_effort_and_caching_after_native_checkpoint() {
+        tact_runtime::init().unwrap();
         let mut server = server(vec![final_text(), final_text()]).await;
         let workspace = tempfile::tempdir().unwrap();
         let (original, _) = Agent::builder(Claude::new(
-            ClaudeClient::new(reqwest::Client::new(), &server.endpoint, "fixture-key"),
+            ClaudeClient::new(Client::new(), &server.endpoint, "fixture-key"),
             nanocode::ClaudeModel::Opus55.as_str(),
         ))
         .system("test instructions")
@@ -1235,7 +1266,7 @@ mod tests {
         original.shutdown().await.unwrap();
         let selected = tools().build().unwrap();
         let (restored, _) = build_client(
-            ClaudeClient::new(reqwest::Client::new(), &server.endpoint, "fixture-key"),
+            ClaudeClient::new(Client::new(), &server.endpoint, "fixture-key"),
             AgentContext {
                 model: Model::Claude(nanocode::ClaudeModel::Opus55),
                 thinking: Thinking::High,

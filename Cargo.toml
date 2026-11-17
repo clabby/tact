@@ -40,9 +40,17 @@ jsonschema = { version = "0.48.5", default-features = false }
 libc = "0.2.189"
 miette = { version = "7.6.0", features = ["fancy"] }
 minisign-verify = "0.2.5"
-nanocode = { git = "https://github.com/gakonst/nanocode", rev = "f4522379b05cdf443b099664f214994260042e1f", default-features = false, features = ["local-cells"] }
-nanocode-backend-codex = { git = "https://github.com/gakonst/nanocode", rev = "f4522379b05cdf443b099664f214994260042e1f" }
-nanocode-agent = { git = "https://github.com/gakonst/nanocode", rev = "f4522379b05cdf443b099664f214994260042e1f" }
+nanocode = { git = "https://github.com/gakonst/nanocode", rev = "266b90dad2fbe5adb2a25fae7c7bc978024bd62a", default-features = false, features = ["local-cells"] }
+nanocode-backend-codex = { git = "https://github.com/gakonst/nanocode", rev = "266b90dad2fbe5adb2a25fae7c7bc978024bd62a" }
+nanocode-agent = { git = "https://github.com/gakonst/nanocode", rev = "266b90dad2fbe5adb2a25fae7c7bc978024bd62a" }
+nanocode-http = { git = "https://github.com/gakonst/nanocode", rev = "266b90dad2fbe5adb2a25fae7c7bc978024bd62a" }
+nanocode-sync = { git = "https://github.com/gakonst/nanocode", rev = "266b90dad2fbe5adb2a25fae7c7bc978024bd62a" }
+nanocode-home = { git = "https://github.com/gakonst/nanocode", rev = "266b90dad2fbe5adb2a25fae7c7bc978024bd62a" }
+nanocode-psh = { git = "https://github.com/gakonst/nanocode", rev = "266b90dad2fbe5adb2a25fae7c7bc978024bd62a" }
+nanocode-psh-embedded = { git = "https://github.com/gakonst/nanocode", rev = "266b90dad2fbe5adb2a25fae7c7bc978024bd62a" }
+psh = { git = "https://github.com/gakonst/nanocode", rev = "266b90dad2fbe5adb2a25fae7c7bc978024bd62a" }
+nanocode-platform = { git = "https://github.com/gakonst/nanocode", rev = "266b90dad2fbe5adb2a25fae7c7bc978024bd62a" }
+nanocode-executor = { git = "https://github.com/gakonst/nanocode", rev = "266b90dad2fbe5adb2a25fae7c7bc978024bd62a" }
 png = "0.18.1"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30.2"
@@ -63,6 +71,7 @@ subtle = "2.6.1"
 syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "regex-onig"] }
 tar = "0.4.44"
 tact-memory = { version = "0.8.3", path = "crates/memory", default-features = false }
+tact-runtime = { version = "0.8.3", path = "crates/runtime" }
 tact-subagents = { version = "0.8.3", path = "crates/subagents" }
 tempfile = "3.27.0"
 thiserror = "2.0.19"

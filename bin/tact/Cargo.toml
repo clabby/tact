@@ -41,6 +41,8 @@ minisign-verify.workspace = true
 async-trait.workspace = true
 nanocode.workspace = true
 nanocode-agent.workspace = true
+nanocode-http.workspace = true
+nanocode-sync.workspace = true
 nanocode-backend-codex.workspace = true
 png.workspace = true
 pulldown-cmark.workspace = true
@@ -61,6 +63,7 @@ subtle.workspace = true
 syntect.workspace = true
 tar.workspace = true
 tact-memory = { workspace = true, features = ["client", "local", "native-server", "tool"] }
+tact-runtime.workspace = true
 tact-subagents.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true

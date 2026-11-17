@@ -786,9 +786,9 @@ mod tests {
 
     #[test]
     fn model_selects_the_initial_agent() {
-        let cli = Cli::try_parse_from(["tact", "--model", "gpt-6.1-sol"]).unwrap();
+        let cli = Cli::try_parse_from(["tact", "--model", "gpt-6.2-sol"]).unwrap();
 
-        assert_eq!(cli.model, Some(Model::Codex(CodexModel::Sol)));
+        assert_eq!(cli.model, Some(Model::Codex(CodexModel::Sol62)));
     }
 
     #[test]

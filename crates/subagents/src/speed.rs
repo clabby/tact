@@ -66,11 +66,15 @@ mod tests {
     fn speed_preferences_fall_back_to_the_models_fastest_supported_tier() {
         for (model, fast, ultrafast) in [
             (
-                Model::Codex(CodexModel::Astra),
+                Model::Codex(CodexModel::Astra62),
                 Speed::Fast,
                 Speed::Ultrafast,
             ),
-            (Model::Codex(CodexModel::Sol), Speed::Fast, Speed::Ultrafast),
+            (
+                Model::Codex(CodexModel::Sol62),
+                Speed::Fast,
+                Speed::Ultrafast,
+            ),
             (Model::Codex(CodexModel::Luna), Speed::Fast, Speed::Fast),
             (Model::Claude(ClaudeModel::Opus55), Speed::Fast, Speed::Fast),
             (

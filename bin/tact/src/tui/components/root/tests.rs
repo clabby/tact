@@ -97,7 +97,7 @@ fn subagent(id: u64, task: &str) -> AgentDescriptor {
     AgentDescriptor {
         id: AgentId::new(id),
         session_id: format!("agent-{id}"),
-        model: Model::Codex(CodexModel::Sol),
+        model: Model::Codex(CodexModel::Sol62),
         thinking: Thinking::Medium,
         reasoning_mode: NanocodexReasoningMode::Standard,
         role: "worker".to_owned(),
@@ -302,7 +302,7 @@ fn context_diagnostics_tracks_restored_and_live_records() {
         AgentEventKind::ModelCallCompleted,
         json!({
             "call_index": 1,
-            "model": "gpt-6.1-sol",
+            "model": "gpt-6.2-sol",
             "attempt": 1,
             "connection_generation": 1,
             "status": "completed",
@@ -405,7 +405,7 @@ fn clicking_composer_chrome_opens_model_effort_speed_and_subagents() {
         .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
         .unwrap();
     let top = root.composer_area.y;
-    let model_x = text_column(terminal.backend().buffer(), top, "gpt-6.1-sol");
+    let model_x = text_column(terminal.backend().buffer(), top, "gpt-6.2-sol");
     let effort_x = text_column(terminal.backend().buffer(), top, "medium");
     let speed_x = text_column(terminal.backend().buffer(), top, "󰳗");
     assert_eq!(
@@ -3018,7 +3018,7 @@ fn unsupported_models_preserve_speed_preference_for_forks_and_later_models() {
         assert!(render_root_text(&mut root, 80, 18).contains("Selected Speed: standard"));
         root.update(key(KeyCode::Esc, KeyModifiers::NONE));
     }
-    root.set_model(Model::Codex(CodexModel::Sol));
+    root.set_model(Model::Codex(CodexModel::Sol62));
     assert!(render_root_text(&mut root, 80, 18).contains("medium 󰑣"));
     assert_eq!(root.composer().speed(), Speed::Ultrafast);
 }
@@ -3132,13 +3132,13 @@ fn claude_availability_survives_reset_and_fork() {
         ReasoningMode::Standard,
         DraftReset::Clear,
     );
-    root.set_model(Model::Codex(CodexModel::Astra));
+    root.set_model(Model::Codex(CodexModel::Astra62));
     root.open_model();
     root.set_models(Arc::from(&SUPPORTED_MODELS[..3]));
     root.update(key(KeyCode::Right, KeyModifiers::NONE));
     let result = root.update(key(KeyCode::Enter, KeyModifiers::NONE));
     assert!(result.effects.is_empty());
-    assert_eq!(root.composer().model(), Model::Codex(CodexModel::Astra));
+    assert_eq!(root.composer().model(), Model::Codex(CodexModel::Astra62));
 }
 
 #[test]
