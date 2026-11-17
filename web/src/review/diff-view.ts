@@ -194,6 +194,16 @@ export class DiffView {
           cursor: pointer;
         }
         [data-diffs-header="default"] [data-metadata] { cursor: auto; }
+        /* The app's scrollbar-color is inherited into the diff, and Chromium then ignores the
+           viewer's ::-webkit-scrollbar rules and draws a full-size horizontal scrollbar under every
+           file. The viewer's layout leaves only the bottom padding for that scrollbar, so scroll
+           positions came out off by the difference. Here the scrollbar takes exactly the padding's
+           place, with the app's thumb. Firefox's own rules for the viewer already fit. */
+        @supports not (-moz-appearance: none) {
+          :host { --diffs-scrollbar-gutter-override: var(--diffs-gap-block, var(--diffs-gap-fallback)); }
+          [data-code] { scrollbar-color: auto; }
+          [data-code]::-webkit-scrollbar-thumb { background-color: var(--scrollbar-thumb); }
+        }
         [data-diffs-header="default"] [data-additions-count] { color: var(--add); }
         [data-diffs-header="default"] [data-deletions-count] { color: var(--del); }`,
       hunkSeparators: "line-info" as const,
