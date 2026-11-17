@@ -69,7 +69,7 @@ export class DiffView {
     // Keyboard activation replaces the focused toggle as the header redraws, so it must refocus.
     const fromKeyboard = event.detail === 0 && path.some((element) => element.classList.contains("file-collapse-toggle"));
     this.refocusToggle = fromKeyboard ? item.id : undefined;
-    this.toggleCollapsed(item, header, event.altKey);
+    this.toggleCollapsed(item, event.altKey);
   };
 
   constructor(
@@ -103,9 +103,28 @@ export class DiffView {
     this.codeView?.updateItem(item);
   }
 
+  /** Collapses or expands `item`, keeping the reader's place (see `collapseInPlace`). */
   setCollapsed(item: ReviewDiffItem, collapsed: boolean) {
-    item.collapsed = collapsed;
-    this.updateItem(item);
+    this.collapseInPlace([item], collapsed, item);
+  }
+
+  /**
+   * Gives each of `items` the collapsed state. While `anchor` is in view its header keeps its place
+   * on screen. Left alone, the viewer keeps the scroll position, so collapsing the file under the
+   * top of the view would leave the reader in a later file, as far down as the file shrank.
+   */
+  private collapseInPlace(items: readonly ReviewDiffItem[], collapsed: boolean, anchor: ReviewDiffItem) {
+    const viewport = this.codeView?.getContainerElement()?.getBoundingClientRect();
+    const file = this.codeView?.getRenderedItems()
+      .find((rendered) => rendered.id === anchor.id)?.element.getBoundingClientRect();
+    for (const item of items) {
+      item.collapsed = collapsed;
+      this.updateItem(item);
+    }
+    if (!viewport || !file || file.bottom <= viewport.top || file.top >= viewport.bottom) return;
+    // A header pinned over the middle of its file sits at the top of the view.
+    const offset = Math.max(0, file.top - viewport.top);
+    this.codeView?.scrollTo({ type: "item", id: anchor.id, align: "start", offset, behavior: "instant" });
   }
 
   /** Sends a changed syntax theme to the workers that highlight the diff. */
@@ -218,21 +237,13 @@ export class DiffView {
     return button;
   }
 
-  /**
-   * Collapses or expands `item`, or with `all` gives every file the state `item` takes. The clicked
-   * header keeps its place on screen. A sticky header sits at the top while its file scrolls under
-   * it, and without this, collapsing the file would leave the view somewhere in a later file.
-   */
-  private toggleCollapsed(item: ReviewDiffItem, header: HTMLElement, all: boolean) {
-    const viewport = this.codeView?.getContainerElement();
-    if (!viewport) return;
-    const offset = Math.max(0, header.getBoundingClientRect().top - viewport.getBoundingClientRect().top);
+  /** Collapses or expands `item`, or with `all` gives every file the state `item` takes. */
+  private toggleCollapsed(item: ReviewDiffItem, all: boolean) {
     const collapsed = item.collapsed !== true;
-    for (const target of all ? this.deps.items() : [item]) {
-      if (!collapsed) this.deps.fileExpanded(target.id);
-      if ((target.collapsed === true) !== collapsed) this.setCollapsed(target, collapsed);
-    }
-    this.codeView?.scrollTo({ type: "item", id: item.id, align: "start", offset, behavior: "instant" });
+    const targets = all ? this.deps.items() : [item];
+    if (!collapsed) for (const target of targets) this.deps.fileExpanded(target.id);
+    const changed = targets.filter((target) => (target.collapsed === true) !== collapsed);
+    this.collapseInPlace(changed, collapsed, item);
   }
 
   private seenButton(item: ReviewDiffItem) {
