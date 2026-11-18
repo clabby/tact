@@ -11,7 +11,6 @@ export type SearchBarDeps = {
   files(): readonly FileDiffMetadata[];
   items(): readonly ReviewDiffItem[];
   viewer(): CodeView<AnnotationMetadata> | undefined;
-  seenFiles(): ReadonlySet<string>;
   setCollapsed(item: ReviewDiffItem, collapsed: boolean): void;
   selectMobilePanel(name: "diff"): void;
 };
@@ -19,8 +18,8 @@ export type SearchBarDeps = {
 /**
  * Find-in-changes for the virtualized diff. The search bar owns the current match and its
  * highlight, and the temporary view changes it makes to reveal a match: it replaces the line
- * selection and may expand a file marked as seen. Both are put back when the match moves on or
- * the search closes. The page owns the find shortcut and calls `open` while the review is shown.
+ * selection and may expand a collapsed file. Both are put back when the match moves on or the
+ * search closes. The page owns the find shortcut and calls `open` while the review is shown.
  */
 export class SearchBar {
   private count = 0;
@@ -28,7 +27,8 @@ export class SearchBar {
   private match?: ReviewSearchMatch;
   private paused = true;
   private selection?: CodeViewLineSelection | null;
-  private expandedItem?: string;
+  /** The collapsed file this search expanded to show a match. */
+  private expandedItem?: ReviewDiffItem;
   private returnFocus?: HTMLElement;
   private readonly handleShortcut = (event: KeyboardEvent) => {
     if (event.isComposing || !this.isOpen() || !this.deps.visible() || this.root.querySelector("dialog[open]")) return;
@@ -176,7 +176,7 @@ export class SearchBar {
     const item = this.deps.items().find((candidate) => candidate.id === match.itemId);
     if (item?.collapsed) {
       this.deps.setCollapsed(item, false);
-      if (this.deps.seenFiles().has(item.id)) this.expandedItem = item.id;
+      this.expandedItem = item;
     }
     this.deps.viewer()?.setSelectedLines({
       id: match.itemId,
@@ -225,11 +225,12 @@ export class SearchBar {
   }
 
   private restoreExpandedItem(keepItem?: string) {
-    const itemId = this.expandedItem;
-    if (!itemId || itemId === keepItem) return;
+    const expanded = this.expandedItem;
+    if (!expanded || expanded.id === keepItem) return;
     this.expandedItem = undefined;
-    const item = this.deps.items().find((candidate) => candidate.id === itemId);
-    if (!item || !this.deps.seenFiles().has(itemId) || item.collapsed) return;
+    // A refresh that changed the file replaced its item, and the new item starts from its seen state.
+    const item = this.deps.items().find((candidate) => candidate.id === expanded.id);
+    if (item !== expanded || item.collapsed) return;
     this.deps.setCollapsed(item, true);
   }
 
@@ -266,7 +267,7 @@ export class SearchBar {
 
   /** The reviewer expanded the file at `path` themselves, so search must not collapse it again. */
   fileExpanded(path: string) {
-    if (this.expandedItem === path) this.expandedItem = undefined;
+    if (this.expandedItem?.id === path) this.expandedItem = undefined;
   }
 }
 

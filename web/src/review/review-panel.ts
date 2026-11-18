@@ -48,6 +48,7 @@ import { ReviewStatus } from "./review-status";
 import { SEARCH_HIGHLIGHT, SearchBar } from "./search-bar";
 import { SeenFiles } from "./seen-files";
 import { SettingsPopover } from "./settings-popover";
+import { bindSidebarToggle } from "./sidebar-toggle";
 import "./review-panel.css";
 
 /** What the application shell lends the review panel. */
@@ -143,12 +144,13 @@ class ReviewPanel {
     this.diffView = new DiffView(root, {
       settings: () => this.settings.current,
       appearance: () => appearance(this.settings.current, this.host.theme()),
+      items: () => this.items,
       seenFiles: () => this.seenFiles(),
       seenChanged: (file, seen) => {
         this.seen.mark(this.bootstrap.checkout.path, file, seen);
-        if (!seen) this.search.fileExpanded(file.name);
         this.fileTree.refreshDecorations();
       },
+      fileExpanded: (path) => this.search.fileExpanded(path),
       renderAnnotation: (annotation) => this.annotationElement(annotation),
       openComposer: (selection) => this.commentEditor.open(selection),
       selectedLinesChanged: (selection) => this.search.selectedLinesChanged(selection),
@@ -161,7 +163,6 @@ class ReviewPanel {
       files: () => this.files,
       items: () => this.items,
       viewer: () => this.diffView.viewer,
-      seenFiles: () => this.seenFiles(),
       setCollapsed: (item, collapsed) => this.diffView.setCollapsed(item, collapsed),
       selectMobilePanel: (name) => this.selectMobilePanel(name),
     });
@@ -561,6 +562,7 @@ class ReviewPanel {
 
   private bindEvents() {
     this.search.bind();
+    bindSidebarToggle(this.root, localStorage);
     const tabs = [...this.root.querySelectorAll<HTMLButtonElement>("[data-tab]")];
     for (const [index, tab] of tabs.entries()) {
       tab.addEventListener("click", () => this.selectTab(tab.dataset.tab ?? "changes"));
