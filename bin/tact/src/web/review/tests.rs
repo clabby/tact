@@ -13,6 +13,7 @@ use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -21,6 +22,12 @@ use std::{
 };
 use tokio::sync::Notify;
 
+/// The range the fixture repository's review opens with: the feature branch's commit.
+fn default_range() -> Value {
+    json!({"from": 0, "to": 1})
+}
+
+/// The fixture repository's feature branch through the working tree.
 fn full_range() -> Value {
     json!({"from": 0, "to": 2})
 }
@@ -29,7 +36,7 @@ fn overview_request(session: &str, instructions: Option<&str>) -> Value {
     json!({
         "session": session,
         "generation": 0,
-        "range": full_range(),
+        "range": default_range(),
         "instructions": instructions,
     })
 }
@@ -40,7 +47,7 @@ fn question_request(session: &str) -> Value {
         "thread_id": "thread-1",
         "operation_id": "question-1",
         "generation": 0,
-        "range": full_range(),
+        "range": default_range(),
         "path": "tracked.txt",
         "side": "additions",
         "start_line": 1,
@@ -93,10 +100,10 @@ async fn the_review_is_prepared_lazily_and_matches_the_browser_protocol() {
     assert_eq!(review["protocol_version"], PROTOCOL_VERSION);
     assert_eq!(review["generation"], 0);
     assert_eq!(review["turn_running"], false);
-    assert_eq!(
-        patch_paths(&review["page"]),
-        paths(["tracked.txt", "working.txt"])
-    );
+    assert_eq!(review["branch_range"], full_range());
+    assert_eq!(review["default_range"], default_range());
+    assert_eq!(review["page"]["scope"], "Committed changes");
+    assert_eq!(patch_paths(&review["page"]), paths(["tracked.txt"]));
     assert_eq!(review["range_targets"].as_array().unwrap().len(), 3);
     assert_eq!(review["overview"], Value::Null);
     assert_eq!(review["questions"], json!([]));
@@ -110,7 +117,7 @@ async fn other_review_routes_refuse_until_the_review_is_loaded() {
         .call(
             Method::POST,
             "/api/range",
-            Some(json!({"generation": 0, "range": full_range()})),
+            Some(json!({"generation": 0, "range": default_range()})),
         )
         .await;
 
@@ -146,10 +153,15 @@ async fn refresh_replaces_the_snapshot_and_range_loads_use_the_new_generation() 
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(refreshed["generation"], 1);
-    assert_eq!(
-        added_lines(&refreshed["page"], "working.txt"),
-        ["changed again"]
-    );
+    let (status, page) = harness
+        .call(
+            Method::POST,
+            "/api/range",
+            Some(json!({"generation": 1, "range": full_range()})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(added_lines(&page, "working.txt"), ["changed again"]);
     let (status, stale) = harness
         .call(
             Method::POST,
@@ -219,10 +231,16 @@ async fn overview_prompts_carry_the_range_repository_and_instructions_to_the_ses
         .await;
 
     assert_eq!(body["overview_mdx"], "## Overview");
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(harness.workspace.path())
+        .output()
+        .unwrap();
     let context = OverviewContext {
         repository: fs::canonicalize(harness.workspace.path()).unwrap(),
-        range: OverviewRange::WorkingTree {
+        range: OverviewRange::Commits {
             base: review["page"]["base"].as_str().unwrap().to_owned(),
+            head: String::from_utf8(head.stdout).unwrap().trim().to_owned(),
         },
     };
     let expected = OverviewPrompt {
@@ -254,7 +272,7 @@ async fn a_running_session_blocks_review_actions() {
         ("/api/overview", overview_request("s1", None)),
         (
             "/api/ai-review",
-            json!({"session": "s1", "generation": 0, "range": full_range()}),
+            json!({"session": "s1", "generation": 0, "range": default_range()}),
         ),
         ("/api/question", question_request("s1")),
     ] {
@@ -359,7 +377,7 @@ async fn compose_renders_anchored_comments_and_refuses_unanchored_or_stale_ones(
     let decision = |comments: Value, generation: u64| {
         json!({
             "generation": generation,
-            "range": full_range(),
+            "range": default_range(),
             "decision": "request_changes",
             "summary": "Please address this.",
             "comments": comments,
@@ -380,7 +398,7 @@ async fn compose_renders_anchored_comments_and_refuses_unanchored_or_stale_ones(
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body["markdown"],
-        "## Review: Changes requested\n\n**Scope:** Full branch\n\nPlease address this.\n\n\
+        "## Review: Changes requested\n\n**Scope:** Committed changes\n\nPlease address this.\n\n\
          ### Comments\n\n- `tracked.txt:1` (new)\n  Handle the error.\n  This can fail.\n"
     );
 
@@ -452,7 +470,7 @@ async fn review_actions_for_a_session_that_is_not_live_are_unknown_session() {
             Method::POST,
             "/api/question/cancel",
             Some(json!({
-                "session": "ghost", "operation_id": "q", "generation": 0, "range": full_range()
+                "session": "ghost", "operation_id": "q", "generation": 0, "range": default_range()
             })),
         )
         .await;

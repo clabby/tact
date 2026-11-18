@@ -28,7 +28,7 @@ index d1c4e91..44b0c57 100644
      Action::ChangeEffort,
 `;
 
-const branchPatch = `${patch}diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+const committedPatch = `diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
 index 82a06c1..90c03be 100644
 --- a/.github/workflows/release.yml
 +++ b/.github/workflows/release.yml
@@ -36,11 +36,13 @@ index 82a06c1..90c03be 100644
        - run: cargo build --release
 +      - run: cd web && bun install --frozen-lockfile
 +      - run: cd web && bun run build
-       - run: cargo test
+      - run: cargo test
 `;
 
+const branchPatch = `${patch}${committedPatch}`;
+
 const reviewBootstrapBase = {
-  protocol_version: 10,
+  protocol_version: 11,
   generation: 1,
   title: "Review feature/review-workflow",
   repository: "tact",
@@ -51,7 +53,8 @@ const reviewBootstrapBase = {
     { index: 2, kind: "commit" as const, short_id: "d2e640b", title: "Integrate review action" },
     { index: 3, kind: "working_tree" as const, short_id: "WT", title: "Uncommitted changes" },
   ],
-  default_range: { from: 0, to: 3 },
+  branch_range: { from: 0, to: 3 },
+  default_range: { from: 0, to: 2 },
   overview: null,
   questions: [],
   turn_running: false,
@@ -89,6 +92,16 @@ export const reviewFixtures = {
     patch,
     full_context: false,
   },
+  "0:2": {
+    generation: 1,
+    title: reviewBootstrapBase.title,
+    repository: reviewBootstrapBase.repository,
+    selected_range: { from: 0, to: 2 },
+    scope: "Committed changes",
+    base: "9d3b745",
+    patch: committedPatch,
+    full_context: false,
+  },
   "0:3": {
     generation: 1,
     title: reviewBootstrapBase.title,
@@ -113,11 +126,12 @@ export const reviewFixtures = {
 
 export const reviewBootstrap = {
   ...reviewBootstrapBase,
-  page: reviewFixtures["0:3"],
+  page: reviewFixtures["0:2"],
 };
 
 export const overviewFixtures = {
   "2:3": overview,
+  "0:2": `${overview}\n## Committed release work\n\nThe branch's commits package the browser bundle in the release workflow.`,
   "0:3": `${overview}\n## Branch-only release work\n\nThe full branch also packages the browser bundle in the release workflow.`,
   "1:2": `${overview}\n## Selected commits\n\nThis overview covers only the selected commit interval.`,
 };

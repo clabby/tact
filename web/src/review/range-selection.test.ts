@@ -19,9 +19,10 @@ const targets: ReviewTarget[] = [
 describe("commit range selection", () => {
   test("labels presets and arbitrary commit intervals", () => {
     expect(rangeLabel(targets, { from: 2, to: 3 }, { from: 1, to: 3 })).toBe("Uncommitted changes");
+    expect(rangeLabel(targets, { from: 1, to: 2 }, { from: 1, to: 3 })).toBe("Committed changes");
     expect(rangeLabel(targets, { from: 1, to: 3 }, { from: 1, to: 3 })).toBe("Full branch");
     expect(rangeLabel(targets, { from: 0, to: 3 }, { from: 1, to: 3 })).toBe("Entire stack");
-    expect(rangeLabel(targets, { from: 1, to: 2 }, { from: 1, to: 3 })).toBe("b111111 → c222222");
+    expect(rangeLabel(targets, { from: 1, to: 2 }, { from: 0, to: 3 })).toBe("b111111 → c222222");
   });
 
   test("clicking outside the range widens the unambiguous boundary", () => {
@@ -52,17 +53,24 @@ describe("commit range selection", () => {
     expect(rangesEqual({ from: 1, to: 3 }, { from: 1, to: 3 })).toBe(true);
   });
 
-  test("presets cover the branch, its newest commit, and the uncommitted work", () => {
-    const last = targets.length - 1;
-    expect(rangePresets(targets, { from: 1, to: last }).map(({ id, range }) => [id, range])).toEqual([
-      ["branch", { from: 1, to: last }],
-      ["stack", { from: 0, to: last }],
-      ["latest", { from: last - 2, to: last - 1 }],
-      ["uncommitted", { from: last - 1, to: last }],
+  test("presets cover the branch's commits, the branch, the stack, its newest commit, and the uncommitted work", () => {
+    const stacked: ReviewTarget[] = [
+      targets[0]!,
+      { index: 1, kind: "commit", short_id: "p000000", title: "Parent branch change" },
+      ...targets.slice(1).map((target) => ({ ...target, index: target.index + 1 })),
+    ];
+    expect(rangePresets(stacked, { from: 1, to: 4 }).map(({ id, range }) => [id, range])).toEqual([
+      ["committed", { from: 1, to: 3 }],
+      ["branch", { from: 1, to: 4 }],
+      ["stack", { from: 0, to: 4 }],
+      ["latest", { from: 2, to: 3 }],
+      ["uncommitted", { from: 3, to: 4 }],
     ]);
   });
 
   test("presets that would repeat each other are dropped", () => {
+    const oneCommit = [targets[0]!, targets[1]!, targets.at(-1)!];
+    expect(rangePresets(oneCommit, { from: 0, to: 2 }).map(({ id }) => id)).toEqual(["committed", "branch", "uncommitted"]);
     const trunkAndWorkingTree = [targets[0]!, targets.at(-1)!];
     expect(rangePresets(trunkAndWorkingTree, { from: 0, to: 1 }).map(({ id }) => id)).toEqual(["branch"]);
     expect(rangePresets([targets[0]!], { from: 0, to: 0 })).toEqual([]);
