@@ -364,11 +364,14 @@ export type Checkout = {
 /** The checkouts of a session's repository (main checkout first) and other recent workspaces, newest first. */
 export type Workspaces = { default: string; checkouts: Checkout[]; recent: string[] };
 
+/** Which stored sessions the history query lists: every checkout of the repository, or one workspace. */
+export type HistoryScope = "repository" | "workspace";
+
 /** Query arguments and replies; `undefined` arguments mark a query without `args`. */
 export type Queries = {
   models: { args: undefined; reply: ModelCatalog };
   history: {
-    args: { query?: string; cursor?: string | null };
+    args: { query?: string; cursor?: string | null; scope?: HistoryScope };
     /** `live_matches`: snippets of the live sessions whose conversation matches, by session id. */
     reply: { sessions: PersistedSession[]; next_cursor: string | null; live_matches: Record<string, string> };
   };

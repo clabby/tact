@@ -7,10 +7,16 @@ import { orderSessions } from "./session-pins";
 import { SessionTitles } from "./session-title";
 import type { Connection } from "../core/store";
 import { toast } from "../ui/toast";
-import type { ModelCatalog, OpenSpec, PersistedSession, SessionSummary, SiblingInstance } from "../core/wire";
+import type { HistoryScope, ModelCatalog, OpenSpec, PersistedSession, SessionSummary, SiblingInstance } from "../core/wire";
 
 const PINS_KEY = "tact.web.pinned-sessions";
+const HISTORY_SCOPE_KEY = "tact.web.history-scope";
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+
+const HISTORY_SCOPE_LABELS: Record<HistoryScope, string> = {
+  repository: "All checkouts",
+  workspace: "This workspace",
+};
 
 export type SidebarHost = {
   api: ApiClient;
@@ -39,6 +45,7 @@ export class Sidebar {
   private readonly historyList: HTMLElement;
   private readonly search: HTMLInputElement;
   private readonly more: HTMLButtonElement;
+  private readonly scopeButton: HTMLButtonElement;
   private readonly footer: HTMLElement;
   private live: SessionSummary[] = [];
   private active: string | null = null;
@@ -58,6 +65,13 @@ export class Sidebar {
   private footerSignature = "";
   private historyCursor: string | null = null;
   private historyQuery = "";
+  /**
+   * Which stored sessions History lists: every checkout of the repository, or only the active
+   * session's workspace, which the server resolves.
+   */
+  private historyScope: HistoryScope = localStorage.getItem(HISTORY_SCOPE_KEY) === "workspace" ? "workspace" : "repository";
+  /** The active session's workspace, which a "workspace" History scope lists. */
+  private activeWorkspace: string | null = null;
   /** What the search field filters the live list by; History is searched on the server. */
   private filter = "";
   /** Sessions this browser keeps above the rest of the live list. */
@@ -85,7 +99,7 @@ export class Sidebar {
       <nav class="sidebar-scroll" aria-label="Sessions">
         <h2 class="section-title live-title">Live <span class="live-count"></span></h2>
         <ul class="session-list live-list" role="list"></ul>
-        <h2 class="section-title">History</h2>
+        <h2 class="section-title">History <button type="button" class="history-scope" aria-haspopup="menu"><span class="history-scope-label"></span>${glyph("chevron-down")}</button></h2>
         <ul class="session-list history-list" role="list"></ul>
         <button type="button" class="history-more" hidden>Load more</button>
       </nav>
@@ -94,7 +108,9 @@ export class Sidebar {
     this.historyList = root.querySelector(".history-list")!;
     this.search = root.querySelector(".chat-search input")!;
     this.more = root.querySelector(".history-more")!;
+    this.scopeButton = root.querySelector(".history-scope")!;
     this.footer = root.querySelector(".sidebar-foot")!;
+    this.renderScope();
     this.bind();
     this.renderFooter("connecting", []);
   }
@@ -111,14 +127,20 @@ export class Sidebar {
     const current = new Set(live.map((session) => session.id));
     const closed = [...previous].some((id) => !current.has(id));
     const opened = [...current].some((id) => !previous.has(id));
+    const workspace = live.find((session) => session.id === active)?.workspace ?? this.activeWorkspace;
+    // History loaded before the active session was known already lists the server's workspace.
+    const moved = this.activeWorkspace !== null && workspace !== this.activeWorkspace;
+    this.activeWorkspace = workspace;
     this.live = orderSessions(live, this.pinned);
     this.active = active;
     if (this.pending && (active !== this.pending.from || !current.has(this.pending.id))) this.pending = null;
     this.renderLive();
     // A closed session is only in History once it has been listed again, and the loaded pages
-    // predate it. A reload also recomputes which rows the live list now hides. Otherwise History
-    // only changes when a newly live session hides its row.
-    if (closed && this.historyLoaded) void this.loadHistory(true);
+    // predate it. A reload also recomputes which rows the live list now hides. A workspace-scoped
+    // History lists the active session's workspace, so it follows the active session. Otherwise
+    // History only changes when a newly live session hides its row.
+    const stale = closed || (moved && this.historyScope === "workspace");
+    if (stale && this.historyLoaded) void this.loadHistory(true);
     else if (opened) this.renderHistory();
   }
 
@@ -336,7 +358,29 @@ export class Sidebar {
       this.pointerInside = false;
       this.renderLive();
     });
+    this.scopeButton.addEventListener("click", () => openMenu(this.scopeButton, (["repository", "workspace"] as const).map((scope) => ({
+      label: HISTORY_SCOPE_LABELS[scope],
+      checked: scope === this.historyScope,
+      run: () => this.setHistoryScope(scope),
+    })), "History scope"));
     void this.loadHistory(true);
+  }
+
+  private setHistoryScope(scope: HistoryScope) {
+    if (scope === this.historyScope) return;
+    this.historyScope = scope;
+    localStorage.setItem(HISTORY_SCOPE_KEY, scope);
+    this.renderScope();
+    void this.loadHistory(true);
+  }
+
+  private renderScope() {
+    const label = HISTORY_SCOPE_LABELS[this.historyScope];
+    this.scopeButton.querySelector(".history-scope-label")!.textContent = label;
+    this.scopeButton.setAttribute("aria-label", `History scope: ${label}`);
+    this.scopeButton.title = this.historyScope === "workspace"
+      ? "Showing sessions from this workspace only"
+      : "Showing sessions from every checkout of this repository";
   }
 
   private async activate(id: string) {
@@ -387,7 +431,7 @@ export class Sidebar {
     this.historyRequest = request;
     this.more.disabled = true;
     try {
-      const page = await this.host.api.query("history", { query: this.historyQuery, cursor: this.historyCursor });
+      const page = await this.host.api.query("history", { query: this.historyQuery, cursor: this.historyCursor, scope: this.historyScope });
       if (this.historyRequest !== request) return;
       this.historyLoaded = true;
       this.history = reset ? page.sessions : [...this.history, ...page.sessions];
@@ -414,7 +458,10 @@ export class Sidebar {
     if (rows.length > 0) {
       this.historyList.replaceChildren(...rows);
     } else if (this.historyLoaded) {
-      this.historyList.innerHTML = `<li class="list-empty">${this.historyQuery ? "No matches" : "No saved sessions"}</li>`;
+      const empty = this.historyQuery
+        ? "No matches"
+        : this.historyScope === "workspace" ? "No saved sessions in this workspace" : "No saved sessions";
+      this.historyList.innerHTML = `<li class="list-empty">${empty}</li>`;
     }
   }
 
