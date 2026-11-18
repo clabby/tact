@@ -2176,6 +2176,37 @@ fn dragging_over_the_transcript_copies_visible_text() {
 }
 
 #[test]
+fn clicking_a_reasoning_summary_toggles_it_without_starting_a_selection() {
+    let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+    root.update(super::RootEvent::Transcript(agent_record(
+        1,
+        AgentEventKind::ReasoningSummaryDelta,
+        json!({"model_call_index": 1, "text": "First step.\n\nSecond step."}),
+    )));
+    let summary = |root: &mut RootNode| {
+        render_root_text(root, 40, 14)
+            .lines()
+            .enumerate()
+            .find_map(|(row, line)| {
+                line.contains("∴ Reasoning")
+                    .then(|| (u16::try_from(row).unwrap(), line.trim_end().to_owned()))
+            })
+            .expect("reasoning summary should be visible")
+    };
+    assert_eq!(summary(&mut root).1, "  ▶ ∴ Reasoning  Second step.");
+
+    for expected in ["› ▼ ∴ Reasoning", "› ▶ ∴ Reasoning  Second step."] {
+        let (row, _) = summary(&mut root);
+        let down = root.update(mouse(MouseEventKind::Down(MouseButton::Left), 10, row));
+        assert!(!root.selection.is_pending());
+        let up = root.update(mouse(MouseEventKind::Up(MouseButton::Left), 10, row));
+
+        assert!(down.effects.is_empty() && up.effects.is_empty());
+        assert_eq!(summary(&mut root).1, expected);
+    }
+}
+
+#[test]
 fn transcript_selection_copies_code_source_without_rendered_borders() {
     let mut terminal = Terminal::new(TestBackend::new(40, 14)).unwrap();
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);

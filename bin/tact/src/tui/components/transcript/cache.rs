@@ -260,15 +260,15 @@ impl LayoutCache {
     }
 
     /// The text that selection offsets of `entry` index into, or `None` when
-    /// the entry has no selectable text.
+    /// the entry has no selectable text. Collapsed reasoning shows only a
+    /// preview, so its hidden text is not selectable.
     pub(super) fn selection_source<'a>(&'a self, entry: &'a TranscriptEntry) -> Option<&'a str> {
         self.entries
             .get(&entry.id)
             .and_then(|cached| cached.selection_source.as_deref())
             .or_else(|| match &entry.kind {
-                EntryKind::User { text, .. }
-                | EntryKind::Assistant { text, .. }
-                | EntryKind::Reasoning { text } => Some(text),
+                EntryKind::User { text, .. } | EntryKind::Assistant { text, .. } => Some(text),
+                EntryKind::Reasoning { text } if self.is_expanded(entry) => Some(text),
                 _ => None,
             })
     }

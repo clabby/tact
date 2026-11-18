@@ -158,7 +158,11 @@ impl HitMap {
         let exact_has_selections = !cache.selections(exact).is_empty();
         if !exact_has_selections && !across_entries {
             let entry = model.entry(exact.entry)?;
-            if matches!(entry.kind, EntryKind::Tool(_)) {
+            // Tool rows without selectable text and the reasoning summary row toggle
+            // expansion when clicked instead of starting a selection.
+            let reasoning_summary =
+                exact.line == 0 && matches!(entry.kind, EntryKind::Reasoning { .. });
+            if reasoning_summary || matches!(entry.kind, EntryKind::Tool(_)) {
                 return None;
             }
             cache.selection_source(entry)?;

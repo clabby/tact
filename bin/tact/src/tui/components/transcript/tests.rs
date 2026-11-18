@@ -12,6 +12,7 @@ use crate::{
         EffortChanged, EntryId, EntryKind, LocalEvent, ReflectionStarted, SessionStarted,
         SpeedChanged, TranscriptRecord, TurnId, UserSubmitted,
     },
+    tui::components::selection::{Selection, Surface, TextSpan},
 };
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1069,7 +1070,10 @@ fn commentary_and_reasoning_render_their_content_without_labels() {
         layout_text(&transcript, commentary),
         ["commentary body", ""]
     );
-    assert_eq!(layout_text(&transcript, reasoning), ["reasoning body", ""]);
+    assert_eq!(
+        layout_text(&transcript, reasoning),
+        ["  ▶ ∴ Reasoning  reasoning body", ""]
+    );
 }
 
 #[test]
@@ -1078,14 +1082,171 @@ fn adjacent_bold_reasoning_steps_render_on_separate_rows() {
         reasoning(1, "**Planning retrieval**"),
         reasoning(2, "**Confirming output**"),
     ]);
+    let reasoning = entry_id(&transcript, |kind| {
+        matches!(kind, EntryKind::Reasoning { .. })
+    });
+    transcript.cache.set_expanded(reasoning, true);
+    render(&mut transcript, 40, 6);
+
+    assert_eq!(
+        layout_text(&transcript, reasoning),
+        [
+            "  ▼ ∴ Reasoning",
+            "      Planning retrieval",
+            "      Confirming output",
+            "",
+        ]
+    );
+}
+
+#[test]
+fn collapsed_reasoning_previews_the_start_of_its_latest_line() {
+    let mut transcript = transcript_of([reasoning(
+        1,
+        "Reading the scheduler first.\n\nNow checking whether the deterministic runtime needs a shareable context.",
+    )]);
     render(&mut transcript, 40, 6);
     let reasoning = entry_id(&transcript, |kind| {
         matches!(kind, EntryKind::Reasoning { .. })
     });
 
+    assert!(!expanded(&transcript, reasoning));
     assert_eq!(
         layout_text(&transcript, reasoning),
-        ["Planning retrieval", "Confirming output", ""]
+        ["  ▶ ∴ Reasoning  Now checking whether …", ""]
+    );
+}
+
+#[test]
+fn streaming_reasoning_updates_one_row_at_the_bottom() {
+    let mut transcript = transcript_of([
+        user(1, numbered_lines("history", 12)),
+        reasoning(2, "Reading the scheduler."),
+    ]);
+    let reasoning_id = entry_id(&transcript, |kind| {
+        matches!(kind, EntryKind::Reasoning { .. })
+    });
+    let before = render(&mut transcript, 60, 8);
+    transcript.update(TranscriptEvent::Record(reasoning(
+        3,
+        "\n\nChecking the tests.",
+    )));
+    let after = render(&mut transcript, 60, 8);
+    let row = before.first_row(reasoning_id);
+
+    assert!(
+        !before.rows[0].is_empty(),
+        "history should fill the viewport"
+    );
+    assert_eq!(before.rows[row], "  ▶ ∴ Reasoning  Reading the scheduler.");
+    assert_eq!(after.first_row(reasoning_id), row);
+    assert_eq!(after.rows[row], "  ▶ ∴ Reasoning  Checking the tests.");
+    assert_eq!(before.rows[..row], after.rows[..row]);
+    assert!(after.rows[row + 1..].iter().all(String::is_empty));
+}
+
+#[test]
+fn streaming_reasoning_animates_its_icon_until_later_output_arrives() {
+    let mut transcript = transcript_of([
+        agent(1, AgentEventKind::RunStarted),
+        reasoning(2, "Reading the scheduler."),
+    ]);
+    let reasoning_id = entry_id(&transcript, |kind| {
+        matches!(kind, EntryKind::Reasoning { .. })
+    });
+    let icon = |screen: &Screen| {
+        let row = u16::try_from(screen.first_row(reasoning_id)).unwrap();
+        screen.buffer[(4, row)].symbol().to_owned()
+    };
+
+    let streaming = render(&mut transcript, 60, 8);
+    assert_eq!(icon(&streaming), "⠋");
+    assert!(transcript.animation_deadline().is_some());
+
+    transcript.update(TranscriptEvent::Record(tool_call(
+        3,
+        "call-3",
+        "exec_command",
+        shell_arguments(),
+    )));
+    let settled = render(&mut transcript, 60, 8);
+    assert_eq!(icon(&settled), "∴");
+}
+
+#[test]
+fn clicking_reasoning_expands_its_selectable_text_below_the_summary() {
+    let mut transcript = transcript_of([reasoning(1, "First step.\n\nSecond step.")]);
+    let reasoning = entry_id(&transcript, |kind| {
+        matches!(kind, EntryKind::Reasoning { .. })
+    });
+    let collapsed = render(&mut transcript, 40, 10);
+    let summary = u16::try_from(collapsed.first_row(reasoning)).unwrap();
+    assert_eq!(
+        collapsed.rows[usize::from(summary)],
+        "  ▶ ∴ Reasoning  Second step."
+    );
+
+    let command = transcript
+        .expandable_command(&mouse(MouseEventKind::Down(MouseButton::Left), 10, summary))
+        .unwrap();
+    transcript.update(TranscriptEvent::Expandable(command));
+    let opened = render(&mut transcript, 40, 10);
+    let body = u16::try_from(opened.first_row(reasoning) + 1).unwrap();
+
+    assert!(expanded(&transcript, reasoning));
+    assert_eq!(
+        layout_text(&transcript, reasoning),
+        [
+            "  ▼ ∴ Reasoning",
+            "      First step.",
+            "",
+            "      Second step.",
+            "",
+        ]
+    );
+    assert_eq!(
+        transcript.selection_span(Position::new(6, body)),
+        Some(TextSpan::new(reasoning.index(), 0, 1))
+    );
+}
+
+#[test]
+fn copying_across_collapsed_reasoning_omits_its_hidden_text() {
+    let mut transcript = transcript_of([
+        user(1, "before"),
+        reasoning(2, "hidden thought"),
+        assistant(3, "after"),
+    ]);
+    let prompt = user_id(&transcript, "before");
+    let answer = entry_id(&transcript, |kind| {
+        matches!(kind, EntryKind::Assistant { .. })
+    });
+    let screen = render(&mut transcript, 40, 12);
+    let row = |entry| u16::try_from(screen.first_row(entry)).unwrap();
+    let mut selection = Selection::default();
+    selection.begin(
+        Surface::Transcript,
+        transcript
+            .selection_span(Position::new(2, row(prompt)))
+            .unwrap(),
+    );
+    selection.drag(
+        transcript
+            .selection_span(Position::new(4, row(answer)))
+            .unwrap(),
+    );
+    let range = selection.range().unwrap();
+
+    assert_eq!(
+        transcript.selection_text(range).as_deref(),
+        Some("before\n\nafter")
+    );
+
+    transcript.update(TranscriptEvent::ToggleExpandAll);
+    render(&mut transcript, 40, 12);
+    assert_eq!(
+        transcript.selection_text(range).as_deref(),
+        Some("before\n\nhidden thought\n\nafter")
     );
 }
 
