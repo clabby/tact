@@ -2388,6 +2388,103 @@ fn transcript_selection_copies_original_markdown_syntax() {
 }
 
 #[test]
+fn transcript_selection_between_a_link_label_and_its_reference_destination_copies_the_link() {
+    let mut terminal = Terminal::new(TestBackend::new(64, 12)).unwrap();
+    let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+    root.update(super::RootEvent::Transcript(agent_record(
+        1,
+        AgentEventKind::AssistantMessage,
+        json!({
+            "model_call_index": 1,
+            "item_id": "answer",
+            "phase": "final_answer",
+            "text": "See [label][docs] for details.\n\n[docs]: https://example.com/dest",
+        }),
+    )));
+    terminal
+        .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let row = (0..buffer.area.height)
+        .find(|&row| {
+            (0..buffer.area.width)
+                .map(|column| buffer[(column, row)].symbol())
+                .collect::<String>()
+                .contains("label")
+        })
+        .expect("the link should be visible");
+    let label = text_column(buffer, row, "label");
+    let destination = text_column(buffer, row, "https://example.com/dest");
+
+    for (from, to) in [(label, destination), (destination, label)] {
+        root.update(mouse(MouseEventKind::Down(MouseButton::Left), from, row));
+        root.update(mouse(MouseEventKind::Drag(MouseButton::Left), to, row));
+        let update = root.update(mouse(MouseEventKind::Up(MouseButton::Left), to, row));
+
+        assert_eq!(
+            update.effects,
+            [RootEffect::Copy("[label][docs]".to_owned())],
+            "dragging from column {from} to column {to}"
+        );
+    }
+}
+
+#[test]
+fn transcript_selection_after_a_wrapped_table_copies_the_selected_line() {
+    let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
+    let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
+    let paragraph = "Pick the option that fits.";
+    let markdown = format!(
+        "| Approach | Tradeoff |\n|---|---|\n\
+         | keep every cached layout | uses more memory during long sessions |\n\
+         | rebuild layouts on demand | spends more time on each frame |\n\n{paragraph}"
+    );
+    root.update(super::RootEvent::Transcript(agent_record(
+        1,
+        AgentEventKind::AssistantMessage,
+        json!({
+            "model_call_index": 1,
+            "item_id": "answer",
+            "phase": "final_answer",
+            "text": markdown,
+        }),
+    )));
+    terminal
+        .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let row = (0..buffer.area.height)
+        .find(|&row| {
+            (0..buffer.area.width)
+                .map(|column| buffer[(column, row)].symbol())
+                .collect::<String>()
+                .contains(paragraph)
+        })
+        .expect("the paragraph after the table should be visible");
+    let start = text_column(buffer, row, paragraph);
+    let end = start + u16::try_from(paragraph.len()).unwrap() - 1;
+
+    root.update(mouse(MouseEventKind::Down(MouseButton::Left), start, row));
+    root.update(mouse(MouseEventKind::Drag(MouseButton::Left), end, row));
+    terminal
+        .draw(|frame| root.render(frame, frame.area(), &Theme::default()))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            assert_eq!(
+                buffer[(x, y)].bg == Color::Yellow,
+                y == row && (start..=end).contains(&x),
+                "highlight at ({x}, {y})"
+            );
+        }
+    }
+
+    let update = root.update(mouse(MouseEventKind::Up(MouseButton::Left), end, row));
+    assert_eq!(update.effects, [RootEffect::Copy(paragraph.to_owned())]);
+}
+
+#[test]
 fn transcript_selection_crosses_table_cell_boundaries() {
     let mut terminal = Terminal::new(TestBackend::new(40, 14)).unwrap();
     let mut root = RootNode::new(Path::new("/work"), ReasoningEffort::Medium);
